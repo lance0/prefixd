@@ -1253,7 +1253,7 @@ impl RepositoryTrait for MockRepository {
         let mut found: Vec<_> = mitigations
             .iter()
             .filter(|m| {
-                m.victim_ip == victim_ip
+                crate::domain::same_victim(&m.victim_ip, victim_ip)
                     && m.pop == pop
                     && m.is_active()
                     && from_source.contains(&m.triggering_event_id)

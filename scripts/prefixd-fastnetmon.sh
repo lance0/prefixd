@@ -1,14 +1,24 @@
 #!/bin/bash
-# FastNetMon Community → prefixd integration
+# FastNetMon Community -> prefixd integration, as an ingest client (ADR 034).
 # Install: cp prefixd-fastnetmon.sh /usr/local/bin/ && chmod +x /usr/local/bin/prefixd-fastnetmon.sh
 # Configure in /etc/fastnetmon.conf: notify_script_path = /usr/local/bin/prefixd-fastnetmon.sh
 #
 # Args from FastNetMon:
-#   $1 = victim IP address
+#   $1 = victim IP address (IPv6 may be zero-padded; prefixd stores it canonical)
 #   $2 = direction (incoming/outgoing)
 #   $3 = packets per second
 #   $4 = action (ban/unban)
-# Attack details come via stdin
+# A ban's attack details come on stdin. The victim always comes from $1: a
+# manual ban's stdin says "IP: 0.0.0.0" for an IPv6 victim.
+#
+# Both actions post an event to /v1/events under source "fastnetmon" with an
+# ingest token bound to that source. An unban names the victim; prefixd
+# withdraws the live mitigations fastnetmon created for it on that POP, so the
+# script keeps no state between ban and unban.
+#
+# Needs bash and curl only. The token is read from PREFIXD_TOKEN_FILE, or from
+# PREFIXD_TOKEN, and handed to curl in a config on stdin (curl -K -), never on
+# its command line.
 
 set -euo pipefail
 
@@ -20,15 +30,13 @@ if [[ -r "$PREFIXD_DEFAULTS_FILE" ]]; then
 fi
 
 PREFIXD_API="${PREFIXD_API:-http://localhost:8080}"
+PREFIXD_TOKEN_FILE="${PREFIXD_TOKEN_FILE:-}"
 PREFIXD_TOKEN="${PREFIXD_TOKEN:-}"
-PREFIXD_OPERATOR="${PREFIXD_OPERATOR:-fastnetmon}"
 LOG_FILE="${PREFIXD_LOG:-/var/log/prefixd-fastnetmon.log}"
-UNBAN_QUERY_RETRIES="${UNBAN_QUERY_RETRIES:-5}"
-UNBAN_QUERY_DELAY_SECONDS="${UNBAN_QUERY_DELAY_SECONDS:-1}"
-WITHDRAW_ATTEMPTS="${WITHDRAW_ATTEMPTS:-3}"
-WITHDRAW_DELAY_SECONDS="${WITHDRAW_DELAY_SECONDS:-1}"
-BAN_POST_ATTEMPTS="${BAN_POST_ATTEMPTS:-3}"
-BAN_POST_DELAY_SECONDS="${BAN_POST_DELAY_SECONDS:-1}"
+EVENT_POST_ATTEMPTS="${EVENT_POST_ATTEMPTS:-3}"
+EVENT_POST_DELAY_SECONDS="${EVENT_POST_DELAY_SECONDS:-1}"
+EVENT_CONNECT_TIMEOUT_SECONDS="${EVENT_CONNECT_TIMEOUT_SECONDS:-5}"
+EVENT_MAX_TIME_SECONDS="${EVENT_MAX_TIME_SECONDS:-15}"
 
 # Args
 IP="${1:-}"
@@ -45,305 +53,202 @@ if ! command -v curl &> /dev/null; then
     exit 1
 fi
 
-# Validate required args
 if [[ -z "$IP" ]]; then
     log "ERROR: No victim IP provided"
     exit 1
 fi
+# Only address characters reach the JSON body; prefixd validates the rest.
+if [[ ! "$IP" =~ ^[0-9A-Fa-f:.]+$ ]]; then
+    log "ERROR: victim IP has unexpected characters"
+    exit 1
+fi
+[[ "$PPS" =~ ^[0-9]+$ ]] || PPS=0
 
-if [[ -z "$PREFIXD_OPERATOR" ]]; then
-    log "ERROR: PREFIXD_OPERATOR must not be empty"
+for setting in EVENT_POST_ATTEMPTS EVENT_POST_DELAY_SECONDS EVENT_CONNECT_TIMEOUT_SECONDS EVENT_MAX_TIME_SECONDS; do
+    if [[ ! "${!setting}" =~ ^[0-9]+$ ]]; then
+        log "ERROR: $setting must be a whole number"
+        exit 1
+    fi
+done
+
+# The token file wins over the variable. Its value is never logged.
+TOKEN="$PREFIXD_TOKEN"
+if [[ -n "$PREFIXD_TOKEN_FILE" ]]; then
+    if [[ ! -r "$PREFIXD_TOKEN_FILE" ]]; then
+        log "ERROR: PREFIXD_TOKEN_FILE is not readable"
+        exit 1
+    fi
+    TOKEN=$(tr -d '[:space:]' < "$PREFIXD_TOKEN_FILE")
+fi
+# A token is prefixd_ and base64url; anything else could break the curl config.
+if [[ -n "$TOKEN" && ! "$TOKEN" =~ ^prefixd_[A-Za-z0-9_-]+$ ]]; then
+    log "ERROR: the token is malformed"
     exit 1
 fi
 
-# Read attack details from stdin (FastNetMon sends details here)
-RAW_DETAILS=""
-if [[ ! -t 0 ]]; then
-    RAW_DETAILS=$(cat)
-fi
-
-# Map FastNetMon action to prefixd action
 API_ACTION="ban"
 [[ "$ACTION" == "unban" ]] && API_ACTION="unban"
 
-# Build auth header args
-AUTH_ARGS=()
-if [[ -n "$PREFIXD_TOKEN" ]]; then
-    AUTH_ARGS+=(-H "Authorization: Bearer $PREFIXD_TOKEN")
-fi
-
-# Handle unban: query prefixd for the active mitigation, then withdraw it
-if [[ "$API_ACTION" == "unban" ]]; then
-    log "Querying active mitigations for $IP to withdraw"
-    ATTEMPT=1
-    MITIGATION_IDS=""
-    while [[ "$ATTEMPT" -le "$UNBAN_QUERY_RETRIES" ]]; do
-        RESPONSE=$(curl -sS -G -w "\n%{http_code}" \
-            "$PREFIXD_API/v1/mitigations" \
-            -H "Content-Type: application/json" \
-            --data-urlencode "status=pending,active,escalated" \
-            --data-urlencode "victim_ip=$IP" \
-            --data-urlencode "limit=1000" \
-            "${AUTH_ARGS[@]}" 2>&1) || RESPONSE=$(printf '\n000')
-
-        HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
-        BODY=$(printf '%s' "$RESPONSE" | sed '$d')
-
-        if [[ ( "$HTTP_CODE" == "000" || "$HTTP_CODE" == "503" ) && "$ATTEMPT" -lt "$UNBAN_QUERY_RETRIES" ]]; then
-            log "Unban lookup transport failure ($HTTP_CODE, attempt $ATTEMPT/$UNBAN_QUERY_RETRIES), retrying in ${UNBAN_QUERY_DELAY_SECONDS}s"
-            sleep "$UNBAN_QUERY_DELAY_SECONDS"
-            ATTEMPT=$((ATTEMPT + 1))
-            continue
-        fi
-
-        if [[ ! "$HTTP_CODE" =~ ^2 ]]; then
-            log "ERROR querying mitigations ($HTTP_CODE): $BODY"
-            exit 1
-        fi
-
-        if command -v jq &> /dev/null; then
-            MITIGATION_IDS=$(echo "$BODY" | jq -r '.mitigations[]?.mitigation_id // empty' 2>/dev/null || true)
-        elif command -v python3 &> /dev/null; then
-            MITIGATION_IDS=$(printf '%s' "$BODY" | python3 -c 'import json,sys; data=json.load(sys.stdin); print("\n".join(m.get("mitigation_id","") for m in data.get("mitigations", []) if m.get("mitigation_id")))' 2>/dev/null || true)
-        else
-            MITIGATION_IDS=$(echo "$BODY" | grep -oE '"mitigation_id"[[:space:]]*:[[:space:]]*"[^"]+"' | cut -d'"' -f4 || true)
-        fi
-
-        if [[ -n "$MITIGATION_IDS" ]]; then
-            break
-        fi
-
-        if [[ "$ATTEMPT" -lt "$UNBAN_QUERY_RETRIES" ]]; then
-            log "No active mitigations found for $IP (attempt $ATTEMPT/$UNBAN_QUERY_RETRIES), retrying in ${UNBAN_QUERY_DELAY_SECONDS}s"
-            sleep "$UNBAN_QUERY_DELAY_SECONDS"
-        fi
-        ATTEMPT=$((ATTEMPT + 1))
-    done
-
-    if [[ -z "$MITIGATION_IDS" ]]; then
-        log "No active mitigations found for $IP after $UNBAN_QUERY_RETRIES attempts, nothing to withdraw"
-        exit 0
-    fi
-
-    WITHDRAW_FAILED=0
-    for MID in $MITIGATION_IDS; do
-        REASON="FastNetMon unban for $IP (direction=$DIRECTION)"
-        if command -v jq &> /dev/null; then
-            W_PAYLOAD=$(jq -n --arg operator "$PREFIXD_OPERATOR" --arg reason "$REASON" '{"operator_id": $operator, "reason": $reason}')
-        elif command -v python3 &> /dev/null; then
-            W_PAYLOAD=$(python3 -c 'import json,sys; print(json.dumps({"operator_id": sys.argv[1], "reason": sys.argv[2]}))' "$PREFIXD_OPERATOR" "$REASON")
-        else
-            OP_ESCAPED=$(echo "$PREFIXD_OPERATOR" | sed 's/\\/\\\\/g; s/"/\\"/g')
-            REASON_ESCAPED=$(echo "$REASON" | sed 's/\\/\\\\/g; s/"/\\"/g')
-            W_PAYLOAD="{\"operator_id\":\"$OP_ESCAPED\",\"reason\":\"$REASON_ESCAPED\"}"
-        fi
-
-        W_ATTEMPT=1
-        while true; do
-            W_RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
-                "$PREFIXD_API/v1/mitigations/$MID/withdraw" \
-                -H "Content-Type: application/json" \
-                "${AUTH_ARGS[@]}" \
-                -d "$W_PAYLOAD" 2>&1) || W_RESPONSE=$(printf '\n000')
-
-            W_HTTP=$(echo "$W_RESPONSE" | tail -n1)
-            W_BODY=$(printf '%s' "$W_RESPONSE" | sed '$d')
-
-            if [[ "$W_HTTP" =~ ^2 ]]; then
-                log "SUCCESS: Withdrew mitigation $MID for $IP ($W_HTTP)"
-                break
-            fi
-            if [[ ( "$W_HTTP" == "000" || "$W_HTTP" == "503" ) && "$W_ATTEMPT" -lt "$WITHDRAW_ATTEMPTS" ]]; then
-                log "Withdrawal for $MID not delivered ($W_HTTP, attempt $W_ATTEMPT/$WITHDRAW_ATTEMPTS), retrying in ${WITHDRAW_DELAY_SECONDS}s"
-                sleep "$WITHDRAW_DELAY_SECONDS"
-                W_ATTEMPT=$((W_ATTEMPT + 1))
-                continue
-            fi
-            log "ERROR withdrawing $MID ($W_HTTP): $W_BODY"
-            WITHDRAW_FAILED=1
-            break
-        done
-    done
-
-    [[ "$WITHDRAW_FAILED" -eq 1 ]] && exit 1
-    exit 0
-fi
-
-# Handle ban: generate a unique event ID per occurrence
-EVENT_ID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen 2>/dev/null || python3 -c "import uuid; print(uuid.uuid4())")
-
-# Infer attack vector from raw details
-VECTOR="unknown"
-RAW_LOWER=$(printf '%s' "$RAW_DETAILS" | tr '[:upper:]' '[:lower:]')
-
-# FastNetMon lists every protocol it tracks, including idle ones (e.g.
-# "outgoing udp traffic: 0 mbps"). Lines reporting a zero metric carry no
-# attack signal, so drop them before matching -- otherwise a SYN flood whose
-# details also mention udp at 0 mbps was mislabelled as udp_flood. Details
-# without a metric (e.g. "attack type: syn_flood") always survive.
-ZERO_METRIC_RE='(^|[^0-9.])0+(\.0+)?[[:space:]]*(mbps|kbps|gbps|bps|pps|kpps|mpps|fps|flows|packets[[:space:]]+per[[:space:]]+second)([^[:alnum:]_]|$)'
-RAW_SIGNAL=$(printf '%s\n' "$RAW_LOWER" | grep -vE "$ZERO_METRIC_RE" || true)
-
-# Token boundaries keep "ack" out of "packets" and "attack_type" while
-# preserving "syn_flood"/"tcp_syn".
-has_token() {
-    grep -qE "(^|[^[:alnum:]])$1([^[:alnum:]]|\$)" <<< "$RAW_SIGNAL"
+# A JSON string body: backslash, quote and control characters escaped.
+json_escape() {
+    local s
+    s=$(printf '%s' "$1" | tr -d '\000-\010\013\014\016-\037\177')
+    s=${s//\\/\\\\}
+    s=${s//\"/\\\"}
+    s=${s//$'\n'/\\n}
+    s=${s//$'\r'/\\r}
+    s=${s//$'\t'/\\t}
+    printf '%s' "$s"
 }
 
-# FastNetMon's own verdict comes first: "Attack protocol: tcp|udp|icmp|unknown",
-# the protocol with the most packets toward the victim. Background SYN
-# counters or TCP ACK samples must not turn a UDP flood into a TCP rule.
-ATTACK_PROTOCOL=$(printf '%s\n' "$RAW_LOWER" | awk '/^attack protocol:/ { print $3; exit }' || true)
-case "$ATTACK_PROTOCOL" in
-    udp) VECTOR="udp_flood" ;;
-    icmp) VECTOR="icmp_flood" ;;
-    tcp)
-        if has_token syn; then
-            VECTOR="syn_flood"
-        elif has_token ack; then
-            VECTOR="ack_flood"
-        fi
-        ;;
-    # No usable protocol line: infer from tokens, TCP flags before udp.
-    *)
-        if has_token syn; then
-            VECTOR="syn_flood"
-        elif has_token ack; then
-            VECTOR="ack_flood"
-        elif has_token icmp; then
-            VECTOR="icmp_flood"
-        elif has_token udp; then
-            VECTOR="udp_flood"
-        fi
-        ;;
-esac
-
-# Reflector source ports (ADR 028). FastNetMon writes one line per sampled
-# packet between "Attack traffic dump" and "Flow dump", such as
-#   2026-10-19 12:00:00.000000 192.0.2.1:123 > 198.51.100.7:40000 protocol: udp frag: 0  packets: 1 size: 468 bytes ttl: 54 sample ratio: 1
-# Sum sampled UDP packets per source port and keep ports whose share is at
-# least PREFIXD_SRC_PORT_MIN_SHARE, ranked by share, at most 64. prefixd keeps
-# only ports in its reflector-port library. Any parse trouble leaves the
-# vector as udp_flood with no ports.
-SRC_PORTS=""
-if [[ "$VECTOR" == "udp_flood" ]]; then
-    SRC_PORTS=$(printf '%s\n' "$RAW_DETAILS" | awk -v share="${PREFIXD_SRC_PORT_MIN_SHARE:-0.2}" '
-        BEGIN { if (share !~ /^(0?\.[0-9]+|1(\.0*)?)$/ || share + 0 <= 0) exit 1 }
-        /^Attack traffic dump/ { dump = 1; next }
-        /^Flow dump/ { dump = 0 }
-        !dump { next }
-        {
-            src = ""; proto = ""; packets = ""
-            for (i = 2; i < NF; i++) {
-                if ($i == ">") src = $(i - 1)
-                else if ($i == "protocol:") proto = $(i + 1)
-                else if ($i == "packets:") packets = $(i + 1)
-            }
-            if (proto != "udp" || packets !~ /^[0-9]+$/) next
-            n = split(src, part, ":")
-            port = part[n]
-            if (n < 2 || port !~ /^[0-9]+$/ || port + 0 > 65535) next
-            count[port + 0] += packets
-            total += packets
-        }
-        END {
-            if (total <= 0) exit
-            for (port in count) if (count[port] >= share * total) print count[port], port
-        }' | sort -k1,1nr -k2,2n | head -n 64 | awk '{ printf "%s%s", sep, $2; sep = "," }') || SRC_PORTS=""
-    if [[ "$SRC_PORTS" =~ ^[0-9]+(,[0-9]+)*$ ]]; then
-        VECTOR="udp_amplification"
-    else
-        SRC_PORTS=""
+# The curl config on stdin: the Authorization header, when there is a token.
+curl_config() {
+    if [[ -n "$TOKEN" ]]; then
+        printf 'header = "Authorization: Bearer %s"\n' "$TOKEN"
     fi
-fi
+}
 
-# Build JSON payload. A Community ban carries the same 0.9 confidence as the
-# native FastNetMon JSON adapter's default ban mapping. /v1/events does not
-# apply that mapping itself; omitted confidence counts as zero in correlation.
+EVENT_ID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen 2>/dev/null || true)
+if [[ -z "$EVENT_ID" ]]; then
+    EVENT_ID=$(od -An -tx1 -N16 /dev/urandom | tr -d ' \n' \
+        | sed -E 's/^(.{8})(.{4})(.{4})(.{4})(.{12})$/\1-\2-\3-\4-\5/')
+fi
 TIMESTAMP=$(date -u +%FT%TZ)
+VECTOR="unknown"
+SRC_PORTS=""
+RAW_DETAILS=""
 
-if command -v jq &> /dev/null; then
-    PAYLOAD=$(jq -n \
-        --arg event_id "$EVENT_ID" \
-        --arg timestamp "$TIMESTAMP" \
-        --arg source "fastnetmon" \
-        --arg victim_ip "$IP" \
-        --arg vector "$VECTOR" \
-        --arg action "$API_ACTION" \
-        --argjson pps "${PPS:-0}" \
-        --arg raw "$RAW_DETAILS" \
-        --arg direction "$DIRECTION" \
-        --arg src_ports "$SRC_PORTS" \
-        '{
-            event_id: $event_id,
-            timestamp: $timestamp,
-            source: $source,
-            victim_ip: $victim_ip,
-            vector: $vector,
-            action: $action,
-            pps: $pps,
-            confidence: 0.9,
-            raw_details: {
-                raw: $raw,
-                direction: $direction,
-                original_action: $action
-            }
-        } + (if $src_ports == "" then {} else {top_src_ports: ($src_ports | split(",") | map(tonumber))} end)')
-else
-    # Fallback: manual JSON construction (escape raw details)
-    RAW_ESCAPED=$(echo "$RAW_DETAILS" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\n/\\n/g' | tr '\n' ' ')
-    SRC_PORTS_FIELD=""
-    [[ -n "$SRC_PORTS" ]] && SRC_PORTS_FIELD="\"top_src_ports\": [$SRC_PORTS],"
-    PAYLOAD=$(cat <<EOF
-{
-    "event_id": "$EVENT_ID",
-    "timestamp": "$TIMESTAMP",
-    "source": "fastnetmon",
-    "victim_ip": "$IP",
-    "vector": "$VECTOR",
-    $SRC_PORTS_FIELD
-    "action": "$API_ACTION",
-    "pps": ${PPS:-0},
-    "confidence": 0.9,
-    "raw_details": {
-        "raw": "$RAW_ESCAPED",
-        "direction": "$DIRECTION"
+if [[ "$API_ACTION" == "ban" ]]; then
+    # Attack details come on stdin for a ban only; an unban gets none.
+    if [[ ! -t 0 ]]; then
+        RAW_DETAILS=$(cat)
+    fi
+
+    # Infer attack vector from raw details
+    RAW_LOWER=$(printf '%s' "$RAW_DETAILS" | tr '[:upper:]' '[:lower:]')
+
+    # FastNetMon lists every protocol it tracks, including idle ones (e.g.
+    # "outgoing udp traffic: 0 mbps"). Lines reporting a zero metric carry no
+    # attack signal, so drop them before matching -- otherwise a SYN flood whose
+    # details also mention udp at 0 mbps was mislabelled as udp_flood. Details
+    # without a metric (e.g. "attack type: syn_flood") always survive.
+    ZERO_METRIC_RE='(^|[^0-9.])0+(\.0+)?[[:space:]]*(mbps|kbps|gbps|bps|pps|kpps|mpps|fps|flows|packets[[:space:]]+per[[:space:]]+second)([^[:alnum:]_]|$)'
+    RAW_SIGNAL=$(printf '%s\n' "$RAW_LOWER" | grep -vE "$ZERO_METRIC_RE" || true)
+
+    # Token boundaries keep "ack" out of "packets" and "attack_type" while
+    # preserving "syn_flood"/"tcp_syn".
+    has_token() {
+        grep -qE "(^|[^[:alnum:]])$1([^[:alnum:]]|\$)" <<< "$RAW_SIGNAL"
     }
-}
-EOF
-)
+
+    # FastNetMon's own verdict comes first: "Attack protocol: tcp|udp|icmp|unknown",
+    # the protocol with the most packets toward the victim. Background SYN
+    # counters or TCP ACK samples must not turn a UDP flood into a TCP rule.
+    ATTACK_PROTOCOL=$(printf '%s\n' "$RAW_LOWER" | awk '/^attack protocol:/ { print $3; exit }' || true)
+    case "$ATTACK_PROTOCOL" in
+        udp) VECTOR="udp_flood" ;;
+        icmp) VECTOR="icmp_flood" ;;
+        tcp)
+            if has_token syn; then
+                VECTOR="syn_flood"
+            elif has_token ack; then
+                VECTOR="ack_flood"
+            fi
+            ;;
+        # No usable protocol line: infer from tokens, TCP flags before udp.
+        *)
+            if has_token syn; then
+                VECTOR="syn_flood"
+            elif has_token ack; then
+                VECTOR="ack_flood"
+            elif has_token icmp; then
+                VECTOR="icmp_flood"
+            elif has_token udp; then
+                VECTOR="udp_flood"
+            fi
+            ;;
+    esac
+
+    # Reflector source ports (ADR 028). FastNetMon writes one line per sampled
+    # packet between "Attack traffic dump" and "Flow dump", such as
+    #   2026-10-19 12:00:00.000000 192.0.2.1:123 > 198.51.100.7:40000 protocol: udp frag: 0  packets: 1 size: 468 bytes ttl: 54 sample ratio: 1
+    # Sum sampled UDP packets per source port and keep ports whose share is at
+    # least PREFIXD_SRC_PORT_MIN_SHARE, ranked by share, at most 64. prefixd keeps
+    # only ports in its reflector-port library. Any parse trouble leaves the
+    # vector as udp_flood with no ports.
+    if [[ "$VECTOR" == "udp_flood" ]]; then
+        SRC_PORTS=$(printf '%s\n' "$RAW_DETAILS" | awk -v share="${PREFIXD_SRC_PORT_MIN_SHARE:-0.2}" '
+            BEGIN { if (share !~ /^(0?\.[0-9]+|1(\.0*)?)$/ || share + 0 <= 0) exit 1 }
+            /^Attack traffic dump/ { dump = 1; next }
+            /^Flow dump/ { dump = 0 }
+            !dump { next }
+            {
+                src = ""; proto = ""; packets = ""
+                for (i = 2; i < NF; i++) {
+                    if ($i == ">") src = $(i - 1)
+                    else if ($i == "protocol:") proto = $(i + 1)
+                    else if ($i == "packets:") packets = $(i + 1)
+                }
+                if (proto != "udp" || packets !~ /^[0-9]+$/) next
+                n = split(src, part, ":")
+                port = part[n]
+                if (n < 2 || port !~ /^[0-9]+$/ || port + 0 > 65535) next
+                count[port + 0] += packets
+                total += packets
+            }
+            END {
+                if (total <= 0) exit
+                for (port in count) if (count[port] >= share * total) print count[port], port
+            }' | sort -k1,1nr -k2,2n | head -n 64 | awk '{ printf "%s%s", sep, $2; sep = "," }') || SRC_PORTS=""
+        if [[ "$SRC_PORTS" =~ ^[0-9]+(,[0-9]+)*$ ]]; then
+            VECTOR="udp_amplification"
+        else
+            SRC_PORTS=""
+        fi
+    fi
 fi
 
-# Send to prefixd
+# A Community ban carries the same 0.9 confidence as the native FastNetMon
+# JSON adapter's default ban mapping. /v1/events does not apply that mapping
+# itself; omitted confidence counts as zero in correlation.
+if [[ "$API_ACTION" == "ban" ]]; then
+    SRC_PORTS_FIELD=""
+    [[ -n "$SRC_PORTS" ]] && SRC_PORTS_FIELD="\"top_src_ports\":[$SRC_PORTS],"
+    PAYLOAD="{\"event_id\":\"$EVENT_ID\",\"timestamp\":\"$TIMESTAMP\",\"source\":\"fastnetmon\",\
+\"victim_ip\":\"$IP\",\"vector\":\"$VECTOR\",$SRC_PORTS_FIELD\"action\":\"ban\",\"pps\":$PPS,\
+\"confidence\":0.9,\"raw_details\":{\"raw\":\"$(json_escape "$RAW_DETAILS")\",\
+\"direction\":\"$(json_escape "$DIRECTION")\"}}"
+else
+    PAYLOAD="{\"event_id\":\"$EVENT_ID\",\"timestamp\":\"$TIMESTAMP\",\"source\":\"fastnetmon\",\
+\"victim_ip\":\"$IP\",\"vector\":\"unknown\",\"action\":\"unban\",\"pps\":$PPS,\
+\"raw_details\":{\"direction\":\"$(json_escape "$DIRECTION")\"}}"
+fi
+
 log "Sending $API_ACTION for $IP ($VECTOR, ${PPS} pps, event_id=$EVENT_ID)"
 
-# FastNetMon calls ban once. Retry the same event (same event_id) only when it
-# never reached prefixd or a standby or draining controller refused it with 503.
-# Any 4xx is final: 409 means this event ID already arrived.
+# FastNetMon runs the script once per ban and once per unban and never repeats
+# it. Retry the same event (same event_id) only when it never reached prefixd
+# or a standby or draining controller answered 503; any 4xx is final. Each
+# attempt is bounded by the connect and total timeouts.
 ATTEMPT=1
 while true; do
     CURL_STATUS=0
-    RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$PREFIXD_API/v1/events" \
+    RESPONSE=$(curl_config | curl -sS -K - -w "\n%{http_code}" \
+        --connect-timeout "$EVENT_CONNECT_TIMEOUT_SECONDS" \
+        --max-time "$EVENT_MAX_TIME_SECONDS" \
+        -X POST "$PREFIXD_API/v1/events" \
         -H "Content-Type: application/json" \
-        "${AUTH_ARGS[@]}" \
-        -d "$PAYLOAD" 2>&1) || CURL_STATUS=$?
+        --data-binary "$PAYLOAD" 2>&1) || CURL_STATUS=$?
 
-    HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+    HTTP_CODE=$(printf '%s\n' "$RESPONSE" | tail -n1)
     BODY=$(printf '%s' "$RESPONSE" | sed '$d')
 
     if [[ "$CURL_STATUS" -eq 0 && "$HTTP_CODE" =~ ^2 ]]; then
-        # A 2xx only proves the event was accepted. prefixd records events
-        # before ownership, correlation and playbook gates, and those gates
-        # answer 202 without a mitigation. Surface that instead of SUCCESS.
-        STATUS=""
-        MITIGATION_ID=""
-        if command -v jq &> /dev/null; then
-            STATUS=$(printf '%s' "$BODY" | jq -r '.status // empty' 2>/dev/null || true)
-            MITIGATION_ID=$(printf '%s' "$BODY" | jq -r '.mitigation_id // empty' 2>/dev/null || true)
-        else
-            STATUS=$(printf '%s' "$BODY" | grep -oE '"status"[[:space:]]*:[[:space:]]*"[^"]+"' | head -n 1 | cut -d'"' -f4 || true)
-            MITIGATION_ID=$(printf '%s' "$BODY" | grep -oE '"mitigation_id"[[:space:]]*:[[:space:]]*"[^"]+"' | head -n 1 | cut -d'"' -f4 || true)
-        fi
+        # A 2xx only proves the event was accepted. A ban can be recorded
+        # without a mitigation (ownership, correlation, playbooks), and an
+        # unban can find nothing live to withdraw; both say so in `status`.
+        STATUS=$(printf '%s' "$BODY" | grep -oE '"status"[[:space:]]*:[[:space:]]*"[^"]+"' | head -n 1 | cut -d'"' -f4 || true)
+        MITIGATION_ID=$(printf '%s' "$BODY" | grep -oE '"mitigation_id"[[:space:]]*:[[:space:]]*"[^"]+"' | head -n 1 | cut -d'"' -f4 || true)
         if [[ -z "$MITIGATION_ID" ]]; then
             log "NO_MITIGATION ($HTTP_CODE, status=${STATUS:-unknown}): $BODY"
             exit 0
@@ -351,9 +256,9 @@ while true; do
         log "SUCCESS ($HTTP_CODE, status=${STATUS:-unknown}): $BODY"
         exit 0
     fi
-    if [[ ( "$CURL_STATUS" -ne 0 || "$HTTP_CODE" == "503" ) && "$ATTEMPT" -lt "$BAN_POST_ATTEMPTS" ]]; then
-        log "Ban for $IP not accepted (curl=$CURL_STATUS, http=$HTTP_CODE), attempt $ATTEMPT/$BAN_POST_ATTEMPTS; retrying in ${BAN_POST_DELAY_SECONDS}s"
-        sleep "$BAN_POST_DELAY_SECONDS"
+    if [[ ( "$CURL_STATUS" -ne 0 || "$HTTP_CODE" == "503" ) && "$ATTEMPT" -lt "$EVENT_POST_ATTEMPTS" ]]; then
+        log "${API_ACTION^} for $IP not accepted (curl=$CURL_STATUS, http=$HTTP_CODE), attempt $ATTEMPT/$EVENT_POST_ATTEMPTS; retrying in ${EVENT_POST_DELAY_SECONDS}s"
+        sleep "$EVENT_POST_DELAY_SECONDS"
         ATTEMPT=$((ATTEMPT + 1))
         continue
     fi

@@ -17,8 +17,13 @@ SENT = (
 )
 ACCEPTED = f'SUCCESS (202, status=accepted): {{"status":"accepted","mitigation_id":"{MID}"}}'
 RETRY = "Ban for 203.0.113.10 not accepted (curl=7, http=000), attempt 1/3; retrying in 1s"
-QUERY = "Querying active mitigations for 203.0.113.10 to withdraw"
-WITHDREW = f"SUCCESS: Withdrew mitigation {MID} for 203.0.113.10 (200)"
+UNBAN = (
+    "Sending unban for 203.0.113.10 (unknown, 0 pps, event_id=7d0c2c11-3a0e-4f7e-9f61-0a7a3f0c1d22)"
+)
+WITHDREW = (
+    f'SUCCESS (202, status=withdrawn): {{"status":"withdrawn","mitigation_id":"{MID}",'
+    f'"mitigation_ids":["{MID}"]}}'
+)
 
 
 class ScriptLogTests(unittest.TestCase):
@@ -52,7 +57,7 @@ class ScriptLogTests(unittest.TestCase):
                     "SUCCESS",
                 )
         # Checks that fail before the script sends end the call at once.
-        for line in ("ERROR: curl is required", "ERROR: PREFIXD_OPERATOR must not be empty"):
+        for line in ("ERROR: curl is required", "ERROR: the token is malformed"):
             with self.subTest(line=line):
                 self.assertEqual(
                     self.outcome(ban_outcome, [line], "203.0.113.10")["result"], "ERROR"
@@ -67,21 +72,23 @@ class ScriptLogTests(unittest.TestCase):
         self.assertIsNone(ban_outcome([SENT, ACCEPTED], "203.0.113.1"))
 
     def test_unban(self):
-        self.assertEqual(
-            self.outcome(unban_outcome, [QUERY, WITHDREW], "203.0.113.10")["mitigation_ids"], [MID]
-        )
-        self.assertIsNone(unban_outcome([QUERY], "203.0.113.10"))
+        got = self.outcome(unban_outcome, [UNBAN, WITHDREW], "203.0.113.10")
+        self.assertEqual((got["result"], got["mitigation_ids"]), ("WITHDRAWN", [MID]))
+        self.assertIsNone(unban_outcome([UNBAN], "203.0.113.10"))
         nothing = (
-            "No active mitigations found for 203.0.113.10 after 5 attempts, nothing to withdraw"
+            'NO_MITIGATION (202, status=no_active_mitigation): {"status":"no_active_mitigation",'
+            '"mitigation_id":null,"mitigation_ids":[]}'
         )
         self.assertEqual(
-            self.outcome(unban_outcome, [QUERY, nothing], "203.0.113.10")["result"], "NOTHING_FOUND"
+            self.outcome(unban_outcome, [UNBAN, nothing], "203.0.113.10")["result"], "NOTHING_FOUND"
         )
-        failed = f"ERROR withdrawing {MID} (500): boom"
+        failed = 'ERROR (403, curl=0): {"error":"forbidden"}'
         self.assertEqual(
-            self.outcome(unban_outcome, [QUERY, failed], "203.0.113.10")["result"], "ERROR"
+            self.outcome(unban_outcome, [UNBAN, failed], "203.0.113.10")["result"], "ERROR"
         )
-        self.assertIsNone(unban_outcome([WITHDREW], "203.0.113.10"), "no query, no outcome")
+        # A ban's log lines are not this unban's outcome.
+        self.assertIsNone(unban_outcome([SENT, ACCEPTED], "203.0.113.10"))
+        self.assertIsNone(unban_outcome([WITHDREW], "203.0.113.10"), "no send, no outcome")
 
 
 class BanTimeTests(unittest.TestCase):

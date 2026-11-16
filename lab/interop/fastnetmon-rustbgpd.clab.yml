@@ -80,6 +80,7 @@ topology:
         - configs/fastnetmon-networks:/etc/networks_list:ro
         - ../../scripts/prefixd-fastnetmon.sh:/usr/local/bin/prefixd-fastnetmon.sh:ro
         - .run/prefixd-fnm/fastnetmon.defaults:/etc/default/prefixd:ro
+        - .run/prefixd-fnm/fastnetmon.token:/etc/prefixd/fastnetmon.token:ro
 
     frr:
       kind: linux

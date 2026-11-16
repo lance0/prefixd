@@ -67,39 +67,45 @@ finish() {
     exit "$status"
 }
 
-# The one place the lane's detector credential is decided. Both files exist
-# before deploy so their bind mounts resolve; mint_credentials fills them in
+# The one place the lane's detector credential is decided. Every file exists
+# before deploy so its bind mount resolves; mint_credentials fills them in
 # place once the controller has applied its migrations.
 ingest_credential() {
-    write_defaults ""
-    chmod 0644 "$run/fastnetmon.defaults"
-    : >"$run/api.token"
-}
-write_defaults() {
     {
         printf 'PREFIXD_API=http://127.0.0.1:8080\n'
-        printf 'PREFIXD_TOKEN=%s\n' "$1"
+        printf 'PREFIXD_TOKEN_FILE=/etc/prefixd/fastnetmon.token\n'
         printf 'PREFIXD_LOG=/var/log/prefixd-fastnetmon.log\n'
     } >"$run/fastnetmon.defaults"
+    chmod 0644 "$run/fastnetmon.defaults"
+    # FastNetMon runs the script as root in this image; 0444 lets the
+    # bind-mounted file be read whatever the container's user mapping.
+    : >"$run/fastnetmon.token"
+    chmod 0444 "$run/fastnetmon.token"
+    : >"$run/api.token"
+    : >"$run/wrong.token"
 }
-# The bundled script's unban still reads and withdraws mitigations, which an
-# ingest token cannot do, so it holds an operator token until unban by event
-# lands; the driver holds its own operator token. Both join lab_secrets, which
-# finish() checks the receipt against. A create fails until migration 022 ran.
+# The bundled script holds an ingest token bound to fastnetmon, read from a
+# token file. The driver holds an operator token for reads, and an ingest token
+# bound to another source for the negative control. Each joins lab_secrets,
+# which finish() checks the receipt against. A create fails until migration
+# 022 ran.
 mint_credentials() {
-    local script_token="" driver_token=""
+    local script_token="" driver_token="" wrong_token=""
     for _ in $(seq 60); do
         script_token="$(docker exec "$(node controller)" prefixdctl tokens create \
-            --name fnm-script --scope operator 2>/dev/null)" && break
+            --name fnm-script --scope ingest --source fastnetmon 2>/dev/null)" && break
         sleep 1
     done
     [ -n "$script_token" ] || { echo "could not mint the script token" >&2; exit 1; }
     driver_token="$(docker exec "$(node controller)" prefixdctl tokens create \
         --name fnm-driver --scope operator)"
-    lab_secrets+=("$script_token" "$driver_token")
+    wrong_token="$(docker exec "$(node controller)" prefixdctl tokens create \
+        --name fnm-wrong-source --scope ingest --source radware)"
+    lab_secrets+=("$script_token" "$driver_token" "$wrong_token")
     # In place, so the bind-mounted files keep their inodes.
-    write_defaults "$script_token"
+    printf '%s\n' "$script_token" >"$run/fastnetmon.token"
     printf '%s\n' "$driver_token" >"$run/api.token"
+    printf '%s\n' "$wrong_token" >"$run/wrong.token"
 }
 
 destroy
@@ -162,6 +168,7 @@ python3 -I lab/interop/fastnetmon_frr.py \
     --speaker rustbgpd \
     --api "http://$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$(node postgres)"):8080" \
     --token-file "$run/api.token" \
+    --wrong-token-file "$run/wrong.token" \
     --frr "$(node frr)" \
     --speaker-container "$(node speaker)" \
     --fastnetmon "$(node fastnetmon)" \

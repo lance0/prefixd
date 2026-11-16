@@ -1108,7 +1108,8 @@ impl RepositoryTrait for Repository {
                    m.origin_mode
             FROM mitigations m
             JOIN events e ON e.event_id = m.triggering_event_id
-            WHERE m.victim_ip = $1 AND m.pop = $2 AND e.source = $3
+            WHERE (m.victim_ip = $1 OR prefixd_victim_inet(m.victim_ip) = ANY($4::inet[]))
+              AND m.pop = $2 AND e.source = $3
               AND m.status IN ('active', 'escalated')
             ORDER BY m.created_at, m.mitigation_id
             "#,
@@ -1116,6 +1117,7 @@ impl RepositoryTrait for Repository {
         .bind(victim_ip)
         .bind(pop)
         .bind(source)
+        .bind(crate::domain::victim_lookup_keys(victim_ip))
         .fetch_all(&self.pool)
         .await?;
         rows.into_iter().map(Mitigation::from_row).collect()

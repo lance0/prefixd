@@ -266,7 +266,7 @@ pub trait RepositoryTrait: Send + Sync {
     async fn get_mitigation(&self, id: Uuid) -> Result<Option<Mitigation>>;
     async fn find_active_by_scope(&self, scope_hash: &str, pop: &str)
     -> Result<Option<Mitigation>>;
-    /// Live mitigations for `victim_ip` (canonical) on `pop` whose triggering
+    /// Live mitigations for any spelling of `victim_ip` on `pop` whose triggering
     /// event came from `source`, oldest first: what a detector unban withdraws.
     /// Manual mitigations have no triggering event and never match.
     async fn list_live_by_victim_and_source(
