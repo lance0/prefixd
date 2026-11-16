@@ -249,7 +249,7 @@ expected old target UUID, normalized new backend/endpoint and operator name.
 Use `gobgp` for either GoBGP mode spelling and an explicit HTTP(S) URL with the
 trailing `/` for an endpoint without a path. Use the same address in the new
 configuration. The block is one transaction and takes the same registration lock
-as startup. It rejects active/pending mitigations, pending cleanup, unadopted
+as startup. It rejects live mitigations, pending cleanup, unadopted
 legacy requests, legacy announcement rows that are not withdrawn and another
 POP's assigned target.
 
@@ -270,7 +270,7 @@ BEGIN
         RAISE EXCEPTION 'original speaker binding changed or is missing';
     END IF;
     IF EXISTS (SELECT 1 FROM mitigations WHERE pop = transfer_pop
-               AND status IN ('pending', 'active', 'escalated'))
+               AND status IN ('active', 'escalated'))
        OR EXISTS (SELECT 1 FROM withdrawal_requests WHERE pop = transfer_pop
                   AND (completed_at IS NULL OR target_id IS NULL))
        OR EXISTS (SELECT 1 FROM flowspec_announcements WHERE pop = transfer_pop
@@ -517,7 +517,7 @@ creation and withdraw every live source-prefix rule using the current binary:
 ```sql
 SELECT mitigation_id, pop, victim_ip
 FROM mitigations
-WHERE status IN ('pending', 'active', 'escalated')
+WHERE status IN ('active', 'escalated')
   AND match_json::jsonb ->> 'src_prefix' IS NOT NULL;
 ```
 
@@ -564,7 +564,7 @@ Before downgrading to 0.20.0 or earlier:
    ```sql
    SELECT mitigation_id, pop, victim_ip
    FROM mitigations
-   WHERE status IN ('pending', 'active', 'escalated')
+   WHERE status IN ('active', 'escalated')
      AND match_json::jsonb ?| array['src_ports', 'fragment', 'packet_length'];
    ```
 
@@ -604,7 +604,7 @@ the original speaker target. Both queries must return no rows:
 ```sql
 SELECT mitigation_id, pop, victim_ip
 FROM mitigations
-WHERE status IN ('pending', 'active', 'escalated')
+WHERE status IN ('active', 'escalated')
   AND match_json::jsonb ? 'tcp_flags';
 
 SELECT pop, count(*) AS pending
@@ -1083,11 +1083,13 @@ The refusal only protects binaries that carry it. A 0.27.0 or older controller
 has no check and runs against whatever schema it finds, so it is not a downgrade
 boundary for those releases.
 
-Version skew matters only across a release that adds a migration. No release
-after 0.27.0 has added one yet: migration 020 is still the latest, so a
+Version skew matters only across a release that adds a migration. The release
+after 0.27.0 adds migration 021, which only narrows the unique scope index
+`idx_mitigations_active_scope` to `active` and `escalated` rows. It cannot fail
+on existing data, and 0.27.0 runs unchanged against it, so a
 [rolling replacement](#controller-fence-and-rolling-deploys) from 0.27.0, with
-the new controller waiting in standby, is unaffected. For a release that adds a
-migration:
+the new controller waiting in standby, is safe, and so is starting 0.27.0 again.
+For any other release that adds a migration:
 
 - The first upgraded controller to start migrates the database, even in
   standby, and older controllers on that database, including the active one,

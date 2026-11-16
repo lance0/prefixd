@@ -864,6 +864,7 @@ async fn fresh_safelist_prevents_repair_and_ordinary_admission_conflicts() {
         AttackVector::Unknown,
     );
     ordinary.origin_mode = Some(OperationMode::Enforced);
+    ordinary.activate();
     assert!(
         repo.admit_mitigation(
             &ordinary,

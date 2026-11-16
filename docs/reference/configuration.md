@@ -216,7 +216,7 @@ key back to `true` to recover. To turn the lease off:
 
    ```sql
    SELECT mitigation_id FROM mitigations
-   WHERE status IN ('pending', 'active', 'escalated')
+   WHERE status IN ('active', 'escalated')
      AND action_type <> 'blackhole'
      AND action_params_json::jsonb ->> 'injection_owner' <> '';
    ```

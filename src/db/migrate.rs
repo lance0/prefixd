@@ -121,6 +121,11 @@ pub const MIGRATIONS: &[(i32, &str, &str)] = &[
         "event_outcomes",
         include_str!("../../migrations/020_event_outcomes.sql"),
     ),
+    (
+        21,
+        "live_scope_index",
+        include_str!("../../migrations/021_live_scope_index.sql"),
+    ),
 ];
 
 /// The highest version this binary knows. A database recording a higher

@@ -329,6 +329,13 @@ async fn live_intent_is_exactly_active_and_escalated() {
         .await
         .unwrap();
 
+    let rows = || async {
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM mitigations")
+            .fetch_one(&ctx.pool)
+            .await
+            .unwrap()
+    };
+
     // A stored pending row is not withdrawable and stays untouched.
     sqlx::query("UPDATE mitigations SET status = 'pending'")
         .execute(&ctx.pool)
@@ -339,25 +346,84 @@ async fn live_intent_is_exactly_active_and_escalated() {
     let row = ctx.repo.get_mitigation(id).await.unwrap().unwrap();
     assert_eq!(row.status, MitigationStatus::Pending);
     assert!(ctx.repo.pending_withdrawals(None).await.unwrap().is_empty());
-    // The unique scope index from migration 001 still covers `pending`, so the
-    // row keeps its scope: a new admission for it fails rather than duplicating.
-    let response = app.clone().oneshot(event()).await.unwrap();
-    assert!(response.status().is_server_error(), "{}", response.status());
-    let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mitigations")
-        .fetch_one(&ctx.pool)
-        .await
-        .unwrap();
-    assert_eq!(rows, 1);
 
-    // Control: the same row as active withdraws normally.
+    // Control: the same row as active is extended by the same signal, not
+    // duplicated.
     sqlx::query("UPDATE mitigations SET status = 'active'")
         .execute(&ctx.pool)
         .await
         .unwrap();
-    let response = app.oneshot(withdraw(id)).await.unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
+    let response = app.clone().oneshot(event()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert_eq!(rows().await, 1);
+
+    // A stored pending row does not hold its scope: the same signal admits a
+    // new active row beside it.
+    sqlx::query("UPDATE mitigations SET status = 'pending'")
+        .execute(&ctx.pool)
+        .await
+        .unwrap();
+    let response = app.clone().oneshot(event()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert_eq!(rows().await, 2);
+    let fresh: uuid::Uuid =
+        sqlx::query_scalar("SELECT mitigation_id FROM mitigations WHERE status = 'active'")
+            .fetch_one(&ctx.pool)
+            .await
+            .unwrap();
+    assert_ne!(fresh, id);
     let row = ctx.repo.get_mitigation(id).await.unwrap().unwrap();
+    assert_eq!(row.status, MitigationStatus::Pending);
+
+    // Control: the active row withdraws normally.
+    let response = app.oneshot(withdraw(fresh)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let row = ctx.repo.get_mitigation(fresh).await.unwrap().unwrap();
     assert_eq!(row.status, MitigationStatus::Withdrawn);
+}
+
+#[tokio::test]
+async fn admission_refuses_a_never_activated_mitigation() {
+    // `from_intent` starts at `pending`; only `activate()` makes a row
+    // admissible. Both repositories refuse the row and persist nothing.
+    let context = TestContext::new().await;
+    let mock: std::sync::Arc<dyn prefixd::db::RepositoryTrait> =
+        std::sync::Arc::new(prefixd::db::MockRepository::new());
+    for repo in [&context.repo, &mock] {
+        let mut row = inventory_mitigation(
+            "203.0.113.30/32",
+            "test-pop",
+            chrono::Utc::now(),
+            MitigationStatus::Pending,
+        );
+        let quotas = common::test_settings().quotas;
+        let error = repo
+            .admit_mitigation(&row, &quotas, &Default::default(), &fixture_actor())
+            .await
+            .expect_err("a pending row is refused");
+        assert!(
+            matches!(error, prefixd::error::PrefixdError::Internal(_)),
+            "{error}"
+        );
+        assert!(
+            repo.get_mitigation(row.mitigation_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        // Control: the same row once activated is admitted.
+        row.activate();
+        repo.admit_mitigation(&row, &quotas, &Default::default(), &fixture_actor())
+            .await
+            .expect("an active row is admitted");
+        assert!(
+            repo.get_mitigation(row.mitigation_id)
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
 }
 
 #[tokio::test]

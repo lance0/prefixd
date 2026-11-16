@@ -822,6 +822,12 @@ impl RepositoryTrait for MockRepository {
         blackhole: &crate::config::BlackholeConfig,
         actor: &crate::observability::CreationActor,
     ) -> Result<()> {
+        if !m.is_active() {
+            return Err(crate::error::PrefixdError::Internal(format!(
+                "admission requires live intent; mitigation status is {}",
+                m.status
+            )));
+        }
         // Snapshot before the admission locks, as PostgreSQL reads events inside its lock.
         let detector_events = self.detector_event_ids();
         let mut mitigations = self.mitigations.lock().unwrap();

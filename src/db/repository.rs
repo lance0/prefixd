@@ -822,6 +822,12 @@ impl RepositoryTrait for Repository {
         blackhole: &BlackholeConfig,
         actor: &CreationActor,
     ) -> Result<()> {
+        if !m.is_active() {
+            return Err(PrefixdError::Internal(format!(
+                "admission requires live intent; mitigation status is {}",
+                m.status
+            )));
+        }
         // Bound pool acquisition, lock wait, quota checks and insert. The server bounds also
         // limit residual work while SQLx drives rollback after cancellation. COMMIT stays
         // outside the deadline: once sent, cancelling it cannot prove the row was not kept.
