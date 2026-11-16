@@ -15,7 +15,7 @@ Format follows [Michael Nygard's template](https://cognitect.com/blog/2011/11/15
 | [005](005-nginx-single-origin.md) | Nginx reverse proxy as single entrypoint | Accepted | 2026-02-18 |
 | [006](006-runtime-url-derivation.md) | Derive frontend URLs at runtime, not build time | Accepted | 2026-02-18 |
 | [007](007-trait-based-bgp-abstraction.md) | Trait-based BGP abstraction for testing | Accepted | 2026-01-15 |
-| [008](008-session-auth-plus-bearer.md) | Hybrid auth: session cookies + bearer tokens | Accepted | 2026-01-28 |
+| [008](008-session-auth-plus-bearer.md) | Hybrid auth: session cookies + bearer tokens | Accepted; amended by [034](034-source-bound-api-tokens.md) | 2026-01-28 |
 | [009](009-postgresql-over-sqlite.md) | PostgreSQL over SQLite | Accepted | 2026-01-20 |
 | [010](010-signal-driven-architecture.md) | Signal-driven architecture (detectors signal, prefixd decides) | Accepted | 2026-01-15 |
 | [011](011-reconciliation-loop.md) | Reconciliation loop (desired vs actual state) | Accepted | 2026-01-20 |
@@ -34,12 +34,13 @@ Format follows [Michael Nygard's template](https://cognitect.com/blog/2011/11/15
 | [024](024-loco-staged-migration.md) | Migrate to loco-rs in stages | Withdrawn 2026-11-14 by [026](026-facelift-framework-scope.md) | 2026-09-28 |
 | [025](025-pluggable-speaker-backends.md) | Pluggable speakers with rustbgpd preferred and GoBGP supported | Accepted | 2026-10-17 |
 | [026](026-facelift-framework-scope.md) | Defer framework migration during the facelift | Accepted; amended 2026-11-14 to cancel the Loco migration | 2026-10-17 |
-| [027](027-blackhole-mitigations.md) | Remotely triggered blackhole host routes as a second mitigation kind | Accepted | 2026-10-19 |
+| [027](027-blackhole-mitigations.md) | Remotely triggered blackhole host routes as a second mitigation kind | Accepted; amended by [034](034-source-bound-api-tokens.md) | 2026-10-19 |
 | [028](028-amplification-matches.md) | Amplification-aware FlowSpec matches | Accepted; amended 2026-11-12 for manual TCP flags | 2026-10-19 |
 | [029](029-upstream-blackholing.md) | Provider-scoped upstream blackholing | Accepted (design only) | 2026-10-24 |
 | [030](030-scrubber-diversion.md) | Guarded diversion to an external scrubber | Accepted; return-leg amendment accepted 2026-11-12 and implemented | 2026-11-02 |
 | [031](031-source-prefix-matches.md) | Manual source-prefix FlowSpec matches | Proposed | 2026-10-22 |
 | [032](032-vpn-flowspec-scope.md) | Scoped VPN FlowSpec origination | Accepted (implementation in progress) | 2026-11-08 |
-| [033](033-detector-prefix-mitigations.md) | Guarded detector-driven prefix mitigations | Accepted; router qualification pending | 2026-11-13 |
+| [033](033-detector-prefix-mitigations.md) | Guarded detector-driven prefix mitigations | Accepted; router qualification pending; amended by [034](034-source-bound-api-tokens.md) | 2026-11-13 |
+| [034](034-source-bound-api-tokens.md) | Source-bound scoped API tokens | Accepted (design only) | 2026-11-15 |
 
 ADRs are numbered sequentially as written. Retroactive ADRs (009-013) were documented on 2026-02-18 but dated to when the decision was originally made.

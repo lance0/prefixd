@@ -2,7 +2,12 @@
 
 ## Status
 
-Accepted
+Accepted. Amended by [ADR 034](034-source-bound-api-tokens.md) (accepted
+2026-11-15): named, hashed, revocable API tokens with `ingest`, `operator` and
+`admin` scopes replace the shared bearer token, ingest tokens are bound to a
+detector source, and the `bearer` auth mode is removed. A bearer token replaces
+the session for its request, and only the `Bearer` scheme counts as a token.
+The bearer-token decision below describes the behavior before that amendment.
 
 ## Date
 
@@ -49,9 +54,10 @@ let operator = require_auth(&state, &auth_session, headers).await?;
 **Negative:**
 - Two auth paths means two things to test and secure
 - Session storage in PostgreSQL adds a table and cleanup job
-- Bearer token is currently a single shared secret (no per-client tokens yet)
+- Bearer token is currently a single shared secret (no per-client tokens yet);
+  [ADR 034](034-source-bound-api-tokens.md) replaces it
 
 **Future:**
-- Per-client API keys with scopes and rotation
+- Per-client API keys with scopes and rotation: [ADR 034](034-source-bound-api-tokens.md)
 - LDAP/AD integration for session auth
 - OIDC/SAML for enterprise SSO

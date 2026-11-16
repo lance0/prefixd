@@ -9,6 +9,10 @@ ADR is implemented yet. Extends
 [ADR 025](025-pluggable-speaker-backends.md); qualifies the unicast caveat in
 [ADR 002](002-flowspec-only-afi-safi.md).
 
+Amended by [ADR 034](034-source-bound-api-tokens.md) (accepted 2026-11-15):
+`blackhole.detector_sources` becomes authorization keyed on a source bound to
+the caller's credential, not a filter on a caller-asserted label.
+
 Amended 2026-10-19: aligned with the rustbgpd injection lease contract,
 proposed upstream as rustbgpd ADR-0141. Leased injection uses new RPCs, a
 failed leased add never falls back to an unleased one, the owner is persisted
