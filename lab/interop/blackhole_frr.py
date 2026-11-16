@@ -216,6 +216,8 @@ class BlackholeLab(Lab):
         )
         with self.opener.open(request, timeout=30) as response:
             role = json.loads(response.read().decode())["role"]
+        # Manual blackholes need Admin; the session carries it from here on.
+        self.use_session = True
         self.log(
             f"POST /v1/auth/login {ADMIN} (password withheld) -> {response.status}, role {role}"
         )
@@ -587,6 +589,7 @@ def main():
         "speaker",
         "api",
         "token-file",
+        "ingest-token-file",
         "frr",
         "speaker-container",
         "topology",

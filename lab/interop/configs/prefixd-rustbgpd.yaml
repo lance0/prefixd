@@ -1,5 +1,5 @@
-# Interop lab controller, adapted from configs/prefixd.yaml. Bearer auth keeps
-# the test client simple; short TTL bounds and a 5 s reconciliation interval
+# Interop lab controller, adapted from configs/prefixd.yaml. The harness uses API
+# tokens minted with prefixdctl; short TTL bounds and a 5 s reconciliation interval
 # keep the expiry and speaker-restart steps quick.
 pop: lab1
 mode: enforced
@@ -7,8 +7,7 @@ mode: enforced
 http:
   listen: "0.0.0.0:8080"
   auth:
-    mode: bearer
-    bearer_token_env: "PREFIXD_API_TOKEN"
+    mode: credentials
   # The lab serves plain HTTP; urllib's cookie jar would withhold a Secure session.
   secure_cookies: false
 

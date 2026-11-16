@@ -55,7 +55,12 @@ finish() {
     destroy
     rm -rf "$run"
     # The receipt is uploaded from CI: refuse it if any per-run secret leaked.
-    if grep -rqF -e "$api_token" -e "$speaker_token" -e "$db_password" -e "$admin_password" "$receipt"; then
+    # API tokens exist only once minted, so match only the secrets that do.
+    local patterns=()
+    for value in "$api_token" "$ingest_token" "$speaker_token" "$db_password" "$admin_password"; do
+        [ -n "$value" ] && patterns+=(-e "$value")
+    done
+    if grep -rqF "${patterns[@]}" "$receipt"; then
         echo "a lab secret reached the receipt; deleting it" >&2
         rm -rf "$receipt"
         status=1
@@ -76,17 +81,17 @@ chmod 0700 "$run"
 # environment, are removed on exit and are never written to the receipt.
 secret() { python3 -c 'import secrets; print(secrets.token_hex(32))'; }
 db_password="$(secret)"
-api_token="$(secret)"
 speaker_token="$(secret)"
 admin_password="$(secret)"
 printf 'POSTGRES_PASSWORD=%s\n' "$db_password" >"$run/postgres.env"
 {
     printf 'DATABASE_URL=postgres://prefixd:%s@127.0.0.1:5432/prefixd\n' "$db_password"
-    printf 'PREFIXD_API_TOKEN=%s\n' "$api_token"
     printf 'PREFIXD_RUSTBGPD_TOKEN=%s\n' "$speaker_token"
     printf 'PREFIXD_LAB_ADMIN_PASSWORD=%s\n' "$admin_password"
 } >"$run/prefixd.env"
-printf '%s\n' "$api_token" >"$run/api.token"
+# API tokens are minted in the controller once its migrations have run.
+api_token=""
+ingest_token=""
 printf '%s\n' "$admin_password" >"$run/admin.password"
 # The released rustbgpd image runs as UID 999 and must read its token file.
 printf '%s\n' "$speaker_token" >"$run/rustbgpd.token"
@@ -117,6 +122,21 @@ done
 # The blackhole scenario stops and restarts prefixd through this PID file.
 docker exec -d "$(node controller)" sh -c 'echo $$ >/tmp/prefixd.pid; exec prefixd --config /etc/prefixd >>/tmp/prefixd.log 2>&1'
 
+# Mint the harness's two tokens on the controller's database: an operator token
+# for the operator API and an ingest token bound to the source the scenarios
+# post. A create fails until the controller has applied migration 022.
+mint() {
+    docker exec "$(node controller)" prefixdctl tokens create --name "$1" --scope "$2" ${3:+--source "$3"}
+}
+for _ in $(seq 60); do
+    api_token="$(mint lab-operator operator 2>/dev/null)" && break
+    sleep 1
+done
+[ -n "$api_token" ] || { echo "could not mint the operator token" >&2; exit 1; }
+ingest_token="$(mint lab-ingest ingest fastnetmon)"
+printf '%s\n' "$api_token" >"$run/api.token"
+printf '%s\n' "$ingest_token" >"$run/ingest.token"
+
 extra=()
 case "$scenario" in
     blackhole) extra=(--controller "$(node controller)" --admin-password-file "$run/admin.password") ;;
@@ -126,6 +146,7 @@ python3 -I "lab/interop/${scenario}_frr.py" \
     --speaker "$speaker" \
     --api "http://$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$(node postgres)"):8080" \
     --token-file "$run/api.token" \
+    --ingest-token-file "$run/ingest.token" \
     --frr "$(node frr)" \
     --speaker-container "$(node speaker)" \
     --topology "$topology" \
