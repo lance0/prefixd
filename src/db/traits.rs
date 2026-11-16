@@ -398,6 +398,7 @@ pub trait RepositoryTrait: Send + Sync {
     ) -> Result<Option<ApiToken>>;
     /// Stamp `last_used_at = now` unless the stored stamp is later than
     /// `stale_before`, so concurrent requests write at most once per interval.
+    /// Never waits on a locked row and never stamps a revoked token.
     async fn touch_api_token(
         &self,
         token_id: Uuid,

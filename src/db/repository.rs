@@ -1527,7 +1527,7 @@ impl RepositoryTrait for Repository {
         .bind(username)
         .fetch_optional(&self.pool)
         .await?;
-        Ok(row.map(Into::into))
+        row.map(TryInto::try_into).transpose()
     }
 
     async fn get_operator_by_id(&self, id: Uuid) -> Result<Option<Operator>> {
@@ -1540,7 +1540,7 @@ impl RepositoryTrait for Repository {
         .bind(id)
         .fetch_optional(&self.pool)
         .await?;
-        Ok(row.map(Into::into))
+        row.map(TryInto::try_into).transpose()
     }
 
     async fn create_operator(
@@ -1563,7 +1563,7 @@ impl RepositoryTrait for Repository {
         .bind(created_by)
         .fetch_one(&self.pool)
         .await?;
-        Ok(row.into())
+        row.try_into()
     }
 
     async fn update_operator_last_login(&self, id: Uuid) -> Result<()> {
@@ -1600,7 +1600,7 @@ impl RepositoryTrait for Repository {
         )
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.into_iter().map(Into::into).collect())
+        rows.into_iter().map(TryInto::try_into).collect()
     }
 
     async fn create_api_token(
@@ -1710,9 +1710,18 @@ impl RepositoryTrait for Repository {
         now: DateTime<Utc>,
         stale_before: DateTime<Utc>,
     ) -> Result<()> {
+        // One statement that never waits: a row another session holds locked
+        // (a revocation in flight, an operator's open transaction) is skipped,
+        // so stamps cannot queue on it and pin the pool. A revoked token is
+        // never stamped.
         sqlx::query(
             "UPDATE api_tokens SET last_used_at = $2
-             WHERE token_id = $1 AND (last_used_at IS NULL OR last_used_at <= $3)",
+             WHERE token_id = (
+                 SELECT token_id FROM api_tokens
+                 WHERE token_id = $1 AND revoked_at IS NULL
+                   AND (last_used_at IS NULL OR last_used_at <= $3)
+                 FOR UPDATE SKIP LOCKED
+             )",
         )
         .bind(token_id)
         .bind(now)
@@ -2587,10 +2596,16 @@ impl TryFrom<ApiTokenRow> for ApiToken {
     }
 }
 
-impl From<OperatorRow> for Operator {
-    fn from(row: OperatorRow) -> Self {
-        let role = row.role.parse().unwrap_or(OperatorRole::Operator);
-        Self {
+impl TryFrom<OperatorRow> for Operator {
+    type Error = PrefixdError;
+
+    /// An unknown role fails closed: the operator is refused, never read as a
+    /// default role.
+    fn try_from(row: OperatorRow) -> Result<Self> {
+        let role: OperatorRole = row.role.parse().map_err(|_| {
+            PrefixdError::Internal(format!("operator {:?} has an unknown role", row.username))
+        })?;
+        Ok(Self {
             operator_id: row.operator_id,
             username: row.username,
             password_hash: row.password_hash,
@@ -2598,7 +2613,7 @@ impl From<OperatorRow> for Operator {
             created_at: row.created_at,
             created_by: row.created_by,
             last_login_at: row.last_login_at,
-        }
+        })
     }
 }
 

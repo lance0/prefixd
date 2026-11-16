@@ -265,6 +265,22 @@ fn cli_refuses_two_credentials_and_warns_about_the_old_variable() {
     );
     assert_eq!(code, Some(2), "{stderr}");
     assert!(stderr.contains("invalid duration"), "{stderr}");
+    // A duration that parses but would overflow the expiry timestamp.
+    let (code, stderr) = run(
+        &[
+            "tokens",
+            "create",
+            "--name",
+            "x",
+            "--scope",
+            "admin",
+            "--expires-in",
+            "100000000000000s",
+        ],
+        &[],
+    );
+    assert_eq!(code, Some(2), "{stderr}");
+    assert!(stderr.contains("at most 36525d"), "{stderr}");
     // Control: one credential reaches the request.
     let (code, stderr) = run(&["status"], &[("PREFIXD_TOKEN", TOKEN)]);
     assert_eq!(code, Some(1), "{stderr}");

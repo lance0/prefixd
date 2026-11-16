@@ -168,12 +168,19 @@ impl AuthPrincipal {
                     )
                     .await?;
                     // Fire and forget, so a slow pool never delays the request.
-                    // A standby mutates nothing.
+                    // A standby mutates nothing: the fence is checked here and
+                    // again right before the write, which may run after a loss.
                     if state.fence.is_active() && crate::auth::token::use_due(&token, now) {
-                        let (repo, id, name) =
-                            (state.repo.clone(), token.token_id, token.name.clone());
+                        let (repo, fence, id, name) = (
+                            state.repo.clone(),
+                            state.fence.clone(),
+                            token.token_id,
+                            token.name.clone(),
+                        );
                         tokio::spawn(async move {
-                            crate::auth::token::record_use(repo.as_ref(), id, &name, now).await;
+                            if fence.is_active() {
+                                crate::auth::token::record_use(repo.as_ref(), id, &name, now).await;
+                            }
                         });
                     }
                     Some(token_principal(token)?)
@@ -428,5 +435,70 @@ mod tests {
             require_admin_session(&operator(OperatorRole::Operator, Credential::Session)),
             Err(PrefixdError::Forbidden(_))
         ));
+    }
+
+    /// A stamp spawned while the fence was held, but not yet run when the
+    /// fence is lost, writes nothing. This runtime is single-threaded and the
+    /// mock repository never waits, so the spawned stamp cannot run before the
+    /// response returns; it runs only when the test yields, after the loss.
+    #[tokio::test]
+    async fn a_stamp_pending_when_the_fence_is_lost_does_not_write() {
+        use crate::db::{MockRepository, RepositoryTrait};
+        use tower::ServiceExt;
+
+        let mut settings: crate::config::Settings =
+            crate::config::parse_yaml(include_str!("../../configs/prefixd.yaml")).unwrap();
+        settings.bgp.mode = crate::config::BgpMode::Mock;
+        settings.bgp.rustbgpd = None;
+        settings.http.auth.mode = AuthMode::Credentials;
+        let repo = Arc::new(MockRepository::new());
+        let token = repo.mint_token_for_test("automation", TokenScope::Operator, None);
+        let fence = Arc::new(crate::fence::ControllerFence::new(true));
+        let state = AppState::new(
+            settings,
+            crate::config::Inventory::new(vec![]),
+            crate::config::Playbooks { playbooks: vec![] },
+            repo.clone(),
+            Arc::new(crate::bgp::MockAnnouncer::new()),
+            ".".into(),
+        )
+        .unwrap()
+        .with_fence(fence.clone())
+        .unwrap();
+        let app = crate::api::create_test_router(state);
+        let request = || {
+            axum::http::Request::get("/v1/mitigations")
+                .header(AUTHORIZATION, format!("Bearer {token}"))
+                .body(axum::body::Body::empty())
+                .unwrap()
+        };
+        let stamped = || async { repo.list_api_tokens(None).await.unwrap()[0].last_used_at };
+        let settle = || async {
+            for _ in 0..8 {
+                tokio::task::yield_now().await;
+            }
+        };
+
+        let response = app.clone().oneshot(request()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            stamped().await,
+            None,
+            "precondition: the stamp is still pending"
+        );
+        fence.set(false);
+        settle().await;
+        assert_eq!(
+            stamped().await,
+            None,
+            "a stamp written after the fence was lost"
+        );
+
+        // Control: with the fence held throughout, the same request stamps.
+        fence.set(true);
+        let response = app.oneshot(request()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        settle().await;
+        assert!(stamped().await.is_some());
     }
 }

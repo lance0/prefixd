@@ -26,6 +26,12 @@ const ENCODED_LEN: usize = 43;
 /// The SHA-256 of a full token, which is what the database stores.
 pub type TokenHash = [u8; 32];
 
+/// The latest expiry a token may have, from its creation: about 100 years.
+/// It keeps every expiry far inside the timestamp range.
+pub fn max_lifetime() -> TimeDelta {
+    TimeDelta::days(36_525)
+}
+
 /// The active controller writes `last_used_at` at most this often per token.
 pub fn last_used_interval() -> TimeDelta {
     TimeDelta::seconds(60)
@@ -126,6 +132,12 @@ pub async fn create(
     }
     if request.expires_at.is_some_and(|expires| expires <= now) {
         return invalid("expires_at must be in the future");
+    }
+    let latest = now
+        .checked_add_signed(max_lifetime())
+        .ok_or_else(|| PrefixdError::Internal("clock outside the timestamp range".into()))?;
+    if request.expires_at.is_some_and(|expires| expires > latest) {
+        return invalid("expires_at must be within 100 years");
     }
     let (plaintext, hash) = generate()?;
     let token = ApiToken {
@@ -392,6 +404,13 @@ mod tests {
         let second = revoke(&repo, "fnm-pop1", "other", at(9)).await.unwrap();
         assert_eq!(first, second);
         assert_eq!(first.revoked_at, Some(at(5)));
+        // A stamp after the revocation, from a request verified before it,
+        // writes nothing.
+        record_use(&repo, first.token_id, &first.name, at(100)).await;
+        assert_eq!(
+            repo.list_api_tokens(None).await.unwrap()[0].last_used_at,
+            None
+        );
         assert_eq!(first.revoked_by.as_deref(), Some("admin"));
         let audit = repo
             .list_audit(&crate::db::ListParams {

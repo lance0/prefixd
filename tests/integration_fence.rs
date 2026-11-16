@@ -362,6 +362,8 @@ async fn standby_refuses_mutation_requests_with_503_and_reports_standby() {
         ("POST", "/v1/safelist", "{}"),
         ("DELETE", "/v1/safelist/192.0.2.1%2F32", ""),
         ("POST", "/v1/signals/fastnetmon", "{}"),
+        ("POST", "/v1/tokens", "{}"),
+        ("POST", "/v1/tokens/automation/revoke", ""),
     ] {
         let response = send(method, uri, body).await.unwrap();
         assert_eq!(

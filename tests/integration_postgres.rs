@@ -8121,6 +8121,17 @@ mod api_tokens {
             .unwrap();
         assert_eq!(first, second);
         assert_eq!(first.revoked_by.as_deref(), Some("admin"));
+        // A stamp for a request verified just before the revocation is not
+        // written after it, even when the stored stamp is stale.
+        let later = now + Duration::seconds(600);
+        repo.touch_api_token(token.token_id, later, stale(later))
+            .await
+            .unwrap();
+        assert_eq!(
+            last_used(repo, &secret).await,
+            Some(now + Duration::seconds(60)),
+            "a revoked token is never stamped"
+        );
         let error = create(
             repo,
             request("fnm-pop1", TokenScope::Operator, None, None),
@@ -8288,6 +8299,115 @@ mod api_tokens {
             assert_eq!(status, StatusCode::UNAUTHORIZED);
             assert!(body.contains("revoked"), "{body}");
         }
+    }
+
+    /// A row lock held on a token, by a revocation in flight or an operator's
+    /// open transaction, must not make stamps queue behind it. Each queued
+    /// stamp would hold a pool connection, so a few requests would pin the
+    /// whole pool and stall ingestion and mitigation writes while the fence
+    /// stays held. The stamp skips a locked row instead.
+    #[tokio::test]
+    async fn a_locked_token_row_never_pins_the_pool() {
+        let ctx = TestContext::new().await;
+        let (token, secret) = create(
+            ctx.repo.as_ref(),
+            request("automation", TokenScope::Operator, None, None),
+            "admin",
+            Utc::now(),
+        )
+        .await
+        .unwrap();
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(3)
+            .acquire_timeout(std::time::Duration::from_secs(2))
+            .connect(&ctx.state.settings.storage.connection_string)
+            .await
+            .unwrap();
+        let app = controller_on(&ctx, pool.clone(), "pop-a", true);
+        let mut holder = ctx.pool.begin().await.unwrap();
+        sqlx::query("SELECT 1 FROM api_tokens WHERE token_id = $1 FOR UPDATE")
+            .bind(token.token_id)
+            .execute(&mut *holder)
+            .await
+            .unwrap();
+        // last_used_at stays NULL while the row is locked, so every request
+        // is due a stamp.
+        for request in 0..10 {
+            let (status, body) = get(&app, &secret).await;
+            assert_eq!(status, StatusCode::OK, "request {request}: {body}");
+            for _ in 0..8 {
+                tokio::task::yield_now().await;
+            }
+        }
+        // An unrelated read on the same pool still gets a connection.
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            sqlx::query("SELECT count(*) FROM mitigations").execute(&pool),
+        )
+        .await
+        .expect("an unrelated read waited on the pool")
+        .unwrap();
+        let waiting: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_stat_activity
+             WHERE datname = current_database() AND wait_event_type = 'Lock'",
+        )
+        .fetch_one(&ctx.pool)
+        .await
+        .unwrap();
+        assert_eq!(waiting, 0, "a stamp is waiting on the locked row");
+        holder.rollback().await.unwrap();
+        // Control: once the lock is gone, the next request stamps.
+        assert_eq!(get(&app, &secret).await.0, StatusCode::OK);
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while last_used(ctx.repo.as_ref(), &secret).await.is_none() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the stamp lands after the lock is released");
+    }
+
+    /// An operator row with a role the controller does not know is refused,
+    /// never read as a default role. Migration 022 forbids such rows; this
+    /// covers one written around the constraint.
+    #[tokio::test]
+    async fn an_unknown_operator_role_fails_closed() {
+        use argon2::{Argon2, PasswordHasher};
+        let ctx = TestContext::new().await;
+        let hash = Argon2::default()
+            .hash_password_with_salt(b"unknown-role-password", b"unknown-role-salt")
+            .unwrap()
+            .to_string();
+        sqlx::raw_sql("ALTER TABLE operators DROP CONSTRAINT operators_role_known")
+            .execute(&ctx.pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO operators (username, password_hash, role) VALUES ('root-user', $1, 'root')",
+        )
+        .bind(&hash)
+        .execute(&ctx.pool)
+        .await
+        .unwrap();
+        assert!(
+            ctx.repo
+                .get_operator_by_username("root-user")
+                .await
+                .is_err()
+        );
+        let response = controller(&ctx, "pop-a", true)
+            .oneshot(
+                Request::post("/v1/auth/login")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"username": "root-user", "password": "unknown-role-password"})
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
     async fn cli(ctx: &TestContext, args: &[&str]) -> std::process::Output {

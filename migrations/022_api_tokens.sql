@@ -18,9 +18,12 @@ CREATE TABLE IF NOT EXISTS api_tokens (
     CHECK ((scope = 'ingest') = (source IS NOT NULL))
 );
 
--- `token:` and `webhook:` actor IDs cannot collide with a username. Refuse to
--- add the constraint over existing usernames instead of rewriting them; the
--- error rolls this migration back and the controller does not start.
+-- `token:` and `webhook:` actor IDs cannot collide with a username, and no
+-- operator may take a name prefixd records for another principal (the local
+-- CLI, `none` mode, an mTLS client). Roles must be ones the controller knows,
+-- so an unknown role is never read as a default. Refuse to add either
+-- constraint over existing rows instead of rewriting them; the error rolls this
+-- migration back and the controller does not start.
 DO $$
 DECLARE
     invalid BIGINT;
@@ -30,12 +33,26 @@ BEGIN
         WHERE conrelid = 'operators'::regclass AND conname = 'operators_username_format'
     ) THEN
         SELECT count(*) INTO invalid FROM operators
-        WHERE username !~ '^[A-Za-z0-9_-]{1,64}$';
+        WHERE username !~ '^[A-Za-z0-9_-]{1,64}$'
+           OR lower(username) IN ('prefixdctl', 'anonymous', 'mtls-client');
         IF invalid > 0 THEN
-            RAISE EXCEPTION '% operator username(s) fall outside [A-Za-z0-9_-], 1 to 64 characters; rename them before upgrading (docs/how-to/upgrading.md#operator-usernames)', invalid;
+            RAISE EXCEPTION '% operator username(s) fall outside [A-Za-z0-9_-], 1 to 64 characters, or use a reserved name (prefixdctl, anonymous, mtls-client); rename them before upgrading (docs/how-to/upgrading.md#operator-usernames)', invalid;
         END IF;
         ALTER TABLE operators ADD CONSTRAINT operators_username_format
-            CHECK (username ~ '^[A-Za-z0-9_-]{1,64}$');
+            CHECK (username ~ '^[A-Za-z0-9_-]{1,64}$'
+                AND lower(username) NOT IN ('prefixdctl', 'anonymous', 'mtls-client'));
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'operators'::regclass AND conname = 'operators_role_known'
+    ) THEN
+        SELECT count(*) INTO invalid FROM operators
+        WHERE role NOT IN ('admin', 'operator', 'viewer');
+        IF invalid > 0 THEN
+            RAISE EXCEPTION '% operator(s) have a role other than admin, operator or viewer; correct them before upgrading (docs/how-to/upgrading.md#operator-roles)', invalid;
+        END IF;
+        ALTER TABLE operators ADD CONSTRAINT operators_role_known
+            CHECK (role IN ('admin', 'operator', 'viewer'));
     END IF;
 END;
 $$;

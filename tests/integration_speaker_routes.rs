@@ -334,7 +334,15 @@ fn openapi_documents_read_scope_and_failure_outcomes() {
     for code in ["200", "401", "501", "502"] {
         assert!(operation["responses"].get(code).is_some(), "{code}");
     }
-    assert!(operation["responses"].get("503").is_none());
+    // Available in standby: the only 503 is a token store outage.
+    let unavailable = operation["responses"]["503"]["description"]
+        .as_str()
+        .unwrap();
+    assert!(
+        unavailable.contains("API token store unavailable"),
+        "{unavailable}"
+    );
+    assert!(!unavailable.contains("standby"), "{unavailable}");
     assert!(
         operation["description"]
             .as_str()

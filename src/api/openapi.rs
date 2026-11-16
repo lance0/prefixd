@@ -22,7 +22,7 @@ use crate::db::{GlobalStats, NotificationPreferences, PopInfo, PopStats, Safelis
 
 #[derive(OpenApi)]
 #[openapi(
-    modifiers(&StandbyResponses),
+    modifiers(&StandbyResponses, &TokenResponses),
     info(
         title = "prefixd API",
         description = "BGP FlowSpec routing policy daemon for automated DDoS mitigation",
@@ -280,6 +280,54 @@ impl utoipa::Modify for StandbyResponses {
     }
 }
 
+/// Every operation that accepts an API token can refuse it before the handler
+/// runs: 503 when the token store cannot be read, and 403 when the token is
+/// bound to another POP. That covers every `/v1` operation except the public
+/// liveness and readiness probes and the session-only `/v1/auth/*` routes.
+struct TokenResponses;
+
+impl utoipa::Modify for TokenResponses {
+    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        const UNAVAILABLE: &str =
+            "API token store unavailable (`credential store unavailable; retry`)";
+        const OTHER_POP: &str = "API token bound to another POP";
+        for (path, item) in openapi.paths.paths.iter_mut() {
+            if !path.starts_with("/v1/")
+                || matches!(path.as_str(), "/v1/health" | "/v1/ready")
+                || path.starts_with("/v1/auth/")
+            {
+                continue;
+            }
+            for operation in [
+                &mut item.get,
+                &mut item.post,
+                &mut item.put,
+                &mut item.delete,
+                &mut item.patch,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                for (status, text) in [("503", UNAVAILABLE), ("403", OTHER_POP)] {
+                    match operation.responses.responses.entry(status.into()) {
+                        std::collections::btree_map::Entry::Vacant(entry) => {
+                            entry.insert(utoipa::openapi::Response::new(text).into());
+                        }
+                        std::collections::btree_map::Entry::Occupied(mut entry) => {
+                            if let utoipa::openapi::RefOr::T(response) = entry.get_mut()
+                                && !response.description.contains(text)
+                            {
+                                response.description =
+                                    format!("{}; or {text}", response.description);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -410,8 +458,10 @@ mod tests {
         };
         assert!(has_503(&paths["/v1/mitigations"].post));
         assert!(has_503(&paths["/v1/events"].post));
-        assert!(!has_503(&paths["/v1/mitigations"].get));
+        // Reads accept tokens, so a token store outage is 503 there too.
+        assert!(has_503(&paths["/v1/mitigations"].get));
         assert!(!has_503(&paths["/v1/auth/login"].post));
+        assert!(!has_503(&paths["/v1/health"].get));
         assert!(has_503(&paths["/v1/ready"].get));
         let schema =
             serde_json::to_value(&doc.components.as_ref().unwrap().schemas["ReadinessStatus"])
@@ -420,6 +470,45 @@ mod tests {
             schema["enum"],
             serde_json::json!(["standby", "draining", "ready"])
         );
+    }
+
+    /// Every operation that accepts a token documents the token store outage
+    /// (503) and the POP mismatch (403), reads included.
+    #[test]
+    fn token_accepting_operations_document_token_refusals() {
+        let doc = serde_json::to_value(ApiDoc::openapi()).unwrap();
+        let mut checked = 0;
+        for (path, item) in doc["paths"].as_object().unwrap() {
+            let public = matches!(path.as_str(), "/v1/health" | "/v1/ready")
+                || path.starts_with("/v1/auth/")
+                || !path.starts_with("/v1/");
+            for (method, operation) in item.as_object().unwrap() {
+                if !METHODS.contains(&method.as_str()) {
+                    continue;
+                }
+                let responses = &operation["responses"];
+                let described = |status: &str, text: &str| {
+                    responses[status]["description"]
+                        .as_str()
+                        .is_some_and(|description| description.contains(text))
+                };
+                assert_eq!(
+                    described("503", "API token store unavailable"),
+                    !public,
+                    "{method} {path}"
+                );
+                assert_eq!(
+                    described("403", "API token bound to another POP"),
+                    !public,
+                    "{method} {path}"
+                );
+                checked += usize::from(!public);
+            }
+        }
+        assert!(checked > 50, "{checked}");
+        // Existing descriptions are extended, not replaced.
+        let post = &doc["paths"]["/v1/mitigations"]["post"]["responses"]["503"]["description"];
+        assert!(post.as_str().unwrap().contains("standby"), "{post}");
     }
 
     #[test]

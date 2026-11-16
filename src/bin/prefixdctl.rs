@@ -237,7 +237,9 @@ fn parse_expires_in(value: &str) -> Result<chrono::TimeDelta, String> {
     }
     .filter(|seconds| *seconds > 0)
     .ok_or_else(invalid)?;
-    chrono::TimeDelta::try_seconds(seconds).ok_or_else(invalid)
+    chrono::TimeDelta::try_seconds(seconds)
+        .filter(|lifetime| *lifetime <= prefixd::auth::token::max_lifetime())
+        .ok_or_else(|| format!("invalid duration {value:?}: at most 36525d (about 100 years)"))
 }
 
 #[derive(Subcommand)]
@@ -1661,7 +1663,9 @@ async fn cmd_operators(cmd: OperatorCommands, format: OutputFormat) -> Result<()
         } => {
             if !prefixd::domain::is_valid_username(&username) {
                 return Err(
-                    "username must be 1 to 64 characters of A-Z, a-z, 0-9, _ or -".to_string(),
+                    "username must be 1 to 64 characters of A-Z, a-z, 0-9, _ or -, \
+                     and not prefixdctl, anonymous or mtls-client"
+                        .to_string(),
                 );
             }
             // Validate role
@@ -1821,7 +1825,12 @@ async fn cmd_tokens(cmd: TokenCommands, format: OutputFormat) -> Result<(), Stri
                 scope,
                 source,
                 pop,
-                expires_at: expires_in.map(|lifetime| now + lifetime),
+                expires_at: expires_in
+                    .map(|lifetime| {
+                        now.checked_add_signed(lifetime)
+                            .ok_or("--expires-in is outside the timestamp range")
+                    })
+                    .transpose()?,
             };
             // Database access already outranks Admin, as for `operators create`.
             let (token, secret) = prefixd::auth::token::create(&repo, request, "prefixdctl", now)
@@ -1995,9 +2004,15 @@ mod tests {
             "µ",
             "1.5h",
             "99999999999999999d",
+            // Parses as a duration but overflows a timestamp once added.
+            "100000000000000s",
+            "36526d",
         ] {
             assert!(parse_expires_in(invalid).is_err(), "{invalid:?}");
         }
+        // The cap itself is accepted and adds without overflow.
+        let cap = parse_expires_in("36525d").unwrap();
+        assert!(chrono::Utc::now().checked_add_signed(cap).is_some());
     }
 
     fn diversion_cli_fixture(family: &str) -> (serde_json::Value, serde_json::Value) {

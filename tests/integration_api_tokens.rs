@@ -540,6 +540,23 @@ async fn token_management_needs_an_admin_session() {
     assert_eq!(created["pop"], "test-pop");
     assert_eq!(created["created_by"], "admin");
     let hash = hex::encode(prefixd::auth::token::hash(&secret));
+    // An expiry beyond the cap is a validation error, and one outside the
+    // timestamp range is a client error; neither panics.
+    for (expires_at, expected) in [
+        ("9999-12-31T00:00:00Z", StatusCode::BAD_REQUEST),
+        ("+262142-12-31T23:59:59Z", StatusCode::BAD_REQUEST),
+        ("+999999-01-01T00:00:00Z", StatusCode::UNPROCESSABLE_ENTITY),
+    ] {
+        let (status, _, body) = send(
+            &fixture.app,
+            "POST",
+            "/v1/tokens",
+            &[("cookie", &admin)],
+            Some(&json!({"name": "far-future", "scope": "admin", "expires_at": expires_at})),
+        )
+        .await;
+        assert_eq!(status, expected, "{expires_at}: {body}");
+    }
     // Name reuse is refused, revoked or not.
     let (status, _, _) = send(
         &fixture.app,

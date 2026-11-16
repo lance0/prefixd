@@ -115,24 +115,60 @@ What changes:
 
 ### Operator usernames
 
-Migration 022 adds `CHECK (username ~ '^[A-Za-z0-9_-]{1,64}$')` to `operators`,
-the rule the API and `prefixdctl operators create` now share, so a username
-cannot look like a `token:` actor. Before adding it, the migration counts the
-usernames outside the pattern. If any exist, it fails with
+Migration 022 adds a `CHECK` to `operators.username`: the name matches
+`^[A-Za-z0-9_-]{1,64}$`, the rule the API and `prefixdctl operators create`
+now share, and is not `prefixdctl`, `anonymous` or `mtls-client` in any case.
+prefixd records those names as actors for the local CLI, `none` mode and mTLS
+clients, so an operator holding one would be indistinguishable from them in
+the audit log and in `created_by`, and a username cannot look like a `token:`
+actor. Before adding the check, the migration counts the usernames that fail
+it. If any exist, it fails with
 
 ```text
-N operator username(s) fall outside [A-Za-z0-9_-], 1 to 64 characters; rename them before upgrading (docs/how-to/upgrading.md#operator-usernames)
+N operator username(s) fall outside [A-Za-z0-9_-], 1 to 64 characters, or use a reserved name (prefixdctl, anonymous, mtls-client); rename them before upgrading (docs/how-to/upgrading.md#operator-usernames)
 ```
 
 and rolls back; the controller does not start and no username is rewritten.
 Run this query before the upgrade and rename every operator it returns:
 
 ```sql
-SELECT username FROM operators WHERE username !~ '^[A-Za-z0-9_-]{1,64}$';
+SELECT username FROM operators WHERE username !~ '^[A-Za-z0-9_-]{1,64}$' OR lower(username) IN ('prefixdctl', 'anonymous', 'mtls-client');
 ```
 
 Rename with `UPDATE operators SET username = 'new_name' WHERE username = 'old name';`.
 The operator signs in with the new name; audit rows keep the old one.
+
+### Bearer headers from identity proxies
+
+A Bearer header replaces the session: prefixd removes the `Cookie` header of
+any request carrying `Authorization: Bearer` before it loads the session. An
+identity proxy in front of the dashboard that injects its own Bearer header
+therefore breaks sign-in: the dashboard signs in, then every request gets 401
+because the proxy's token is not a prefixd API token. Common sources are
+oauth2-proxy `--set-authorization-header`, nginx `auth_request` with
+`proxy_set_header Authorization`, and Traefik forward-auth with
+`authResponseHeaders: [Authorization]`. Do not forward such a header to
+prefixd. A proxy that adds `Authorization: Basic` beside a client's token also
+fails: two `Authorization` headers get 401 (`send exactly one Authorization
+header`). A logout sent with a Bearer header ends no session, because the
+cookie was removed.
+
+### Operator roles
+
+Migration 022 also adds `CHECK (role IN ('admin', 'operator', 'viewer'))` to
+`operators`. Earlier releases read any other stored role as `operator`; this
+release refuses such an operator instead. The migration fails with
+
+```text
+N operator(s) have a role other than admin, operator or viewer; correct them before upgrading (docs/how-to/upgrading.md#operator-roles)
+```
+
+when a row would violate the check. Run this query before the upgrade and set
+each returned operator's role to `admin`, `operator` or `viewer`:
+
+```sql
+SELECT username, role FROM operators WHERE role NOT IN ('admin', 'operator', 'viewer');
+```
 
 ### One-way release
 
@@ -174,9 +210,15 @@ event, pending operation or audit row.
    - Set `http.auth.mode: credentials` and delete `bearer_token_env`.
    - Remove `PREFIXD_API_TOKEN` from the controller's environment. The shipped
      Compose file and `.env.example` no longer pass it.
-   - Run `prefixd --check`. With leased FlowSpec, rustbgpd withdraws leased
-     rules within one lease while no controller runs, so a refused
-     configuration must not be discovered by a restart.
+   - Run `prefixd --check` with the new release's binary or image, for
+     example `docker run --rm -v /etc/prefixd:/etc/prefixd:ro <new image>
+     prefixd --check --config /etc/prefixd`. The old binary accepts a
+     configuration the new one refuses, such as `mode: bearer`. With leased
+     FlowSpec, rustbgpd withdraws leased rules within one lease while no
+     controller runs, so a refused configuration must not be discovered by a
+     restart.
+   - Stop forwarding any `Authorization: Bearer` header that an identity
+     proxy injects (see [Bearer headers from identity proxies](#bearer-headers-from-identity-proxies)).
 3. **Cutover.**
    1. Stop every old controller on the database.
    2. Start the new ones. The first to start applies migration 022, after any
@@ -209,7 +251,7 @@ event, pending operation or audit row.
    active, or let them expire.
 
 Rotation afterward needs no window: create a token under a new name, update the
-client, confirm its last use advances, then revoke the old token. Deleting or
+client, confirm its last use advances, then revoke the old token. If a token leaked, revoke it first, then review `GET /v1/audit` for actor `token:<name>` to find what it did, including configuration changes such as alerting destinations, playbooks and correlation settings, and undo them. Deleting or
 demoting an operator does not revoke the tokens they created; list them with
 `prefixdctl tokens list --created-by <username>` and revoke or rotate each one.
 

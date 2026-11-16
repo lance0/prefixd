@@ -78,14 +78,24 @@ impl From<Operator> for OperatorResponse {
 /// accepts.
 pub const MAX_USERNAME_LEN: usize = 64;
 
-/// Usernames match `^[A-Za-z0-9_-]{1,64}$`, the rule the API, `prefixdctl
-/// operators create` and the `operators` table CHECK share. `token:` and
-/// `webhook:` actor IDs therefore cannot collide with a username.
+/// Actor IDs prefixd records for principals that are not operator accounts.
+/// No username may take one, in any case, so audit rows and `created_by`
+/// cannot confuse an operator with the local CLI, `none` mode or an mTLS
+/// client.
+pub const RESERVED_USERNAMES: [&str; 3] = ["prefixdctl", "anonymous", "mtls-client"];
+
+/// Usernames match `^[A-Za-z0-9_-]{1,64}$` and are not reserved, the rule the
+/// API, `prefixdctl operators create` and the `operators` table CHECK share.
+/// `token:` and `webhook:` actor IDs therefore cannot collide with a username
+/// either.
 pub fn is_valid_username(value: &str) -> bool {
     (1..=MAX_USERNAME_LEN).contains(&value.len())
         && value
             .bytes()
             .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
+        && !RESERVED_USERNAMES
+            .iter()
+            .any(|reserved| value.eq_ignore_ascii_case(reserved))
 }
 
 #[cfg(test)]
@@ -105,6 +115,11 @@ mod tests {
             "webhook:name",
             "caf\u{e9}",
             &"a".repeat(65),
+            "prefixdctl",
+            "anonymous",
+            "mtls-client",
+            "Anonymous",
+            "MTLS-CLIENT",
         ] {
             assert!(!is_valid_username(invalid), "{invalid}");
         }

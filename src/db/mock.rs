@@ -1742,6 +1742,7 @@ impl RepositoryTrait for MockRepository {
             .unwrap()
             .iter_mut()
             .find(|(token, _)| token.token_id == token_id)
+            && token.revoked_at.is_none()
             && token.last_used_at.is_none_or(|used| used <= stale_before)
         {
             token.last_used_at = Some(now);
