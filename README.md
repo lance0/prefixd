@@ -26,13 +26,13 @@ to announce a FlowSpec rule with a mandatory TTL. No detector speaks BGP.
 **Status:** pre-1.0. The `/v1/` API is stable within 0.x: a breaking change is
 called out in its release's upgrade notes
 ([API versioning](docs/reference/api-versioning.md)). The latest release,
-[v0.27.0](https://github.com/lance0/prefixd/releases/tag/v0.27.0), focuses
-on safety and correctness. It requires rustbgpd v0.83.0 or later (Compose pins
-v0.83.0), a reason on every withdrawal, and https alert destinations on public
-hosts, and refuses `${...}` placeholders at startup. The shipped rustbgpd
-configuration now leases FlowSpec rules, so rustbgpd withdraws them if prefixd
-stays down longer than one lease. Migration 020 records event outcomes; follow
-the [upgrade guide](docs/how-to/upgrading.md#v0260--0270).
+[v0.28.0](https://github.com/lance0/prefixd/releases/tag/v0.28.0), adds
+source-bound API tokens, recoverable detector admissions and lease-risk
+visibility. Shared bearer credentials are removed, and the database upgrade is
+one-way: stop every controller sharing the database for one maintenance window.
+rustbgpd v0.83.0 or later is required (Compose pins v0.83.0). Follow the
+[upgrade guide](docs/how-to/upgrading.md#v0270--0280) before replacing the
+controller or detector credentials.
 
 ## Choose your path
 
@@ -40,8 +40,9 @@ the [upgrade guide](docs/how-to/upgrading.md#v0260--0270).
 
 FastNetMon, Prometheus Alertmanager or any JSON webhook sends attack events.
 prefixd groups signals per target, weighs corroborating sources and applies the
-matching playbook. Controller integration tests cover these adapters; the dated
-profile qualification covers manual mitigation, not detector traffic.
+matching playbook. The [FastNetMon Community lane](docs/how-to/detectors/fastnetmon.md#interop-lane)
+exercises the real notify path through FRR. Other adapters have controller
+integration coverage. These checks do not establish router forwarding enforcement.
 prefixd can post each new, withdrawn or expired mitigation to Slack, Discord,
 Teams, Telegram, PagerDuty, Opsgenie or a webhook.
 

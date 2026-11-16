@@ -1706,10 +1706,9 @@ prefixdctl migrations
 
 ### v0.27.0 → 0.28.0
 
-This is the procedure for the upcoming 0.28.0 release. Use the published release
-images once available; it does not authorize running an unreleased `main` image
-on an existing deployment. Its Compose commands replace the general Compose
-sequence for this version. On bare metal, apply the preparation and ordering
+This is the procedure for the 0.28.0 release. Use its published release images
+when upgrading an existing deployment. Its Compose commands replace the general
+Compose sequence for this version. On bare metal, apply the preparation and ordering
 requirements below to the [bare-metal commands](#bare-metal-upgrade); run the
 token commands locally with the controller's `DATABASE_URL` after startup.
 
@@ -1855,7 +1854,7 @@ Edit the copies under `.prefixd/upgrade-config` and stage the matching service e
   Authorization header; see [identity proxies](#bearer-headers-from-identity-proxies).
 - Update alert consumers and audit filters for canonical victims,
   `token:<name>`/`webhook:<adapter>` actors with `details.source`, and
-  `no_active_mitigation`. Review the [Upgrade notes](../../CHANGELOG.md#unreleased)
+  `no_active_mitigation`. Review the [Upgrade notes](../../CHANGELOG.md#0280---2026-11-16)
   for test-alert IDs and event types, dry-run titles, Opsgenie closures and
   outage lease-state monitoring. Identity-management automation needs the local
   database CLI or an Admin session; API tokens cannot manage identities.
