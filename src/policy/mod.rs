@@ -357,6 +357,7 @@ mod tests {
             action: "ban".to_string(),
             raw_details: None,
             outcome: Default::default(),
+            ban_retryable: true,
         }
     }
 

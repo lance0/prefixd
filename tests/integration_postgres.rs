@@ -1343,6 +1343,7 @@ async fn test_timeseries_non_hour_bucket_alignment() {
         action: "ban".to_string(),
         raw_details: None,
         outcome: Default::default(),
+        ban_retryable: true,
     };
 
     let event_two = AttackEvent {
@@ -1362,6 +1363,7 @@ async fn test_timeseries_non_hour_bucket_alignment() {
         action: "ban".to_string(),
         raw_details: None,
         outcome: Default::default(),
+        ban_retryable: true,
     };
 
     ctx.repo
@@ -1843,6 +1845,7 @@ async fn test_signal_group_add_events_and_list() {
         action: "ban".to_string(),
         raw_details: None,
         outcome: Default::default(),
+        ban_retryable: true,
     };
     let event2 = AttackEvent {
         event_id: uuid::Uuid::new_v4(),
@@ -1861,6 +1864,7 @@ async fn test_signal_group_add_events_and_list() {
         action: "ban".to_string(),
         raw_details: None,
         outcome: Default::default(),
+        ban_retryable: true,
     };
 
     ctx.repo.insert_event(&event1).await.unwrap();

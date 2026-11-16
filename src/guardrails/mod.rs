@@ -741,6 +741,7 @@ mod tests {
             action: "ban".into(),
             raw_details: None,
             outcome: Default::default(),
+            ban_retryable: true,
         })
         .await
         .unwrap();

@@ -18,6 +18,27 @@ From v0.23.0, follow [v0.23.0 → 0.23.1](#v0230--0231) first; from v0.22.1,
 [v0.20.0 → 0.21.0](#v0200--0210) before that; and from v0.19.1,
 [v0.19.1 → 0.20.0](#v0191--0200) before that.
 
+## Interrupted detector bans
+
+Migration 026 adds an internal retry boundary to `events`, using a constant
+false default without rewriting existing rows. New detector bans retain their
+admitted mitigation IDs atomically and can resume an interrupted attempt with
+the same event ID. The schema version becomes 26; older binaries refuse it.
+
+An older incomplete or failed attempt may have extended a mitigation before
+its outcome was recorded, then lost that association to a later extension.
+Its retry now returns `409` with `historical ban admission outcome is unknown`.
+Inspect the original event, current mitigation and audit history before
+authorizing a new admission with a new event ID. The upgrade does not fabricate
+an outcome or replay historical events. Completed outcomes retain ordinary
+deduplication.
+
+Reinstall the bundled FastNetMon script. It no longer treats every same-ID
+`409` after a connection error or `503` as delivery success: it requires a
+recorded admitted outcome and mitigation IDs, and logs `INTENT_RECORDED`.
+Refused or interrupted outcomes remain errors. This log proves historical local
+intent only; inspect mitigation and export evidence for current enforcement.
+
 ## General Principles
 
 `guardrails.max_lifetime_seconds` is optional and defaults to no total cap.

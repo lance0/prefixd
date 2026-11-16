@@ -9384,6 +9384,7 @@ async fn test_decay_refresh_lowers_derived_confidence() {
         action: "ban".to_string(),
         raw_details: None,
         outcome: Default::default(),
+        ban_retryable: true,
     })
     .await
     .unwrap();
@@ -9407,6 +9408,7 @@ async fn test_decay_refresh_lowers_derived_confidence() {
         action: "ban".to_string(),
         raw_details: None,
         outcome: Default::default(),
+        ban_retryable: true,
     })
     .await
     .unwrap();
@@ -9508,6 +9510,7 @@ async fn test_decay_one_shot_corroboration_no_flap_back() {
         action: "ban".to_string(),
         raw_details: None,
         outcome: Default::default(),
+        ban_retryable: true,
     })
     .await
     .unwrap();
@@ -9531,6 +9534,7 @@ async fn test_decay_one_shot_corroboration_no_flap_back() {
         action: "ban".to_string(),
         raw_details: None,
         outcome: Default::default(),
+        ban_retryable: true,
     })
     .await
     .unwrap();
@@ -9620,6 +9624,7 @@ async fn test_decay_disabled_does_not_touch_groups() {
         action: "ban".to_string(),
         raw_details: None,
         outcome: Default::default(),
+        ban_retryable: true,
     })
     .await
     .unwrap();

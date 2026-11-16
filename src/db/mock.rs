@@ -33,6 +33,12 @@ pub struct MockRepository {
     pub fail_unban_records: std::sync::atomic::AtomicBool,
     /// Every event outcome write fails.
     pub fail_event_outcomes: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    pub after_event_insert: Mutex<Option<std::sync::Arc<MockPause>>>,
+    #[cfg(test)]
+    pub before_event_outcome: Mutex<Option<std::sync::Arc<MockPause>>>,
+    #[cfg(test)]
+    pub fail_ban_reads: std::sync::atomic::AtomicBool,
     /// Every unban replay lookup and live-by-victim read fails.
     pub fail_unban_reads: std::sync::atomic::AtomicBool,
     /// Recording withdrawal intent for this mitigation fails, as a storage
@@ -81,6 +87,22 @@ pub struct MockRepository {
     corroborating_signals: Mutex<Vec<CorroboratingSignal>>,
 }
 
+#[cfg(test)]
+#[derive(Default)]
+pub struct MockPause {
+    pub entered: tokio::sync::Notify,
+    pub release: tokio::sync::Notify,
+}
+
+#[cfg(test)]
+async fn pause_once(pause: &Mutex<Option<std::sync::Arc<MockPause>>>) {
+    let pause = pause.lock().unwrap().take();
+    if let Some(pause) = pause {
+        pause.entered.notify_one();
+        pause.release.notified().await;
+    }
+}
+
 /// Mock-only junction-table row:
 /// (group_id, event_id, source_weight, is_corroborating,
 ///  denorm_source, denorm_confidence, denorm_ingested_at).
@@ -93,6 +115,26 @@ type MockGroupEventLink = (
     Option<f32>,
     Option<chrono::DateTime<chrono::Utc>>,
 );
+
+fn record_ban_mitigation(events: &mut [AttackEvent], mitigation: &Mitigation) {
+    if let Some(event) = events.iter_mut().find(|event| {
+        event.event_id == mitigation.last_event_id
+            && event.action == "ban"
+            && matches!(
+                event.outcome.outcome,
+                crate::domain::EventOutcome::NotRecorded | crate::domain::EventOutcome::Failed
+            )
+    }) && !event
+        .outcome
+        .outcome_mitigation_ids
+        .contains(&mitigation.mitigation_id)
+    {
+        event
+            .outcome
+            .outcome_mitigation_ids
+            .push(mitigation.mitigation_id);
+    }
+}
 
 impl MockRepository {
     /// Outstanding diversion rules, a return-leg pair counting two, as the
@@ -171,6 +213,12 @@ impl MockRepository {
             unban_replays: Mutex::new(HashMap::new()),
             fail_unban_records: Default::default(),
             fail_event_outcomes: Default::default(),
+            #[cfg(test)]
+            after_event_insert: Default::default(),
+            #[cfg(test)]
+            before_event_outcome: Default::default(),
+            #[cfg(test)]
+            fail_ban_reads: Default::default(),
             fail_unban_reads: Default::default(),
             fail_withdrawal_begin: Mutex::new(None),
             #[cfg(test)]
@@ -608,6 +656,8 @@ impl RepositoryTrait for MockRepository {
 
     async fn insert_event(&self, event: &AttackEvent) -> Result<()> {
         self.events.lock().unwrap().push(event.clone());
+        #[cfg(test)]
+        pause_once(&self.after_event_insert).await;
         Ok(())
     }
 
@@ -679,6 +729,8 @@ impl RepositoryTrait for MockRepository {
         event_id: Uuid,
         record: &crate::domain::EventOutcomeRecord,
     ) -> Result<()> {
+        #[cfg(test)]
+        pause_once(&self.before_event_outcome).await;
         if self
             .fail_event_outcomes
             .load(std::sync::atomic::Ordering::SeqCst)
@@ -687,9 +739,20 @@ impl RepositoryTrait for MockRepository {
         }
         let mut events = self.events.lock().unwrap();
         if let Some(event) = events.iter_mut().find(|e| e.event_id == event_id)
-            && event.outcome.outcome == crate::domain::EventOutcome::NotRecorded
+            && (event.outcome.outcome == crate::domain::EventOutcome::NotRecorded
+                || (event.action == "ban"
+                    && event.outcome.outcome == crate::domain::EventOutcome::Failed))
         {
-            event.outcome = record.clone();
+            for id in &record.outcome_mitigation_ids {
+                if !event.outcome.outcome_mitigation_ids.contains(id) {
+                    event.outcome.outcome_mitigation_ids.push(*id);
+                }
+            }
+            event.outcome.outcome = record.outcome;
+            event
+                .outcome
+                .outcome_reason
+                .clone_from(&record.outcome_reason);
         }
         Ok(())
     }
@@ -699,6 +762,13 @@ impl RepositoryTrait for MockRepository {
         source: &str,
         external_id: &str,
     ) -> Result<Option<AttackEvent>> {
+        #[cfg(test)]
+        if self
+            .fail_ban_reads
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(PrefixdError::Internal("seeded ban read failure".into()));
+        }
         let events = self.events.lock().unwrap();
         // Find the most recent ban event with matching source and external_id
         Ok(events
@@ -1184,6 +1254,7 @@ impl RepositoryTrait for MockRepository {
             quotas.max_new_per_minute,
         )?;
         mitigations.push(m.clone());
+        record_ban_mitigation(&mut self.events.lock().unwrap(), m);
         self.audit
             .lock()
             .unwrap()
@@ -1299,6 +1370,32 @@ impl RepositoryTrait for MockRepository {
             *existing = m.clone();
             existing.origin_mode = origin_mode;
         }
+        Ok(())
+    }
+
+    async fn extend_mitigation_for_event(
+        &self,
+        expected: &Mitigation,
+        m: &Mitigation,
+    ) -> Result<()> {
+        let mut mitigations = self.mitigations.lock().unwrap();
+        let withdrawals = self.withdrawals.lock().unwrap();
+        let existing = mitigations
+            .iter_mut()
+            .find(|row| row.mitigation_id == expected.mitigation_id)
+            .ok_or(PrefixdError::MitigationNotFound(expected.mitigation_id))?;
+        if existing != expected || !existing.is_active() {
+            return Err(PrefixdError::BanAdmissionChanged);
+        }
+        if withdrawals.iter().any(|request| {
+            request.mitigation_id == existing.mitigation_id && request.completed_at.is_none()
+        }) {
+            return Err(PrefixdError::BanAdmissionChanged);
+        }
+        let origin_mode = existing.origin_mode;
+        *existing = m.clone();
+        existing.origin_mode = origin_mode;
+        record_ban_mitigation(&mut self.events.lock().unwrap(), m);
         Ok(())
     }
 

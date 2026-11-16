@@ -111,7 +111,7 @@ impl std::str::FromStr for ActionType {
 }
 
 /// Unknown keys fail closed: ignoring a match key would widen the rule (ADR 028).
-#[derive(Debug, Clone, Default, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MatchCriteria {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -404,7 +404,7 @@ pub(crate) fn blackhole_identity(prefix: &str) -> String {
     hex::encode(&hasher.finalize()[..16])
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActionParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dscp: Option<u8>,
@@ -470,7 +470,7 @@ pub struct MitigationRow {
 }
 
 /// Domain model for mitigation
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Mitigation {
     pub mitigation_id: Uuid,
     pub scope_hash: String,

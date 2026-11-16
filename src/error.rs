@@ -91,6 +91,11 @@ pub enum PrefixdError {
     #[error("detector unban storage unavailable; nothing was deleted, resend it")]
     UnbanStorageUnavailable,
 
+    /// The detector's selected row changed while storage finished an earlier
+    /// operation. No extension committed; the same event can be retried.
+    #[error("mitigation changed during detector admission; retry the event")]
+    BanAdmissionChanged,
+
     /// The API token store could not be read. Distinct from 401 so a storage
     /// outage does not look like a credential problem.
     #[error("credential store unavailable; retry")]
@@ -101,6 +106,7 @@ pub enum PrefixdError {
     DuplicateEvent {
         detector_source: String,
         external_id: String,
+        outcome: crate::domain::EventOutcomeRecord,
     },
 
     #[error("JSON serialization error: {0}")]
@@ -275,7 +281,8 @@ impl PrefixdError {
             | Self::Standby
             | Self::CredentialStoreUnavailable
             | Self::WithdrawalIncomplete(_)
-            | Self::UnbanStorageUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+            | Self::UnbanStorageUnavailable
+            | Self::BanAdmissionChanged => StatusCode::SERVICE_UNAVAILABLE,
             Self::DuplicateEvent { .. }
             | Self::Conflict(_)
             | Self::InjectionOwnerMismatch { .. } => StatusCode::CONFLICT,

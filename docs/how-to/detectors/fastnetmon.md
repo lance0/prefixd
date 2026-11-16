@@ -221,17 +221,22 @@ config on stdin (`curl -K -`), so the token never appears in `ps` or
 
 FastNetMon runs the script once per ban and once per unban and never repeats
 it. The script therefore retries the same event, with the same `event_id`,
-when prefixd cannot be reached or answers `503` (a standby or draining
-controller). It stops after `EVENT_POST_ATTEMPTS` attempts in total, each
-bounded by the two timeouts. It never retries a `4xx`, except that a retried
-ban meeting its own event ID as `409` was delivered by an earlier attempt and
-counts as sent. It refuses to run at all without a token, unless
+when prefixd cannot be reached or answers `503` (including a standby or draining
+controller, or a mitigation that changed during admission). It stops after
+`EVENT_POST_ATTEMPTS` attempts in total, each bounded by the two timeouts.
+It never retries a `4xx`, except that a retried
+ban meeting its own event ID as `409` counts as recorded intent only when
+`event_outcome` says `mitigated`, `extended` or `dry_run` and lists mitigation
+IDs. It logs `INTENT_RECORDED`, which does not prove current enforcement;
+refused or interrupted outcomes remain errors. It refuses to run at all without a token, unless
 `PREFIXD_AUTH_MODE=none`. A `403` means the token
 is not bound to `fastnetmon`, or is bound to another POP. A `409` on a ban
 means the event ID already arrived, or the rule conflicts with speaker or
 injection ownership; read the error text. A `503` can be returned after the
-event row was stored, so a retry can then get `409` with no mitigation: check
-`GET /v1/mitigations`, not just the event. Point `PREFIXD_API` at the active
+event row was stored. New incomplete attempts resume with the same event ID;
+committed intent returns `409` with its recorded outcome. Historical ambiguous
+attempts are refused with an unknown-outcome conflict; inspect them before
+authorizing a new event ID. Check `GET /v1/mitigations`, not just the event. Point `PREFIXD_API` at the active
 controller, or at a load balancer that routes by `GET /v1/ready`; see
 [controller fence and rolling deploys](../upgrading.md#controller-fence-and-rolling-deploys).
 
@@ -291,7 +296,8 @@ instead of `SUCCESS (<code>, status=...)`. Read the response body:
 | 403 | `error` | the token is not bound to `fastnetmon`, or is bound to another POP | `prefixdctl tokens list` |
 | 422 | `error` | guardrail or VPN scope refused; the event may still be recorded | error text: safelist, quota, `l3vpn` capability |
 | 429 | `error` | event rate limit | `http.rate_limit`; wait |
-| 409 | `error` | duplicate event, speaker binding or owner conflict | event ID; a `503`-then-`409` retry may have stored an event without a mitigation |
+| 409 | `error`, optional `event_outcome` | completed duplicate, historical unknown outcome, speaker binding or owner conflict | recorded outcome and mitigation IDs; unknown historical admission needs operator inspection |
+| 503 | `error` | controller unavailable, withdrawal incomplete, or a mitigation changed during admission | the script retries the same event ID; inspect the final response if retries exhaust |
 
 `SUCCESS` means prefixd committed mitigation intent (created or extended) and
 returned its ID; it does not prove the speaker exported the rule or a router

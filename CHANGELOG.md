@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrade notes
 
+- **Interrupted detector bans.** Migration 026 preserves a retry boundary:
+  new incomplete or failed bans with no admitted intent can resume using the
+  same event ID. Historical ambiguous attempts return an explicit unknown
+  outcome conflict; inspect their event, mitigation and audit before
+  authorizing a new admission with a new ID. Reinstall the FastNetMon script:
+  it requires a recorded admitted outcome before treating a retried `409` as
+  local intent, and logs `INTENT_RECORDED`. See
+  [interrupted detector bans](docs/how-to/upgrading.md#interrupted-detector-bans).
+
 - **Compose needs `POSTGRES_PASSWORD`.** `docker-compose.yml` no longer falls
   back to the published `prefixd_secret`; every Compose command refuses to run
   until the variable is set. Before upgrading an existing Compose stack, put
@@ -514,6 +523,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   schema.
 
 ### Fixed
+
+- A ban interrupted after storing its event can resume safely. Creation and
+  detector extension retain their event association atomically, and a final
+  outcome write cannot erase it. Completed retries return their stored outcome
+  with `409`; they never re-announce or re-extend withdrawn intent, including
+  a partial multi-rule admission.
 
 - `prefixdctl` works in the Compose controller. Both controller services set
   `PREFIXD_API=http://127.0.0.1:8080`, so `docker compose exec` runs no longer

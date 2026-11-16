@@ -206,6 +206,29 @@ events after their existing confidence normalization. Generic webhook adapters
 retain their configured scaling and clamping to 0–1. Rejected confidence does not consume the external event ID; corrected
 retries can use the same ID. Batch ingestion keeps per-item rejection results.
 
+### Interrupted ban retries
+
+Ban deduplication is per source and external `event_id`. A final outcome or
+any durably admitted mitigation returns `409` on resend. That response adds
+`event_outcome`, containing `outcome`, `outcome_reason` and
+`outcome_mitigation_ids`; these are historical local intent, not proof of
+current speaker or router state.
+
+A new event whose request stops after storage but before admission can resume
+with the same ID. It keeps its original UUID and payload and rechecks current
+policy and guardrails. A failed attempt with no admitted mitigation can retry;
+a final refusal cannot. If the selected mitigation changes or starts withdrawal
+while extension waits on storage, the response is `503` and the unapplied event
+can retry. Once any rule commits, a partial multi-rule admission
+is terminal for that ID, and retries neither extend those rules nor create
+remaining ones. Unconfirmed announcements belong to reconciliation.
+
+Migration 026 marks only new events as safe to resume. A historical incomplete
+or failed attempt without committed mitigation IDs returns a distinct `409`
+conflict: its admission outcome is unknown. Inspect the event, mitigations and
+audit before authorizing any new admission with a new ID; that response has no
+`event_outcome` claiming completion.
+
 ### Detector prefix events
 
 When `guardrails.allow_detector_prefix` is true and the event `source` appears
@@ -648,11 +671,14 @@ also retains visited pages for the app lifetime. Large-history memory and
 
 #### Event outcomes
 
-Every event the controller stores records what ingestion did with it, once,
-when processing finishes. An outcome describes the event at ingestion and is
-never updated: `failed` means the request failed then, and the linked
-mitigation's current status is authoritative, since withdrawal intent may be
-retained and reconciled later. This covers single, batch and signal-adapter events.
+Every stored event records what ingestion did with it when processing finishes.
+Final outcomes are write-once. A new ban's `failed` outcome can change when a
+retry recovers an attempt that admitted no mitigation. Admission commits
+`outcome_mitigation_ids` before any speaker call, so even `not_recorded` or
+`failed` can retain IDs after interruption. Those IDs never disappear during
+outcome recording or replay. The linked mitigation's current status remains
+authoritative; withdrawal and reconciliation may have changed it later.
+This covers single, batch and signal-adapter events.
 `outcome_mitigation_ids` lists the mitigations the event created, extended or
 withdrew (`[]` when none). `outcome_reason` explains an event that did not
 mitigate; for `mitigated`, `extended` and `dry_run` it names the first refused
