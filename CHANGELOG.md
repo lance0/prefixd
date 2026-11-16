@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrade notes
 
+- **Portless detector police rules match the whole protocol.** UDP/TCP events
+  without destination ports no longer borrow the service's `allowed_ports`.
+  New rules police all traffic of that protocol to the victim, legitimate
+  traffic included. Review rates, or set `require_top_ports: true` and supply
+  detector ports. Portless UDP/TCP detector discard is refused; prefix TCP
+  police still requires ports. Existing rules keep their saved matches until
+  expiry or withdrawal. See
+  [detector port selection](docs/how-to/upgrading.md#detector-events-without-destination-ports).
+
+- If earlier versions ran with debug logging, treat retained login logs as
+  credentials and reset affected operator passwords; those logs can contain
+  password hashes. See [earlier debug logs](docs/how-to/upgrading.md#password-hashes-in-earlier-debug-logs).
+
+- Reload the bundled Prometheus rules to enable
+  `PrefixdLeasedMitigationsAtRisk`, which uses new leased-intent and renewal
+  metrics from the upgraded controller. Keep 15-second scrape and evaluation
+  intervals; see [leased outage alert](docs/how-to/upgrading.md#leased-mitigation-outage-alert).
 - **Compose needs `POSTGRES_PASSWORD`.** `docker-compose.yml` no longer falls
   back to the published `prefixd_secret`; every Compose command refuses to run
   until the variable is set. Before upgrading an existing Compose stack, put
@@ -284,6 +301,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- Operator password hashes and incoming passwords are redacted from debug
+  output, including login and session diagnostics. Token creation responses,
+  database configuration and alert destination configuration also hide secrets
+  when formatted for debugging; their intended API and storage formats stay
+  unchanged.
+
 - The Compose stack has no default database password, and the repository's
   `.gitignore` covers `.env` and the bootstrap's `.prefixd/` token directory,
   so neither secret is committed by accident.
@@ -320,6 +343,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `PrefixdLeasedMitigationsAtRisk` alerts per controller instance and POP when
+  scrapes fail or renewal is overdue while leased FlowSpec or blackhole intent
+  was active. It retains the last complete count through database failures,
+  excludes unleased and dry-run rows, and checks renewal time on each scrape
+  even if the renewal task stalls. The outage lookback is one hour; the alert
+  reports renewal risk, not router enforcement.
 - `prefixdctl tokens verify` reads a token secret from `--token-file` or stdin,
   never the command line, looks it up in the local database and prints the
   token's name, scope, source, POP and status without the secret or its hash.
@@ -356,8 +385,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   script run directly and from a replayed NetFlow v5 flood must create the
   mitigation and the exact rule at FRR, re-bans must extend it, and unbans,
   including FastNetMon's own timer unban of the detected ban, must withdraw it.
-  The detected ban's rule polices the service's allowed UDP ports, not the
-  flood's port, because the script sends none. The lane runs prefixd in
+  The detected ban's rule polices UDP to the victim without a port component,
+  and the lane asserts that it covers the flood's port. The lane runs prefixd in
   `credentials` mode with API tokens minted by `prefixdctl`: the script holds
   an ingest token bound to `fastnetmon`, the driver an operator token for its
   reads, and an ingest token bound to another source and the operator token
@@ -524,6 +553,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A confirmed empty owned leased-intent inventory suppresses historical lease
   alarms; `has_leased_intent` keeps empty, unknown and failed reads distinct.
 
+- The API and upgrade guides distinguish an isolated session-store failure
+  from a database outage. Scoped-token requests need a current database read
+  and return `503` when it fails, including on `/v1/health/detail`; a stale
+  cookie does not change that response.
+- Detector floods without destination ports no longer target unrelated
+  service ports, missing attacks outside that list. The FastNetMon interop
+  lane now checks that the generated rule covers its synthetic flood's port.
+  Detector police events also cannot prolong a saved protocol-only UDP/TCP
+  discard.
+
+- Releases require the latest CI and Interop push runs to pass on the exact
+  release commit before tagging or publishing. A missing, pending or failed
+  Interop run, including the FastNetMon lane, blocks publication even when CI
+  passes. The FastNetMon lab now catches API refusals written only to stderr,
+  including during readiness, instead of accepting their zero exit status.
 - `prefixdctl` works in the Compose controller. Both controller services set
   `PREFIXD_API=http://127.0.0.1:8080`, so `docker compose exec` runs no longer
   fail against the CLI's default port 80.

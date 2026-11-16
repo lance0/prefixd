@@ -5,7 +5,7 @@
 #   - an existing TAG resolves to COMMIT (skipped when DRY_RUN=1, where the tag
 #     name is derived from Cargo.toml and may name an older release);
 #   - COMMIT is on origin/main;
-#   - a ci.yml push run on main succeeded for exactly COMMIT.
+#   - the latest ci.yml and interop.yml push runs on main succeeded for exactly COMMIT.
 #
 # Usage: scripts/release-check.sh vX.Y.Z [COMMIT]   (COMMIT defaults to TAG)
 # Needs full Git history and an authenticated gh. GITHUB_REPOSITORY overrides
@@ -41,7 +41,10 @@ git merge-base --is-ancestor "$commit" refs/remotes/origin/main ||
 echo "ok: $commit is on main"
 
 repo="${GITHUB_REPOSITORY:-$(gh repo view --json nameWithOwner --jq .nameWithOwner)}"
-successes="$(gh api "repos/$repo/actions/workflows/ci.yml/runs?head_sha=$commit&branch=main&event=push&status=success&per_page=1" --jq .total_count)"
-[ "$successes" -gt 0 ] ||
-    fail "no successful ci.yml push run on main for $commit; wait for exact-main CI before tagging"
-echo "ok: ci.yml passed on main for $commit"
+for workflow in ci.yml interop.yml; do
+    latest="$(gh api "repos/$repo/actions/workflows/$workflow/runs?head_sha=$commit&branch=main&event=push&per_page=1" \
+        --jq '.workflow_runs[0] | (if .status == "completed" then .conclusion else .status end) // "missing"')"
+    [ "$latest" = success ] ||
+        fail "latest $workflow push run on main for $commit is $latest; require success before tagging"
+    echo "ok: $workflow passed on main for $commit"
+done

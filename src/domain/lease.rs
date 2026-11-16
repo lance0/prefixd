@@ -600,7 +600,7 @@ pub fn leased_expiry(mitigations: &[Mitigation], owner: &str) -> Option<DateTime
         .max()
 }
 
-fn leased_by(mitigation: &Mitigation, owner: &str) -> bool {
+pub(crate) fn leased_by(mitigation: &Mitigation, owner: &str) -> bool {
     mitigation.is_active()
         && !mitigation.is_dry_run_origin()
         && recorded_owner(mitigation) == Some(owner)
@@ -714,6 +714,54 @@ mod tests {
         .with_owner(OWNER)
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn leased_alert_overdue_advances_without_a_renewal_tick_and_recovers() {
+        use crate::observability::metrics::{
+            INJECTION_LEASE_RENEWAL_OVERDUE, METRICS_TEST_LOCK, update_lease_metrics,
+        };
+        let _metrics = METRICS_TEST_LOCK.lock().await;
+        for seconds in [5, 60, 3600] {
+            let keeper = LeaseKeeper::new(OWNER.into(), seconds);
+            assert!(keeper.renewal_overdue(), "no generation is not live proof");
+            let speaker = FaultyBlackholes::default();
+            let generation = speaker
+                .announce_leased_blackhole(&route(), seconds)
+                .await
+                .unwrap()
+                .0;
+            keeper.observe_add(generation);
+            keeper.observe_intent_expiry(Some(Utc::now() + chrono::Duration::hours(3)));
+            update_lease_metrics(Some(&keeper));
+            assert_eq!(INJECTION_LEASE_RENEWAL_OVERDUE.get(), 0.0);
+            tokio::time::advance(keeper.renew_interval() * 2).await;
+            assert_eq!(keeper.health().state, LeaseState::Live);
+            update_lease_metrics(Some(&keeper));
+            assert_eq!(INJECTION_LEASE_RENEWAL_OVERDUE.get(), 1.0);
+            keeper.renew_once(&speaker).await;
+            update_lease_metrics(Some(&keeper));
+            assert_eq!(INJECTION_LEASE_RENEWAL_OVERDUE.get(), 0.0);
+            speaker.inner.expire_lease(OWNER).await;
+            keeper.renew_once(&speaker).await;
+            assert!(keeper.renewal_overdue());
+        }
+        assert!(
+            LeaseKeeper::new(OWNER.into(), 60)
+                .without_renewal()
+                .renewal_overdue()
+        );
+        // A recent successful add cannot hide a TTL-bound renewal stop.
+        let keeper = LeaseKeeper::new(OWNER.into(), 60);
+        tokio::time::advance(Duration::from_secs(20)).await;
+        keeper.observe_add(LeaseGeneration {
+            incarnation: 1,
+            sequence: 1,
+        });
+        tokio::time::advance(Duration::from_secs(21)).await;
+        assert!(keeper.renewal_overdue());
+        update_lease_metrics(None);
+        assert_eq!(INJECTION_LEASE_RENEWAL_OVERDUE.get(), 0.0);
+    }
+
     #[derive(Default)]
     struct Probe {
         incarnation: Option<u64>,
@@ -749,6 +797,9 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn health_intent_observation_preserves_unknown_and_failed_reads() {
+        let _metrics = crate::observability::metrics::METRICS_TEST_LOCK
+            .lock()
+            .await;
         let repo = std::sync::Arc::new(crate::db::MockRepository::new());
         let keeper = std::sync::Arc::new(LeaseKeeper::new(OWNER.into(), 60));
         let reconciler = crate::scheduler::ReconciliationLoop::new(

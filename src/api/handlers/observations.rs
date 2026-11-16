@@ -139,6 +139,7 @@ pub async fn list_audit(
 
 pub async fn metrics(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     crate::observability::metrics::update_speaker_metrics(state.announcer.as_ref());
+    crate::observability::metrics::update_lease_metrics(state.lease.as_deref());
     if let Some(pool) = &state.db_pool {
         crate::observability::metrics::update_db_pool_metrics(pool);
     }
@@ -906,6 +907,49 @@ fn format_duration(seconds: i64) -> String {
 mod tests {
     use super::{parse_duration_hours, parse_duration_minutes};
     use crate::db::PopInfo;
+
+    #[tokio::test(start_paused = true)]
+    async fn leased_alert_scrape_refreshes_overdue_without_renewal_task_progress() {
+        use axum::response::IntoResponse;
+        use std::sync::Arc;
+
+        let _metrics = crate::observability::metrics::METRICS_TEST_LOCK
+            .lock()
+            .await;
+        let mut settings: crate::config::Settings =
+            crate::config::parse_yaml(include_str!("../../../configs/prefixd.yaml")).unwrap();
+        settings.bgp.mode = crate::config::BgpMode::Mock;
+        settings.http.auth.mode = crate::config::AuthMode::None;
+        let lease = Arc::new(crate::domain::LeaseKeeper::new("scrape-test".into(), 60));
+        lease.observe_add(crate::bgp::LeaseGeneration {
+            incarnation: 1,
+            sequence: 1,
+        });
+        let state = crate::state::AppState::new(
+            settings,
+            crate::config::Inventory::new(vec![]),
+            crate::config::Playbooks { playbooks: vec![] },
+            Arc::new(crate::db::MockRepository::new()),
+            Arc::new(crate::bgp::MockAnnouncer::new()),
+            ".".into(),
+        )
+        .unwrap()
+        .with_lease(lease)
+        .unwrap();
+        for expected in [0, 1] {
+            let response = super::metrics(axum::extract::State(state.clone()))
+                .await
+                .into_response();
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let text = std::str::from_utf8(&body).unwrap();
+            assert!(text.contains(&format!(
+                "\nprefixd_injection_lease_renewal_overdue {expected}\n"
+            )));
+            tokio::time::advance(std::time::Duration::from_secs(40)).await;
+        }
+    }
 
     #[test]
     fn test_parse_duration_hours_saturates_conversion() {

@@ -318,7 +318,7 @@ fn request_failure(what: &str, error: reqwest::Error) -> Failure {
 /// Configuration for a single alert destination. Each secret is given inline
 /// or through its `*_env` key, which names an environment variable read when
 /// an alert is sent. Configuration never holds the variable's value.
-#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum DestinationConfig {
     Slack {
@@ -393,6 +393,14 @@ pub enum DestinationConfig {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         events: Vec<AlertEventType>,
     },
+}
+
+impl std::fmt::Debug for DestinationConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DestinationConfig")
+            .field("type", &self.destination_type())
+            .finish_non_exhaustive()
+    }
 }
 
 /// Keys each destination type accepts beside the `type` discriminator. A typo
