@@ -243,6 +243,10 @@ dashboard:
     - PREFIXD_API=http://prefixd:8080  # Docker service name (internal)
 ```
 
+The controller services set `PREFIXD_API=http://127.0.0.1:8080` too, so
+`prefixdctl` run with `docker compose exec` reaches the controller's own
+listener without `--api`.
+
 ### Remote Deployment
 
 When deploying to a remote server, ensure:
@@ -334,21 +338,18 @@ Resolved alerts (status=`resolved`) automatically withdraw the corresponding mit
 
 ### FastNetMon Setup
 
-Point FastNetMon's webhook notify URL at prefixd:
+FastNetMon runs the bundled notify script, `scripts/prefixd-fastnetmon.sh`. It
+posts each ban and unban to `/v1/events` with an ingest token bound to
+`fastnetmon`, read from a token file and handed to curl on stdin. An unban
+names the victim, so the ingest token is enough; it needs no read or withdraw
+access. Follow the [FastNetMon guide](detectors/fastnetmon.md) to install the
+script and its token file. Never put a token in `notify_script_args`, where any
+local user can read it from the process list.
 
-```ini
-# FastNetMon Advanced; keep notify_script_args on one physical line.
-notify_script_path = /usr/bin/curl
-notify_script_args = -X POST -H "Content-Type: application/json" -H "Authorization: Bearer <token>" -d @- http://prefixd.internal/v1/signals/fastnetmon
-```
-
-The webhook and the Community notify script authenticate with an API token in
-`Authorization: Bearer`, created with `prefixdctl tokens create`. The Community
-script provides additional retry, logging and unban behavior; its unban looks
-up and withdraws mitigations, which needs an operator token rather than an
-ingest token.
-
-The adapter classifies the attack vector from the traffic breakdown (UDP/SYN/ICMP/TCP) and maps `action` to confidence:
+FastNetMon Advanced's native web callback cannot send a credential, so it
+reaches `/v1/signals/fastnetmon` only through a localhost relay that adds the
+token; see [credential delivery per detector](../adr/034-source-bound-api-tokens.md#13-credential-delivery-per-detector).
+That adapter classifies the attack vector from the traffic breakdown (UDP/SYN/ICMP/TCP) and maps `action` to confidence:
 
 | FastNetMon Action | Confidence |
 |-------------------|------------|

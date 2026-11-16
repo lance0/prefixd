@@ -202,6 +202,14 @@ EVENT_CONNECT_TIMEOUT_SECONDS="5"
 EVENT_MAX_TIME_SECONDS="15"
 ```
 
+`PREFIXD_API` defaults to `http://localhost:8080`, which suits only a
+controller on the FastNetMon host itself. The Compose stack does not publish
+port 8080: point the script at nginx, `http://<compose-host>` on port 80, or at
+the HTTPS ingress in front of it. On that stack,
+`scripts/compose-bootstrap.sh` has already minted an ingest token bound to
+`fastnetmon` into `.prefixd/fastnetmon.token`; install that file as the token
+file above.
+
 The script sources `/etc/default/prefixd` when it exists; variables set there
 override the process environment. `PREFIXD_TOKEN_FILE` wins over
 `PREFIXD_TOKEN`; if you keep the token in `/etc/default/prefixd` instead, make

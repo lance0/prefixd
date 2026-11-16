@@ -47,6 +47,10 @@ class Profiles(unittest.TestCase):
                 self.assertNotIn(f"prefixd-{other}", services)
                 self.assertNotIn(other, services)
                 self.assertEqual(services[selected]["user"], "999:999")
+                # prefixdctl in the controller reaches its own listener, not nginx.
+                self.assertEqual(
+                    services[selected]["environment"]["PREFIXD_API"], "http://127.0.0.1:8080"
+                )
                 # Outlasts the shipped shutdown.drain_timeout_seconds of 30.
                 self.assertEqual(services[selected]["stop_grace_period"], "35s")
                 self.assertEqual(services[selected]["image"], CONTROLLER_IMAGE)

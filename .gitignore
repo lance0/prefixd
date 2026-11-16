@@ -1,5 +1,8 @@
 /target
 /data
+# Local secrets: the Compose .env and the bootstrap's API token files.
+/.env
+/.prefixd/
 *.db
 *.db-*
 lab/clab-*/

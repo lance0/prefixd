@@ -46,6 +46,17 @@ captures it; the token is shown once and cannot be retrieved later. Use
 `prefixd-gobgp` with the `gobgp` profile. For automation, store the token in
 the client's own secret store rather than a shell profile.
 
+On the Compose stack, `scripts/compose-bootstrap.sh rustbgpd` (or `gobgp`)
+mints an operator token into `.prefixd/cli.token`, mode 0600; see the
+[quickstart](../tutorials/quickstart.md#start-and-log-in). Compose sets
+`PREFIXD_API=http://127.0.0.1:8080` in both controller services, so the CLI
+inside the controller needs only the token, copied from your shell by name:
+
+```bash
+export PREFIXD_TOKEN="$(cat .prefixd/cli.token)"
+docker compose exec -e PREFIXD_TOKEN prefixd-rustbgpd prefixdctl status
+```
+
 ### Command-Line Options
 
 ```bash

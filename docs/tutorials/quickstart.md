@@ -13,19 +13,107 @@ cd prefixd
 docker compose --profile rustbgpd up -d --pull always --no-build
 docker compose --profile rustbgpd ps
 curl http://localhost/v1/health
-
-# Uses DATABASE_URL already set inside the controller; password entry is hidden.
-docker compose exec prefixd-rustbgpd prefixdctl operators create \
-  --username admin --role admin
+scripts/compose-bootstrap.sh rustbgpd
 open http://localhost
 ```
 
-Log in with that account. The shipped main config enables credentials,
-enforced operation and [leased FlowSpec](../reference/configuration.md#leased-flowspec):
+`scripts/compose-bootstrap.sh` runs `prefixdctl` inside `prefixd-rustbgpd`,
+which already has `DATABASE_URL`. There is no default or shared credential;
+the script creates each one:
+
+- **The first Admin.** It runs `prefixdctl operators create --username admin
+  --role admin` at a hidden password prompt, unless an Admin already exists.
+  Sign in to the dashboard with that account.
+- **A detector token.** An ingest token bound to the `fastnetmon` source, in
+  `.prefixd/fastnetmon.token`. It can post events as `fastnetmon` and nothing
+  else.
+- **A CLI token.** An operator token for `prefixdctl`, in `.prefixd/cli.token`.
+
+The `.prefixd` directory is mode 0700 and each token file 0600, owned by you;
+Git and Docker builds ignore it. The script never prints a token or puts one
+on a command line. Rerunning it keeps existing files; delete a file to mint a
+replacement under a new name, and revoke the old token with
+`prefixdctl tokens revoke`. `docker compose down -v` deletes the tokens with
+the database, so delete `.prefixd` too before bootstrapping again. To mint
+tokens by hand instead, see [create API tokens](../how-to/deployment.md#create-api-tokens).
+
+Run the CLI in the controller with the operator token:
+
+```bash
+export PREFIXD_TOKEN="$(cat .prefixd/cli.token)"
+docker compose exec -e PREFIXD_TOKEN prefixd-rustbgpd prefixdctl status
+```
+
+Compose sets `PREFIXD_API=http://127.0.0.1:8080` in the controller, so
+`prefixdctl` there reaches the controller's own listener. `-e PREFIXD_TOKEN`
+copies the token from your shell by name, so it never appears in a process
+listing. Without a token, `prefixdctl` exits 1 with `401 Unauthorized`
+and a hint to set `PREFIXD_TOKEN`. A missing or wrong client token never stops
+or restarts the controller, and it never affects the rules the controller
+holds.
+
+The shipped main config enables credentials, enforced operation and
+[leased FlowSpec](../reference/configuration.md#leased-flowspec):
 if prefixd stops while rustbgpd keeps running, rustbgpd withdraws its rules
 within one lease (60 seconds by default). The sample inventory/playbooks are examples: adapt them to
 your network before sending real attack events. A healthy local API or speaker
 is not proof of a BGP session or router enforcement.
+
+## Rehearse one detector event in dry-run
+
+Send one event as the detector would, then withdraw it, without announcing
+anything. Do this on a fresh stack: dry-run cannot withdraw rules announced in
+enforced mode (see [dry-run rollout](../cookbook/dry-run-rollout.md)).
+
+Set `mode: dry-run` on line 2 of `configs/prefixd.yaml`, then recreate the
+controller so it reads the edited file:
+
+```bash
+docker compose --profile rustbgpd up -d --no-build --force-recreate --no-deps prefixd-rustbgpd
+```
+
+Post a ban with the detector's ingest token. curl reads the header from a
+config on stdin (`-K -`), so the token stays off the command line:
+
+```bash
+printf 'header = "Authorization: Bearer %s"\n' "$(cat .prefixd/fastnetmon.token)" |
+  curl -sS -K - -X POST http://localhost/v1/events \
+    -H 'Content-Type: application/json' \
+    -d '{"timestamp":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'","source":"fastnetmon",
+         "victim_ip":"203.0.113.10","vector":"udp_flood","bps":5000000000,"confidence":0.9}'
+```
+
+A response with `"status":"accepted"` and a `mitigation_id` means inventory,
+policy and guardrails created a mitigation: the sample inventory owns
+`203.0.113.10`, and the sample `udp_flood` playbook polices it.
+`accepted_no_mitigation` means the address is not in the loaded inventory;
+`accepted_no_playbook` means no playbook matched the vector. List it, and
+confirm that the speaker holds no rule:
+
+```bash
+docker compose exec -e PREFIXD_TOKEN prefixd-rustbgpd prefixdctl mitigations list
+docker compose exec -e PREFIXD_TOKEN prefixd-rustbgpd prefixdctl speaker list-routes
+```
+
+Withdraw it as the detector would, with an unban that names the victim:
+
+```bash
+printf 'header = "Authorization: Bearer %s"\n' "$(cat .prefixd/fastnetmon.token)" |
+  curl -sS -K - -X POST http://localhost/v1/events \
+    -H 'Content-Type: application/json' \
+    -d '{"timestamp":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'","source":"fastnetmon",
+         "victim_ip":"203.0.113.10","vector":"unknown","action":"unban"}'
+docker compose exec -e PREFIXD_TOKEN prefixd-rustbgpd prefixdctl mitigations list
+```
+
+The unban answers `"status":"withdrawn"` with the mitigation's ID, and the list
+shows it as `withdrawn`. An operator withdraws with
+`prefixdctl mitigations withdraw <id> --reason <text>` instead.
+
+Return to enforced operation: restore `mode: enforced` (for example with
+`git checkout configs/prefixd.yaml`) and recreate the controller with the same
+command. Enforced startup refuses to run while a rehearsal mitigation is still
+live, so withdraw it first.
 
 ## Build from source
 
@@ -176,9 +264,13 @@ For a **fresh** deployment:
 
 ```bash
 docker compose --profile gobgp up -d --pull always --no-build
-docker compose exec prefixd-gobgp prefixdctl operators create \
-  --username admin --role admin
+scripts/compose-bootstrap.sh gobgp
+export PREFIXD_TOKEN="$(cat .prefixd/cli.token)"
+docker compose exec -e PREFIXD_TOKEN prefixd-gobgp prefixdctl status
 ```
+
+The rehearsal works the same way: edit `configs/prefixd-gobgp.yaml`, recreate
+`prefixd-gobgp`, and run the CLI there.
 
 The controller shares GoBGP's network namespace; management listens only on
 `127.0.0.1:50051`. Recreate both together if that namespace owner is recreated:
@@ -217,11 +309,12 @@ Adapt the sample policy to your network, then connect a signal source:
    detector.
 4. **Connect a detector.** Use the [FastNetMon](../how-to/detectors/fastnetmon.md)
    notify script, [Alertmanager](../how-to/deployment.md#alertmanager-setup), or a
-   [generic webhook adapter](../how-to/detectors/generic-webhook.md). Detectors
-   authenticate with an API token you create in the controller service with
-   `prefixdctl tokens create`; see
-   [create API tokens](../how-to/deployment.md#create-api-tokens) and each
-   detector's guide for the scope it needs.
+   [generic webhook adapter](../how-to/detectors/generic-webhook.md). The
+   bootstrap's `.prefixd/fastnetmon.token` is ready for FastNetMon; mint one
+   ingest token per other detector source, as in
+   [create API tokens](../how-to/deployment.md#create-api-tokens). On this
+   stack a detector reaches prefixd through nginx at `http://<host>` on port
+   80; the controller's port 8080 is not published.
 5. **Peer with your routers.** Replace the documentation peer in
    `configs/rustbgpd.toml` (or `configs/gobgp.conf`) and configure FlowSpec
    import on the router. See [router configuration](../how-to/deployment.md#router-configuration)

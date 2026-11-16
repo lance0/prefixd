@@ -8,6 +8,8 @@ x-controller: &controller
   user: "999:999"
   environment:
     RUST_LOG: sqlx::postgres::notice=warn,info
+    # prefixdctl in this container talks to the controller's own listener, not nginx.
+    PREFIXD_API: http://127.0.0.1:8080
     DATABASE_URL: postgres://prefixd:${POSTGRES_PASSWORD:-prefixd_secret}@postgres:5432/prefixd
   # Above shutdown.drain_timeout_seconds (30), so stop and restart let the drain finish.
   stop_grace_period: 35s

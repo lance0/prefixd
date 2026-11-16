@@ -320,6 +320,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and `lab/interop/fastnetmon-probe.sh` record the image's missing `curl`,
   each notify call's arguments and stdin, and what is unqualified for
   FastNetMon Advanced.
+- `scripts/compose-bootstrap.sh rustbgpd` (or `gobgp`) bootstraps a fresh
+  Compose stack with no shared secret. In the running controller service it
+  creates the first Admin at a hidden password prompt, unless one exists, and
+  mints an ingest token bound to `fastnetmon` and an operator token for
+  `prefixdctl` into `.prefixd/` (directory 0700, files 0600). It never prints
+  a token or passes one on a command line, keeps existing token files, and
+  stops on any failure without leaving a partial file. The quickstart uses it,
+  then rehearses one detector event and its unban in dry-run with the ingest
+  token through `curl -K -`.
 
 ### Changed
 
@@ -425,6 +434,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `prefixdctl` works in the Compose controller. Both controller services set
+  `PREFIXD_API=http://127.0.0.1:8080`, so `docker compose exec` runs no longer
+  fail against the CLI's default port 80. The repository's `.gitignore` now
+  covers `.env` and `.prefixd/`.
+- The deployment guide's FastNetMon setup put the API token in
+  `notify_script_args`, where the process list shows it, and said the bundled
+  script needs an operator token. It now points to the FastNetMon guide, whose
+  script needs only an ingest token from a file. The FastNetMon guide notes
+  that the Compose stack does not publish port 8080, the script's default.
 - One victim sent in different spellings is now one victim. FastNetMon sends
   IPv6 zero-padded (`2001:0db8:0113::0010`) while other detectors send the
   canonical form, so the two never correlated toward `min_sources`, the

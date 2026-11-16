@@ -87,13 +87,16 @@ cd prefixd
 docker compose --profile rustbgpd up -d --pull always --no-build
 ```
 
-Create the first administrator at the hidden password prompt, then check
-liveness:
+Check liveness, then bootstrap credentials. The script creates the first
+administrator at a hidden password prompt and mints two API tokens into
+`.prefixd/` (mode 0600): an ingest token for FastNetMon and an operator token
+for `prefixdctl`:
 
 ```bash
-docker compose exec prefixd-rustbgpd prefixdctl operators create \
-  --username admin --role admin
 curl http://localhost/v1/health
+scripts/compose-bootstrap.sh rustbgpd
+export PREFIXD_TOKEN="$(cat .prefixd/cli.token)"
+docker compose exec -e PREFIXD_TOKEN prefixd-rustbgpd prefixdctl status
 ```
 
 Open `http://localhost` and sign in. nginx serves the dashboard and API on port
@@ -119,8 +122,9 @@ and browser-memory limits.
 *Synthetic data; router installation is unobserved.*
 
 For GoBGP, start a fresh deployment with
-`docker compose --profile gobgp up -d --pull always --no-build` and run
-controller commands in `prefixd-gobgp`. Run one profile at a time: switching
+`docker compose --profile gobgp up -d --pull always --no-build`, run
+`scripts/compose-bootstrap.sh gobgp`, and run controller commands in
+`prefixd-gobgp`. Run one profile at a time: switching
 doesn't move active rules or the database's speaker binding. The
 [quickstart](docs/tutorials/quickstart.md) covers configuration storage,
 building from source and troubleshooting.
