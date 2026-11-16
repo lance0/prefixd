@@ -57,6 +57,7 @@ pub async fn list_speaker_routes(
             Json(ErrorResponse {
                 error: "Local FlowSpec observation is unsupported by this speaker".into(),
                 retry_after_seconds: None,
+                event_outcome: None,
             }),
         )
             .into_response());
@@ -73,6 +74,7 @@ pub async fn list_speaker_routes(
                 Json(ErrorResponse {
                     error: "Local FlowSpec observation failed; inventory is unavailable".into(),
                     retry_after_seconds: None,
+                    event_outcome: None,
                 }),
             )
                 .into_response());

@@ -16,7 +16,7 @@
 # withdraws the live mitigations fastnetmon created for it on that POP, so the
 # script keeps no state between ban and unban.
 #
-# Needs bash and curl only. The token is read from PREFIXD_TOKEN_FILE, or from
+# Needs bash, curl and jq. The token is read from PREFIXD_TOKEN_FILE, or from
 # PREFIXD_TOKEN, and handed to curl in a config on stdin (curl -K -), never on
 # its command line.
 
@@ -52,10 +52,12 @@ log() {
     echo "$(date -u +%Y-%m-%dT%H:%M:%S%z) $*" >> "$LOG_FILE"
 }
 
-if ! command -v curl &> /dev/null; then
-    log "ERROR: curl is required"
-    exit 1
-fi
+for required_tool in curl jq; do
+    if ! command -v "$required_tool" &> /dev/null; then
+        log "ERROR: $required_tool is required"
+        exit 1
+    fi
+done
 
 if [[ -z "$PREFIXD_API" ]]; then
     log "ERROR: PREFIXD_API is not set: set it to the controller's ingress, such as https://prefixd.example.net"
@@ -249,9 +251,8 @@ fi
 log "Sending $API_ACTION for $IP ($VECTOR, ${PPS} pps, event_id=$EVENT_ID)"
 
 # FastNetMon runs the script once per ban and once per unban and never repeats
-# it. Retry the same event (same event_id) only when it never reached prefixd
-# or a standby or draining controller answered 503; any 4xx is final. Each
-# attempt is bounded by the connect and total timeouts.
+# it. Retry transport failures and retryable 503 responses with the same event_id;
+# any 4xx is final. Each attempt is bounded by the connect and total timeouts.
 ATTEMPT=1
 while true; do
     CURL_STATUS=0
@@ -278,12 +279,23 @@ while true; do
         log "SUCCESS ($HTTP_CODE, status=${STATUS:-unknown}): $BODY"
         exit 0
     fi
-    # A retried ban whose earlier attempt reached prefixd before timing out
-    # or getting 503 meets its own event ID: the ban was delivered.
-    if [[ "$API_ACTION" == "ban" && "$ATTEMPT" -gt 1 && "$HTTP_CODE" == "409" \
-        && "$BODY" == *"duplicate event from fastnetmon: $EVENT_ID"* ]]; then
-        log "NO_MITIGATION ($HTTP_CODE, status=delivered_by_earlier_attempt): $BODY"
-        exit 0
+    # A duplicate proves intent only when its recorded outcome says so. A
+    # refusal or interrupted outcome must not silently become delivery success.
+    if [[ "$CURL_STATUS" -eq 0 && "$API_ACTION" == "ban" && "$ATTEMPT" -gt 1 && "$HTTP_CODE" == "409" ]]; then
+        if OUTCOME=$(printf '%s' "$BODY" | jq -ers --arg event_id "$EVENT_ID" '
+            select(length == 1) | .[0]
+            | select(type == "object")
+            | select(.error == ("duplicate event from fastnetmon: " + $event_id))
+            | .event_outcome | select(type == "object")
+            | select(.outcome == "mitigated" or .outcome == "extended" or .outcome == "dry_run")
+            | select(.outcome_mitigation_ids | type == "array" and length > 0)
+            | select(.outcome_mitigation_ids | all(.[];
+                type == "string" and length == 36 and test("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")))
+            | .outcome
+        ' 2>/dev/null); then
+            log "INTENT_RECORDED ($HTTP_CODE, outcome=$OUTCOME): $BODY"
+            exit 0
+        fi
     fi
     if [[ ( "$CURL_STATUS" -ne 0 || "$HTTP_CODE" == "503" ) && "$ATTEMPT" -lt "$EVENT_POST_ATTEMPTS" ]]; then
         log "${API_ACTION^} for $IP not accepted (curl=$CURL_STATUS, http=$HTTP_CODE), attempt $ATTEMPT/$EVENT_POST_ATTEMPTS; retrying in ${EVENT_POST_DELAY_SECONDS}s"

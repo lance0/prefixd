@@ -146,6 +146,11 @@ pub const MIGRATIONS: &[(i32, &str, &str)] = &[
         "unban_replay",
         include_str!("../../migrations/025_unban_replay.sql"),
     ),
+    (
+        26,
+        "ban_retry_boundary",
+        include_str!("../../migrations/026_ban_retry_boundary.sql"),
+    ),
 ];
 
 /// The highest version this binary knows. A database recording a higher

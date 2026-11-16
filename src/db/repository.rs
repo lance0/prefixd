@@ -151,9 +151,43 @@ pub struct Repository {
 }
 
 impl Repository {
+    async fn withdrawal_transaction(&self) -> Result<sqlx::Transaction<'static, sqlx::Postgres>> {
+        // A cancelled BEGIN must still produce a transaction whose drop rolls back.
+        let pool = self.pool.clone();
+        let mut tx = tokio::spawn(async move {
+            pool.begin_with("BEGIN ISOLATION LEVEL READ COMMITTED")
+                .await
+        })
+        .await
+        .map_err(|_| sqlx::Error::PoolTimedOut)??;
+        sqlx::query("SET LOCAL lock_timeout = '5s'")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("SET LOCAL statement_timeout = '5s'")
+            .execute(&mut *tx)
+            .await?;
+        Ok(tx)
+    }
+
+    async fn lock_unban_replay(
+        connection: &mut PgConnection,
+        pop: &str,
+        source: &str,
+        external_id: Option<&str>,
+    ) -> Result<()> {
+        if let Some(external_id) = external_id.filter(|id| !id.is_empty()) {
+            let key = serde_json::to_string(&("prefixd:unban", pop, source, external_id))?;
+            sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+                .bind(key)
+                .execute(connection)
+                .await?;
+        }
+        Ok(())
+    }
+
     /// One insert, so an unban's replay record exists exactly when its event does.
-    async fn insert_event_row(
-        &self,
+    async fn insert_event_on(
+        connection: &mut PgConnection,
         event: &AttackEvent,
         unban: Option<(&str, &[Uuid])>,
     ) -> Result<()> {
@@ -162,8 +196,8 @@ impl Repository {
             INSERT INTO events (
                 event_id, external_event_id, source, event_timestamp, ingested_at,
                 victim_ip, vector, protocol, bps, pps, top_dst_ports_json, top_src_ports_json, confidence,
-                action, raw_details, unban_pop, unban_target_ids
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+                action, raw_details, unban_pop, unban_target_ids, ban_admission_pop
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
             "#,
         )
         .bind(event.event_id)
@@ -183,7 +217,99 @@ impl Repository {
         .bind(&event.raw_details)
         .bind(unban.map(|(pop, _)| pop))
         .bind(unban.map(|(_, targets)| targets))
-        .execute(&self.pool)
+        .bind(&event.ban_admission_pop)
+        .execute(connection)
+        .await?;
+        Ok(())
+    }
+
+    async fn begin_withdrawal_on(
+        connection: &mut PgConnection,
+        request: &WithdrawalRequest,
+    ) -> Result<WithdrawalRequest> {
+        sqlx::query(
+            r#"INSERT INTO withdrawal_requests (
+                operation_id, mitigation_id, pop, nlri_hash, rule_json, mitigation_updated_at,
+                terminal_status, actor_type, actor, reason, requested_at, speaker_delete_required, target_id,
+                rule_kind, detector_source
+            ) SELECT $1, mitigation_id, pop, $4, $5, updated_at, $7, $8, $9, $10, $11, $12, $13, $14, $15
+              FROM mitigations WHERE mitigation_id = $2 AND pop = $3 AND updated_at = $6
+                AND status IN ('active', 'escalated')
+                AND (($13::uuid IS NULL AND NOT EXISTS (SELECT 1 FROM speaker_pop_bindings WHERE pop = $3))
+                  OR EXISTS (SELECT 1 FROM speaker_pop_bindings WHERE pop = $3 AND target_id = $13))
+              ON CONFLICT (mitigation_id) DO NOTHING"#,
+        )
+        .bind(request.operation_id)
+        .bind(request.mitigation_id)
+        .bind(&request.pop)
+        .bind(&request.nlri_hash)
+        .bind(&request.rule_json)
+        .bind(request.mitigation_updated_at)
+        .bind(&request.terminal_status)
+        .bind(&request.actor_type)
+        .bind(&request.actor)
+        .bind(&request.reason)
+        .bind(request.requested_at)
+        .bind(request.speaker_delete_required)
+        .bind(request.target_id)
+        .bind(&request.rule_kind)
+        .bind(&request.detector_source)
+        .execute(&mut *connection)
+        .await?;
+        sqlx::query_as::<_, WithdrawalRequest>(
+            "SELECT * FROM withdrawal_requests WHERE mitigation_id = $1 AND completed_at IS NULL AND pop = $2 AND target_id IS NOT DISTINCT FROM $3",
+        )
+        .bind(request.mitigation_id)
+        .bind(&request.pop)
+        .bind(request.target_id)
+        .fetch_optional(connection)
+        .await?
+        .ok_or_else(|| {
+            crate::error::PrefixdError::Conflict(
+                "mitigation changed before withdrawal was persisted".into(),
+            )
+        })
+    }
+
+    async fn update_mitigation_on(connection: &mut PgConnection, m: &Mitigation) -> Result<()> {
+        let match_json = serde_json::to_string(&m.match_criteria)?;
+        let action_params_json = serde_json::to_string(&m.action_params)?;
+
+        sqlx::query(
+            r#"
+            UPDATE mitigations SET
+                scope_hash = $2, status = $3, updated_at = $4, expires_at = $5,
+                withdrawn_at = $6, last_event_id = $7, match_json = $8,
+                action_type = $9, action_params_json = $10, reason = $11, rejection_reason = $12
+            WHERE mitigation_id = $1
+            "#,
+        )
+        .bind(m.mitigation_id)
+        .bind(&m.scope_hash)
+        .bind(m.status.as_str())
+        .bind(m.updated_at)
+        .bind(m.expires_at)
+        .bind(m.withdrawn_at)
+        .bind(m.last_event_id)
+        .bind(&match_json)
+        .bind(m.action_type.as_str())
+        .bind(&action_params_json)
+        .bind(&m.reason)
+        .bind(&m.rejection_reason)
+        .execute(connection)
+        .await?;
+        Ok(())
+    }
+
+    async fn record_ban_mitigation_on(connection: &mut PgConnection, m: &Mitigation) -> Result<()> {
+        sqlx::query(
+            "UPDATE events SET outcome_mitigation_ids = array_append(outcome_mitigation_ids, $2)
+             WHERE event_id = $1 AND action = 'ban' AND (outcome IS NULL OR outcome = 'failed')
+               AND NOT ($2 = ANY(outcome_mitigation_ids))",
+        )
+        .bind(m.last_event_id)
+        .bind(m.mitigation_id)
+        .execute(connection)
         .await?;
         Ok(())
     }
@@ -560,27 +686,95 @@ impl RepositoryTrait for Repository {
     }
 
     async fn insert_event(&self, event: &AttackEvent) -> Result<()> {
-        self.insert_event_row(event, None).await
+        Self::insert_event_on(&mut *self.pool.acquire().await?, event, None).await
     }
 
-    async fn insert_unban_event(
+    #[cfg(any(test, feature = "test-utils"))]
+    async fn insert_legacy_unban_for_test(
         &self,
         event: &AttackEvent,
         pop: &str,
         targets: &[Uuid],
     ) -> Result<()> {
-        self.insert_event_row(event, Some((pop, targets))).await
+        Self::insert_event_on(
+            &mut *self.pool.acquire().await?,
+            event,
+            Some((pop, targets)),
+        )
+        .await
     }
 
-    async fn set_unban_targets(&self, event_id: Uuid, targets: &[Uuid]) -> Result<()> {
-        sqlx::query(
-            "UPDATE events SET unban_target_ids = $2 WHERE event_id = $1 AND unban_pop IS NOT NULL",
+    async fn begin_unban(
+        &self,
+        event: &AttackEvent,
+        pop: &str,
+        targets: &[crate::domain::PreparedDetectorWithdrawal],
+    ) -> Result<Vec<WithdrawalRequest>> {
+        let mut tx = self.withdrawal_transaction().await?;
+        Self::lock_unban_replay(
+            &mut tx,
+            pop,
+            &event.source,
+            event.external_event_id.as_deref(),
         )
-        .bind(event_id)
-        .bind(targets)
-        .execute(&self.pool)
         .await?;
-        Ok(())
+        let mut ordered: Vec<_> = targets.iter().collect();
+        ordered.sort_unstable_by_key(|target| target.request.mitigation_id);
+        let mut locked = Vec::with_capacity(targets.len());
+        for target in &ordered {
+            let request = &target.request;
+            let row = sqlx::query_as::<_, MitigationRow>(
+                "SELECT * FROM mitigations WHERE mitigation_id = $1 FOR UPDATE",
+            )
+            .bind(request.mitigation_id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or(PrefixdError::MitigationNotFound(request.mitigation_id))?;
+            locked.push(Mitigation::from_row(row)?);
+        }
+        if !targets.is_empty() {
+            let binding: Option<Uuid> =
+                sqlx::query_scalar("SELECT target_id FROM speaker_pop_bindings WHERE pop = $1")
+                    .bind(pop)
+                    .fetch_optional(&mut *tx)
+                    .await?;
+            let rows = sqlx::query_as::<_, MitigationRow>(
+                "SELECT * FROM mitigations WHERE pop = $1 AND status IN ('active', 'escalated')",
+            )
+            .bind(pop)
+            .fetch_all(&mut *tx)
+            .await?;
+            let owners = rows
+                .into_iter()
+                .map(Mitigation::from_row)
+                .collect::<Result<Vec<_>>>()?;
+            for (target, current) in ordered.iter().zip(&locked) {
+                let request = &target.request;
+                if request.target_id != binding {
+                    return Err(crate::domain::binding_mismatch());
+                }
+                if current != &target.expected
+                    || request.pop != pop
+                    || request.detector_source.as_deref() != Some(event.source.as_str())
+                {
+                    return Err(PrefixdError::Conflict(
+                        "detector withdrawal target changed".into(),
+                    ));
+                }
+                crate::domain::validate_withdrawal_owner(request, current, &owners)?;
+            }
+        }
+        let mut requests = Vec::with_capacity(targets.len());
+        for target in targets {
+            requests.push(Self::begin_withdrawal_on(&mut tx, &target.request).await?);
+        }
+        let ids: Vec<_> = requests
+            .iter()
+            .map(|request| request.mitigation_id)
+            .collect();
+        Self::insert_event_on(&mut tx, event, Some((pop, &ids))).await?;
+        tx.commit().await?;
+        Ok(requests)
     }
 
     async fn find_unban_replay(
@@ -589,6 +783,10 @@ impl RepositoryTrait for Repository {
         source: &str,
         external_id: &str,
     ) -> Result<Option<UnbanReplay>> {
+        // A dropped COMMIT can still land. Wait for that entire unban before
+        // deciding that its replay record is absent.
+        let mut tx = self.withdrawal_transaction().await?;
+        Self::lock_unban_replay(&mut tx, pop, source, Some(external_id)).await?;
         let row: Option<(Uuid, Option<String>, String, Vec<Uuid>)> = sqlx::query_as(
             r#"
             SELECT event_id, external_event_id, victim_ip, unban_target_ids
@@ -602,8 +800,9 @@ impl RepositoryTrait for Repository {
         .bind(pop)
         .bind(source)
         .bind(external_id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await?;
+        tx.commit().await?;
         Ok(row.map(
             |(event_id, external_event_id, victim_ip, target_ids)| UnbanReplay {
                 event_id,
@@ -619,22 +818,43 @@ impl RepositoryTrait for Repository {
         source: &str,
         external_id: &str,
     ) -> Result<Option<AttackEvent>> {
-        let event = sqlx::query_as::<_, AttackEvent>(
+        // Row locking linearizes a retry with an earlier admission's COMMIT.
+        // Bound this new wait, including pool acquisition, and let a dropped
+        // BEGIN finish so its detached result rolls back normally.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let pool = self.pool.clone();
+            let mut tx = tokio::spawn(async move {
+                pool.begin_with("BEGIN ISOLATION LEVEL READ COMMITTED").await
+            })
+            .await
+            .map_err(|_| sqlx::Error::PoolTimedOut)??;
+            sqlx::query("SET LOCAL lock_timeout = '3s'")
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query("SET LOCAL statement_timeout = '4s'")
+                .execute(&mut *tx)
+                .await?;
+            let event = sqlx::query_as::<_, AttackEvent>(
             r#"
             SELECT event_id, external_event_id, source, event_timestamp, ingested_at,
                    victim_ip, vector, protocol, bps, pps, top_dst_ports_json, top_src_ports_json, confidence,
-                   action, raw_details, outcome, outcome_reason, outcome_mitigation_ids
+                   action, raw_details, outcome, outcome_reason, outcome_mitigation_ids, ban_admission_pop
             FROM events
             WHERE source = $1 AND external_event_id = $2 AND action = 'ban'
-            ORDER BY ingested_at DESC
+            ORDER BY ingested_at DESC, event_id DESC
             LIMIT 1
+            FOR UPDATE
             "#,
         )
         .bind(source)
         .bind(external_id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await?;
-        Ok(event)
+            tx.commit().await?;
+            Ok::<_, PrefixdError>(event)
+        })
+        .await
+        .map_err(|_| sqlx::Error::PoolTimedOut)?
     }
 
     async fn list_events_filtered(
@@ -646,7 +866,7 @@ impl RepositoryTrait for Repository {
             r#"
             SELECT event_id, external_event_id, source, event_timestamp, ingested_at,
                    victim_ip, vector, protocol, bps, pps, top_dst_ports_json, top_src_ports_json, confidence,
-                   action, raw_details, outcome, outcome_reason, outcome_mitigation_ids
+                   action, raw_details, outcome, outcome_reason, outcome_mitigation_ids, ban_admission_pop
             FROM events
             WHERE ($2::timestamptz IS NULL OR (ingested_at, event_id) < ($2, $5))
               AND ($3::timestamptz IS NULL OR ingested_at >= $3)
@@ -686,17 +906,33 @@ impl RepositoryTrait for Repository {
         event_id: Uuid,
         record: &crate::domain::EventOutcomeRecord,
     ) -> Result<()> {
-        // Written once: a later call never replaces a recorded outcome.
+        // As for bounded reads, finish BEGIN even if the caller's deadline
+        // drops this future; the detached result then rolls back normally.
+        let pool = self.pool.clone();
+        let mut tx = tokio::spawn(async move { pool.begin().await })
+            .await
+            .map_err(|_| sqlx::Error::PoolTimedOut)??;
+        sqlx::query("SET LOCAL lock_timeout = '3s'")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("SET LOCAL statement_timeout = '4s'")
+            .execute(&mut *tx)
+            .await?;
+        // A failed ban may recover; no final outcome or committed ID is erased.
         sqlx::query(
-            "UPDATE events SET outcome = $2, outcome_reason = $3, outcome_mitigation_ids = $4
-             WHERE event_id = $1 AND outcome IS NULL",
+            "UPDATE events SET outcome = $2, outcome_reason = $3,
+                 outcome_mitigation_ids = outcome_mitigation_ids || ARRAY(
+                     SELECT id FROM unnest($4::uuid[]) AS id
+                     WHERE NOT (id = ANY(outcome_mitigation_ids)))
+             WHERE event_id = $1 AND (outcome IS NULL OR (action = 'ban' AND outcome = 'failed'))",
         )
         .bind(event_id)
         .bind(record.outcome.as_str())
         .bind(&record.outcome_reason)
         .bind(&record.outcome_mitigation_ids)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -750,48 +986,16 @@ impl RepositoryTrait for Repository {
     }
 
     async fn begin_withdrawal(&self, request: &WithdrawalRequest) -> Result<WithdrawalRequest> {
-        sqlx::query(
-            r#"INSERT INTO withdrawal_requests (
-                operation_id, mitigation_id, pop, nlri_hash, rule_json, mitigation_updated_at,
-                terminal_status, actor_type, actor, reason, requested_at, speaker_delete_required, target_id,
-                rule_kind, detector_source
-            ) SELECT $1, mitigation_id, pop, $4, $5, updated_at, $7, $8, $9, $10, $11, $12, $13, $14, $15
-              FROM mitigations WHERE mitigation_id = $2 AND pop = $3 AND updated_at = $6
-                AND status IN ('active', 'escalated')
-                AND (($13::uuid IS NULL AND NOT EXISTS (SELECT 1 FROM speaker_pop_bindings WHERE pop = $3))
-                  OR EXISTS (SELECT 1 FROM speaker_pop_bindings WHERE pop = $3 AND target_id = $13))
-              ON CONFLICT (mitigation_id) DO NOTHING"#,
-        )
-        .bind(request.operation_id)
-        .bind(request.mitigation_id)
-        .bind(&request.pop)
-        .bind(&request.nlri_hash)
-        .bind(&request.rule_json)
-        .bind(request.mitigation_updated_at)
-        .bind(&request.terminal_status)
-        .bind(&request.actor_type)
-        .bind(&request.actor)
-        .bind(&request.reason)
-        .bind(request.requested_at)
-        .bind(request.speaker_delete_required)
-        .bind(request.target_id)
-        .bind(&request.rule_kind)
-        .bind(&request.detector_source)
-        .execute(&self.pool)
-        .await?;
-        sqlx::query_as::<_, WithdrawalRequest>(
-            "SELECT * FROM withdrawal_requests WHERE mitigation_id = $1 AND completed_at IS NULL AND pop = $2 AND target_id IS NOT DISTINCT FROM $3",
-        )
-        .bind(request.mitigation_id)
-        .bind(&request.pop)
-        .bind(request.target_id)
-        .fetch_optional(&self.pool)
-        .await?
-        .ok_or_else(|| {
-            crate::error::PrefixdError::Conflict(
-                "mitigation changed before withdrawal was persisted".into(),
-            )
-        })
+        let mut tx = self.withdrawal_transaction().await?;
+        // Operator and scheduler withdrawals obey the same lock protocol as
+        // detector unbans and extensions, including when COMMIT outlives a caller.
+        sqlx::query("SELECT mitigation_id FROM mitigations WHERE mitigation_id = $1 FOR UPDATE")
+            .bind(request.mitigation_id)
+            .execute(&mut *tx)
+            .await?;
+        let stored = Self::begin_withdrawal_on(&mut tx, request).await?;
+        tx.commit().await?;
+        Ok(stored)
     }
 
     async fn pending_withdrawals(&self, pop: Option<&str>) -> Result<Vec<WithdrawalRequest>> {
@@ -963,6 +1167,7 @@ impl RepositoryTrait for Repository {
             // Same transaction as the row: never an entry without a row, or a row without one.
             Self::insert_audit_on(&mut tx, &AuditEntry::mitigation_created(m, actor)).await?;
             Self::insert_mitigation_on(&mut tx, m).await?;
+            Self::record_ban_mitigation_on(&mut tx, m).await?;
             Ok::<_, PrefixdError>(tx)
         }).await.map_err(|_| PrefixdError::Internal("mitigation admission timed out".into()))??;
         tx.commit().await?;
@@ -970,32 +1175,53 @@ impl RepositoryTrait for Repository {
     }
 
     async fn update_mitigation(&self, m: &Mitigation) -> Result<()> {
-        let match_json = serde_json::to_string(&m.match_criteria)?;
-        let action_params_json = serde_json::to_string(&m.action_params)?;
+        Self::update_mitigation_on(&mut *self.pool.acquire().await?, m).await
+    }
 
-        sqlx::query(
-            r#"
-            UPDATE mitigations SET
-                scope_hash = $2, status = $3, updated_at = $4, expires_at = $5,
-                withdrawn_at = $6, last_event_id = $7, match_json = $8,
-                action_type = $9, action_params_json = $10, reason = $11, rejection_reason = $12
-            WHERE mitigation_id = $1
-            "#,
+    async fn extend_mitigation_for_event(
+        &self,
+        expected: &Mitigation,
+        m: &Mitigation,
+    ) -> Result<()> {
+        let pool = self.pool.clone();
+        let mut tx = tokio::spawn(async move {
+            pool.begin_with("BEGIN ISOLATION LEVEL READ COMMITTED")
+                .await
+        })
+        .await
+        .map_err(|_| sqlx::Error::PoolTimedOut)??;
+        sqlx::query("SET LOCAL lock_timeout = '5s'")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("SET LOCAL statement_timeout = '5s'")
+            .execute(&mut *tx)
+            .await?;
+        let row = sqlx::query_as::<_, MitigationRow>(
+            "SELECT * FROM mitigations WHERE mitigation_id = $1 FOR UPDATE",
         )
-        .bind(m.mitigation_id)
-        .bind(&m.scope_hash)
-        .bind(m.status.as_str())
-        .bind(m.updated_at)
-        .bind(m.expires_at)
-        .bind(m.withdrawn_at)
-        .bind(m.last_event_id)
-        .bind(&match_json)
-        .bind(m.action_type.as_str())
-        .bind(&action_params_json)
-        .bind(&m.reason)
-        .bind(&m.rejection_reason)
-        .execute(&self.pool)
+        .bind(expected.mitigation_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or(PrefixdError::MitigationNotFound(expected.mitigation_id))?;
+        let current = Mitigation::from_row(row)?;
+        if &current != expected || !current.is_active() {
+            return Err(PrefixdError::BanAdmissionChanged);
+        }
+        // A dropped unban future can leave COMMIT running after the process
+        // mutex releases. Its transaction locks this row before inserting its
+        // intent; a new statement sees that intent after our lock wait ends.
+        let withdrawing: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM withdrawal_requests WHERE mitigation_id = $1 AND completed_at IS NULL)",
+        )
+        .bind(current.mitigation_id)
+        .fetch_one(&mut *tx)
         .await?;
+        if withdrawing {
+            return Err(PrefixdError::BanAdmissionChanged);
+        }
+        Self::update_mitigation_on(&mut tx, m).await?;
+        Self::record_ban_mitigation_on(&mut tx, m).await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -1558,7 +1784,7 @@ impl RepositoryTrait for Repository {
             r#"
             SELECT event_id, external_event_id, source, event_timestamp, ingested_at,
                    victim_ip, vector, protocol, bps, pps, top_dst_ports_json, top_src_ports_json, confidence,
-                   action, raw_details, outcome, outcome_reason, outcome_mitigation_ids
+                   action, raw_details, outcome, outcome_reason, outcome_mitigation_ids, ban_admission_pop
             FROM events WHERE prefixd_victim_inet(victim_ip) = ANY($1::inet[])
             ORDER BY ingested_at DESC LIMIT $2
             "#,
@@ -2769,7 +2995,7 @@ mod checked_timestamp_rows {
         }
         check_row!(
             AttackEvent,
-            "gen_random_uuid() AS event_id, NULL::text AS external_event_id, 'test'::text AS source, '203.0.113.1'::text AS victim_ip, 'udp_flood'::text AS vector, 17::integer AS protocol, NULL::bigint AS bps, NULL::bigint AS pps, '[]'::text AS top_dst_ports_json, NULL::text AS top_src_ports_json, NULL::real AS confidence, 'ban'::text AS action, NULL::jsonb AS raw_details, NULL::text AS outcome, NULL::text AS outcome_reason, '{}'::uuid[] AS outcome_mitigation_ids",
+            "gen_random_uuid() AS event_id, NULL::text AS external_event_id, 'test'::text AS source, '203.0.113.1'::text AS victim_ip, 'udp_flood'::text AS vector, 17::integer AS protocol, NULL::bigint AS bps, NULL::bigint AS pps, '[]'::text AS top_dst_ports_json, NULL::text AS top_src_ports_json, NULL::real AS confidence, 'ban'::text AS action, NULL::jsonb AS raw_details, NULL::text AS outcome, NULL::text AS outcome_reason, '{}'::uuid[] AS outcome_mitigation_ids, NULL::text AS ban_admission_pop",
             [event_timestamp, ingested_at],
             []
         );

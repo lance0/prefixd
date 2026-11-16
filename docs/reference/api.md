@@ -208,6 +208,35 @@ events after their existing confidence normalization. Generic webhook adapters
 retain their configured scaling and clamping to 0–1. Rejected confidence does not consume the external event ID; corrected
 retries can use the same ID. Batch ingestion keeps per-item rejection results.
 
+### Interrupted ban retries
+
+Ban deduplication is per source and external `event_id`. A final outcome or
+any durably admitted mitigation returns `409` on resend. That response adds
+`event_outcome`, containing `outcome`, `outcome_reason` and
+`outcome_mitigation_ids`; these are historical local intent, not proof of
+current speaker or router state.
+
+A new event whose request stops after storage but before admission can resume
+with the same ID on its original POP. It keeps its original UUID and payload
+and rechecks current policy and guardrails. Another POP returns a scope-conflict
+`409` without `event_outcome`, even after completion, and changes no saved
+outcome or intent. Use different event IDs for separate intended admissions on
+different POPs. A failed attempt with no admitted mitigation can retry;
+a final refusal cannot. If the selected mitigation changes or starts withdrawal
+while extension waits on storage, or ownership is still pending withdrawal, the
+response is `503` and the unapplied event can retry after cleanup. If no rule
+was admitted, a server error takes precedence over an earlier rule's permanent
+refusal so that recovery remains possible. Once any rule commits, a partial multi-rule admission
+is terminal for that ID, and retries neither extend those rules nor create
+remaining ones. Unconfirmed announcements belong to reconciliation.
+
+Migration 026 stores the original admission POP only for new bans. The field
+is internal and immutable; it is never inferred for historical rows. A historical incomplete
+or failed attempt without committed mitigation IDs returns a distinct `409`
+conflict: its admission outcome is unknown. Inspect the event, mitigations and
+audit before authorizing any new admission with a new ID; that response has no
+`event_outcome` claiming completion.
+
 ### Detector prefix events
 
 When `guardrails.allow_detector_prefix` is true and the event `source` appears
@@ -384,14 +413,18 @@ configured, the event is evaluated exactly as `udp_flood`: the mitigation's
 vector is `udp_flood` and its reason ends with
 `[udp_amplification fallback: ...]`.
 
-An unban names its victim. It withdraws every live mitigation for that victim
-on the controller's POP whose triggering event came from the granted source,
+An unban on this events endpoint names its victim. It withdraws every live
+mitigation for that victim on the controller's POP whose triggering event came
+from the granted source,
 comparing the address in canonical form, so a zero-padded IPv6 unban matches a
 canonically stored mitigation. Mitigations other sources created for the same
 victim, and manual mitigations, are never touched. A re-ban that extended a
 mitigation and an unban after a lost earlier unban both pair, and the detector
 keeps no state.
 
+- **Native Alertmanager.** Its [resolved notifications](#alertmanager-webhook)
+  additionally select their firing, leaving a rule extended by a newer event
+  untouched. Generic events and FastNetMon retain the victim selection here.
 - **Vector.** An unban with a vector other than `unknown` withdraws only that
   vector's mitigations, so a resolved alert for one attack leaves the
   source's others; `udp_flood` and `udp_amplification` count as one family,
@@ -405,14 +438,10 @@ keeps no state.
   whichever event met the group's threshold, so only that event's source
   withdraws the mitigation by unban; the others use their own mitigations, or
   an operator withdraws it.
-- **Partial failure.** The unban is stored first, with the POP and the
-  mitigations it selected. If that write, or a storage read before it,
-  fails, the answer is `503` and nothing is touched. Withdrawal intent is
-  then recorded for every selected mitigation before any delete is
-  attempted. The stored set drops only the mitigations whose intent was
-  definitively refused; an intent that could not be recorded for another
-  reason, such as a storage error, keeps its mitigation in the set, and the
-  unban answers `503` without deleting anything, so a resend retries it. The first delete that fails,
+- **Partial failure.** The unban event, POP, accepted targets and their immutable
+  withdrawal intents commit together before any delete. A storage read or write
+  failure returns `503` and leaves no partial unban. Definitive refusals, such
+  as another live owner, stay outside the accepted set. The first delete that fails,
   whether the speaker refused it, it timed out or its outcome is otherwise
   unknown, stops the unban, so a failing or wedged speaker holds the
   lifecycle lock for one bounded attempt. The answer is then `503`, and every
@@ -423,10 +452,13 @@ keeps no state.
   and the bundled script treats it as final.
 - **Resends and replays.** An unban `event_id` the source already sent on
   this POP reuses that unban's stored targets and never selects again: a
-  resend after a `503` or a dropped request completes the original set
-  without a second request, and a replayed unban cannot withdraw a mitigation
+  resend after a committed `503` or a dropped request completes the original
+  persisted intents, preserving their operation, actor, rule and speaker target, and a replayed unban cannot withdraw a mitigation
   a later ban created. A resend that names another victim gets `409`. The
-  same `event_id` on another POP is that POP's own unban. An unban without an
+  same `event_id` on another POP is that POP's own unban. If storage rolled
+  back before commit, the resend selects against current state. An active
+  historical target without a saved withdrawal intent returns `409` for
+  operator review; a resend never constructs a new withdrawal snapshot. An unban without an
   `event_id` selects each time. An HMAC webhook adapter's unban needs an
   event ID. A `mode: corroborating` source's unban is refused on every
   route, as its bans are, and stores nothing.
@@ -659,11 +691,14 @@ also retains visited pages for the app lifetime. Large-history memory and
 
 #### Event outcomes
 
-Every event the controller stores records what ingestion did with it, once,
-when processing finishes. An outcome describes the event at ingestion and is
-never updated: `failed` means the request failed then, and the linked
-mitigation's current status is authoritative, since withdrawal intent may be
-retained and reconciled later. This covers single, batch and signal-adapter events.
+Every stored event records what ingestion did with it when processing finishes.
+Final outcomes are write-once. A new ban's `failed` outcome can change when a
+retry recovers an attempt that admitted no mitigation. Admission commits
+`outcome_mitigation_ids` before any speaker call, so even `not_recorded` or
+`failed` can retain IDs after interruption. Those IDs never disappear during
+outcome recording or replay. The linked mitigation's current status remains
+authoritative; withdrawal and reconciliation may have changed it later.
+This covers single, batch and signal-adapter events.
 `outcome_mitigation_ids` lists the mitigations the event created, extended or
 withdrew (`[]` when none). `outcome_reason` explains an event that did not
 mitigate; for `mitigated`, `extended` and `dry_run` it names the first refused
@@ -1800,8 +1835,22 @@ Accepts an [Alertmanager v4 webhook payload](https://prometheus.io/docs/alerting
 | `top_src_ports` | `annotations.top_src_ports`, comma-separated ports such as `"123, 11211"`; read for firing alerts only | None |
 | `confidence` | `labels.severity` → `critical`=0.9, `warning`=0.7, `info`=0.5 | 0.5 |
 | `action` | `alerts[].status` ("resolved" → "unban", else "ban") | "ban" |
-| `event_id` (dedup) | `alerts[].fingerprint` | None |
+| `timestamp` | `alerts[].startsAt`, parsed as RFC3339 | Required |
+| `event_id` (dedup) | `alerts[].fingerprint` plus canonical UTC `startsAt` with nanosecond precision | Both required |
 | `source` | hardcoded `"alertmanager"` | — |
+
+Both firing and resolved notifications use the same ID for one firing. A later
+`startsAt` identifies a new firing even when the fingerprint is unchanged.
+Equivalent timestamp offsets identify the same instant. Missing or blank
+fingerprints and missing or invalid `startsAt` values fail that alert with
+`status: "error"` before storing an event.
+
+A resolved notification selects only live mitigations owned by `alertmanager`
+for its victim and vector whose last creating or extending event is that
+firing. A later firing or another source's extension supersedes it, so a delayed
+resolve cannot withdraw the extended rule. A resolve without a matching firing
+selects nothing. Retries reuse the resolve's original target set, including
+when that set was empty.
 
 For UDP reflection, set `labels.vector` to `udp_amplification` and list the
 reflector source ports in `annotations.top_src_ports`. prefixd keeps only ports
@@ -1836,8 +1885,8 @@ it the same way. Resolved alerts ignore the annotation.
 | `extended` | Existing mitigation TTL extended |
 | `accepted_no_mitigation` | Victim outside the effective inventory; no mitigation |
 | `accepted_no_playbook` | Policy produced no action |
-| `duplicate` | Fingerprint already seen (dedup) |
-| `withdrawn` | A resolved alert withdrew the live mitigations `alertmanager` created for the victim and vector; `mitigation_id` is the first |
+| `duplicate` | This fingerprint and `startsAt` firing was already processed |
+| `withdrawn` | A resolved alert withdrew its firing's live mitigations; `mitigation_id` is the first |
 | `no_active_mitigation` | A resolved alert found nothing live to withdraw |
 | `error` | Processing failed for this alert (see `error` field), and it counts in `failed` |
 
@@ -1848,7 +1897,7 @@ it the same way. Resolved alerts ignore the annotation.
 | 400 | Malformed payload (invalid JSON, wrong version, empty alerts) |
 | 401 | Authentication required |
 | 403 | The credential is not bound to `alertmanager` |
-| 503 | A resolved alert's withdrawal failed on the controller's side or its outcome is unknown; the body still lists every alert. The intent is pending and reconciled, and Alertmanager's resend is safe |
+| 503 | A ban or unban encountered a server error, including pending withdrawal; the body still lists every alert. A resend retries unapplied events and deduplicates admitted ones |
 
 > **Note:** Alertmanager will not retry 4xx errors, so malformed payloads return 400 to prevent infinite retry loops.
 
@@ -2063,9 +2112,13 @@ nonce, and only the event ID makes a replay a duplicate. An HMAC adapter
 refuses an unban with no event ID as that item's `error`, counted in `failed`,
 and processes the rest of the payload, so every unban it runs has an ID a
 replay reuses its original targets by. An unban reports
-`withdrawn` or `no_active_mitigation`; one that failed on the controller's side
-is an `error` counted in `failed`, and the response is `503` so the sender
-resends.
+`withdrawn` or `no_active_mitigation`. Any ban or unban that encounters a
+server error is an `error` counted in `failed`, and the response is `503` so
+the sender resends. The body includes every item. Configure `fields.source_id`
+to supply a stable event ID: resending then deduplicates admitted bans and
+retries unapplied ones. A ban without an ID has no replay identity and is
+evaluated as a new event on every resend. Client and policy refusals keep the
+existing `200` aggregate response with per-item errors.
 
 **Response:**
 

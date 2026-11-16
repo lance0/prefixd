@@ -7,8 +7,8 @@
 //!
 //! The script is driven with a stub `curl` that records each call's argv and
 //! the config it reads on stdin, so no network or prefixd instance is
-//! required. PATH holds only the commands the script may use; `jq` and
-//! `python3` are stubs that record any call, which must never happen.
+//! required. PATH holds only the commands the script may use, including real
+//! `jq`; a `python3` stub records forbidden calls.
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -47,17 +47,19 @@ struct Run {
     ok: bool,
     calls: Vec<Call>,
     log: String,
-    /// Anything the jq and python3 stubs recorded.
+    /// Anything the python3 stub recorded.
     forbidden: String,
 }
 
-/// Link every command the script and the curl stub need into `bin_dir`, and
-/// stub `jq` and `python3` so a call to either is recorded instead of run.
-fn link_commands(bin_dir: &Path, forbidden: &Path) {
+/// Link real commands, and make any unexpected Python dependency observable.
+fn link_commands(bin_dir: &Path, forbidden: &Path, without_jq: bool) {
     for command in [
         "bash", "cat", "cut", "date", "tr", "grep", "awk", "sort", "head", "tail", "sed", "sleep",
-        "wc", "od", "ls", "mkdir",
+        "wc", "od", "ls", "mkdir", "jq",
     ] {
+        if command == "jq" && without_jq {
+            continue;
+        }
         let output = Command::new("bash")
             .args(["-c", "command -v \"$1\"", "--", command])
             .output()
@@ -69,15 +71,13 @@ fn link_commands(bin_dir: &Path, forbidden: &Path) {
         let target = String::from_utf8(output.stdout).expect("command path");
         std::os::unix::fs::symlink(target.trim(), bin_dir.join(command)).expect("link command");
     }
-    for command in ["jq", "python3"] {
-        let stub = format!(
-            "#!/bin/bash\nprintf '%s\\n' '{command}' >> '{}'\nexit 1\n",
-            forbidden.display()
-        );
-        let path = bin_dir.join(command);
-        fs::write(&path, stub).expect("write stub");
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("chmod stub");
-    }
+    let stub = format!(
+        "#!/bin/bash\nprintf '%s\\n' 'python3' >> '{}'\nexit 1\n",
+        forbidden.display()
+    );
+    let path = bin_dir.join("python3");
+    fs::write(&path, stub).expect("write stub");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("chmod stub");
 }
 
 /// Run the script for `action` on `ip` with `input` on stdin, against a curl stub that
@@ -110,12 +110,15 @@ if [[ "$line" -gt "$total" ]]; then line=$total; fi
 outcome=$(sed -n "${{line}}p" '{outcomes}')
 if [[ "$outcome" == refused ]]; then printf '\n000'; exit 7; fi
 code=${{outcome%%|*}}
+curl_status=0
+if [[ "$code" == *:* ]]; then curl_status=${{code#*:}}; code=${{code%%:*}}; fi
 body=${{outcome#*|}}
 if [[ "$body" == "$outcome" ]]; then body='{{"status":"x"}}'; fi
 # EVENTID in a scripted body stands for the event_id this call sent.
 eid=$(printf '%s\n' "$@" | grep -o '"event_id":"[^"]*"' | head -n 1 | cut -d'"' -f4)
 body=${{body//EVENTID/$eid}}
 printf '%s\n%s' "$body" "$code"
+exit "$curl_status"
 "#,
         calls = calls.display(),
         outcomes = outcomes_file.display()
@@ -123,7 +126,11 @@ printf '%s\n%s' "$body" "$code"
     let curl_path = bin_dir.join("curl");
     fs::write(&curl_path, stub).expect("write curl stub");
     fs::set_permissions(&curl_path, fs::Permissions::from_mode(0o755)).expect("chmod curl stub");
-    link_commands(&bin_dir, &forbidden);
+    link_commands(
+        &bin_dir,
+        &forbidden,
+        envs.contains(&("TEST_WITHOUT_JQ", "1")),
+    );
 
     let log_path = dir.path().join("script.log");
     let mut child = Command::new("bash")
@@ -818,26 +825,98 @@ fn the_token_file_wins_and_a_bad_token_sends_nothing() {
     assert_eq!(run.calls[0].config, "");
 }
 
-/// A retried ban whose earlier attempt reached prefixd meets its own event ID
-/// as a 409: it was delivered, so the script exits 0. A 409 on the first
-/// attempt, or for another event ID, stays an error.
+/// A retried duplicate only confirms local intent when its recorded result
+/// includes admitted mitigation IDs. Refused and incomplete outcomes fail.
 #[test]
-fn a_retried_ban_that_meets_its_own_event_id_was_delivered() {
-    let own = r#"409|{"error":"duplicate event from fastnetmon: EVENTID"}"#;
-    let run = run_script("ban", "203.0.113.10", "", &["refused", own], &[]);
-    assert!(run.ok, "{}", run.log);
-    assert_eq!(run.calls.len(), 2);
-    assert!(
-        run.log
-            .contains("NO_MITIGATION (409, status=delivered_by_earlier_attempt)"),
-        "{}",
-        run.log
+fn a_retried_ban_requires_a_recorded_admission_outcome() {
+    for outcome in ["mitigated", "extended", "dry_run"] {
+        let own = format!(
+            r#"409|{{"error":"duplicate event from fastnetmon: EVENTID","event_outcome":{{"outcome":"{outcome}","outcome_mitigation_ids":["{MITIGATION_ID}"]}}}}"#
+        );
+        let run = run_script("ban", "203.0.113.10", "", &["refused", &own], &[]);
+        assert!(run.ok, "{}", run.log);
+        assert_eq!(run.calls.len(), 2);
+        assert!(
+            run.log.contains("INTENT_RECORDED (409, outcome="),
+            "{}",
+            run.log
+        );
+        assert!(!run.log.contains("SUCCESS"));
+        let run = run_script("ban", "203.0.113.10", "", &[&own], &[]);
+        assert!(!run.ok, "a first-attempt 409 is not a retry");
+        let other = own.replace("EVENTID", "someone-else");
+        let run = run_script("ban", "203.0.113.10", "", &["503", &other], &[]);
+        assert!(!run.ok, "another event's 409 is not this ban");
+    }
+    for outcome in [
+        "not_recorded",
+        "failed",
+        "safelisted",
+        "conflict",
+        "no_playbook",
+        "not_owned",
+        "awaiting_corroboration",
+    ] {
+        let own = format!(
+            r#"409|{{"error":"duplicate event from fastnetmon: EVENTID","event_outcome":{{"outcome":"{outcome}","outcome_mitigation_ids":["{MITIGATION_ID}"]}}}}"#
+        );
+        let run = run_script("ban", "203.0.113.10", "", &["refused", &own], &[]);
+        assert!(!run.ok, "{outcome}: {}", run.log);
+        assert!(run.log.contains("ERROR (409"), "{}", run.log);
+        assert!(!run.log.contains("INTENT_RECORDED"));
+    }
+    for body in [
+        r#"409|{"error":"duplicate event from fastnetmon: EVENTID"}"#,
+        r#"409|{"error":"duplicate event from fastnetmon: EVENTID","event_outcome":{"outcome":"mitigated","outcome_mitigation_ids":[]}}"#,
+    ] {
+        let run = run_script("ban", "203.0.113.10", "", &["refused", body], &[]);
+        assert!(
+            !run.ok,
+            "an absent outcome or missing IDs do not prove intent"
+        );
+    }
+}
+
+#[test]
+fn a_retried_ban_rejects_incomplete_or_failed_duplicate_responses() {
+    let complete = format!(
+        r#"{{"error":"duplicate event from fastnetmon: EVENTID","event_outcome":{{"outcome":"mitigated","outcome_mitigation_ids":["{MITIGATION_ID}"]}}}}"#
     );
-    let run = run_script("ban", "203.0.113.10", "", &[own], &[]);
-    assert!(!run.ok, "a first-attempt 409 is not a retry");
-    let other = r#"409|{"error":"duplicate event from fastnetmon: someone-else"}"#;
-    let run = run_script("ban", "203.0.113.10", "", &["503", other], &[]);
-    assert!(!run.ok, "another event's 409 is not this ban");
+    for (name, code, body) in [
+        ("timed out before ID", "409:28", r#"{"error":"duplicate event from fastnetmon: EVENTID","event_outcome":{"outcome":"mitigated","outcome_mitigation_ids":[""#.to_string()),
+        ("complete body but failed transport", "409:28", complete.clone()),
+        ("truncated JSON", "409", complete.trim_end_matches('}').to_string()),
+        ("invalid UUID", "409", complete.replace(MITIGATION_ID, "not-a-uuid")),
+        ("multiple documents", "409", format!("{complete} {complete}")),
+        ("UUID with trailing newline", "409", complete.replace(MITIGATION_ID, &format!("{MITIGATION_ID}\\n"))),
+        ("null response", "409", "null".into()),
+        ("array response", "409", format!("[{complete}]")),
+        ("null outcome", "409", r#"{"error":"duplicate event from fastnetmon: EVENTID","event_outcome":null}"#.into()),
+        ("string outcome", "409", r#"{"error":"duplicate event from fastnetmon: EVENTID","event_outcome":"mitigated"}"#.into()),
+        ("null IDs", "409", complete.replace(&format!(r#"["{MITIGATION_ID}"]"#), "null")),
+        ("string IDs", "409", complete.replace(&format!(r#"["{MITIGATION_ID}"]"#), &format!(r#""{MITIGATION_ID}""#))),
+        ("numeric ID", "409", complete.replace(&format!(r#"["{MITIGATION_ID}"]"#), "[7]")),
+        ("object IDs", "409", complete.replace(&format!(r#"["{MITIGATION_ID}"]"#), "{}")),
+    ] {
+        let response = format!("{code}|{body}");
+        let run = run_script("ban", "203.0.113.10", "", &["refused", &response], &[]);
+        assert!(!run.ok, "{name}: {}", run.log);
+        assert!(!run.log.contains("INTENT_RECORDED"), "{name}: {}", run.log);
+    }
+}
+
+#[test]
+fn missing_jq_refuses_before_spending_the_detector_call() {
+    let run = run_script(
+        "ban",
+        "203.0.113.10",
+        "",
+        &["202"],
+        &[("TEST_WITHOUT_JQ", "1")],
+    );
+    assert!(!run.ok);
+    assert!(run.calls.is_empty());
+    assert!(run.log.contains("ERROR: jq is required"), "{}", run.log);
 }
 
 /// The script's ban and unban payloads pair on a controller: the unban, sent

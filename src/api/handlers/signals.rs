@@ -23,8 +23,9 @@ use crate::domain::{AttackEventInput, AttackVector, validate_confidence};
 use crate::error::PrefixdError;
 
 use super::{
-    AnnouncementOutcome, AppError, ErrorResponse, EventResponse, clamp_limit, decode_list_cursor,
-    default_limit, encode_list_cursor, handle_ban, handle_unban, parse_date_range,
+    AnnouncementOutcome, AppError, ErrorResponse, EventResponse, UnbanSelection, clamp_limit,
+    decode_list_cursor, default_limit, encode_list_cursor, handle_ban, handle_unban,
+    handle_unban_with_selection, parse_date_range,
 };
 
 // ── Signal Groups API ──────────────────────────────────────────────────
@@ -249,8 +250,9 @@ pub struct AlertmanagerAlert {
     /// Alert annotations
     #[serde(default)]
     pub annotations: HashMap<String, String>,
-    /// Start time of the alert
+    /// Required RFC3339 start time, shared by every notification for one firing
     #[serde(default)]
+    #[schema(required = true, nullable = false)]
     pub starts_at: Option<String>,
     /// End time of the alert (present when resolved)
     #[serde(default)]
@@ -258,8 +260,9 @@ pub struct AlertmanagerAlert {
     /// URL for the alert in the generator
     #[serde(default)]
     pub generator_url: Option<String>,
-    /// Unique fingerprint for the alert (used for dedup)
+    /// Required nonblank fingerprint; combined with startsAt to identify one firing
     #[serde(default)]
+    #[schema(required = true, nullable = false)]
     pub fingerprint: Option<String>,
 }
 
@@ -373,7 +376,7 @@ fn parse_optional_i64(annotations: &HashMap<String, String>, key: &str) -> Optio
     request_body = AlertmanagerWebhookPayload,
     responses(
         (status = 200, description = "Alerts processed", body = AlertmanagerWebhookResponse),
-        (status = 503, description = "An unban failed on the controller's side; the per-alert results say which, and a resend is safe", body = AlertmanagerWebhookResponse),
+        (status = 503, description = "A ban or unban encountered a server error; per-alert results identify it and a resend is safe", body = AlertmanagerWebhookResponse),
         (status = 400, description = "Malformed payload"),
         (status = 401, description = "Authentication required"),
         (status = 403, description = "The credential is not bound to `alertmanager`"),
@@ -420,9 +423,8 @@ async fn ingest_alertmanager_inner(
     let mut results = Vec::with_capacity(payload.alerts.len());
     let mut processed = 0u32;
     let mut failed = 0u32;
-    // An unban that failed on the controller's side is answered 503 so
-    // Alertmanager resends; a resent ban is a duplicate and a resent unban
-    // reuses the pending withdrawal intent.
+    // Server failures need a resend. Admitted bans deduplicate; unapplied bans
+    // retry and unbans reuse their pending withdrawal intent.
     let mut retry = false;
 
     for (index, alert) in payload.alerts.into_iter().enumerate() {
@@ -551,18 +553,33 @@ async fn process_alertmanager_alert(
         _ => None,
     };
 
-    // Use fingerprint as external_event_id for dedup
-    let external_event_id = alert.fingerprint.clone();
-
-    // Parse timestamp
+    let invalid_identity = |message: &str| AlertmanagerAlertResult {
+        announcement_outcome: None,
+        index,
+        status: "error".into(),
+        event_id: None,
+        mitigation_id: None,
+        error: Some(message.into()),
+    };
+    let fingerprint = alert
+        .fingerprint
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| invalid_identity("fingerprint is required and must not be blank"))?;
     let timestamp = alert
         .starts_at
         .as_deref()
-        .and_then(|s| s.parse::<DateTime<Utc>>().ok())
-        .unwrap_or_else(Utc::now);
+        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+        .map(|timestamp| timestamp.with_timezone(&Utc))
+        .ok_or_else(|| invalid_identity("startsAt is required and must be an RFC3339 timestamp"))?;
+    // One identity for firing/resolved, independent of timestamp spelling.
+    let external_event_id = format!(
+        "{fingerprint}:{}",
+        timestamp.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)
+    );
 
     let input = AttackEventInput {
-        event_id: external_event_id,
+        event_id: Some(external_event_id),
         timestamp,
         source: "alertmanager".to_string(),
         victim_ip,
@@ -578,28 +595,32 @@ async fn process_alertmanager_alert(
 
     // Delegate to the existing event ingestion pipeline
     match input.action.as_str() {
-        "unban" => match handle_unban(state.clone(), grant, input).await {
-            // `withdrawn` or `no_active_mitigation`, as the unban answered.
-            Ok((_status, Json(resp))) => Ok(AlertmanagerAlertResult {
-                announcement_outcome: resp.announcement_outcome,
-                index,
-                status: resp.status,
-                event_id: Some(resp.event_id),
-                mitigation_id: resp.mitigation_id,
-                error: None,
-            }),
-            Err(AppError(e)) => {
-                *retry |= e.status_code().is_server_error();
-                Err(AlertmanagerAlertResult {
-                    announcement_outcome: None,
+        "unban" => {
+            match handle_unban_with_selection(state.clone(), grant, input, UnbanSelection::Episode)
+                .await
+            {
+                // `withdrawn` or `no_active_mitigation`, as the unban answered.
+                Ok((_status, Json(resp))) => Ok(AlertmanagerAlertResult {
+                    announcement_outcome: resp.announcement_outcome,
                     index,
-                    status: "error".to_string(),
-                    event_id: None,
-                    mitigation_id: None,
-                    error: Some(e.to_string()),
-                })
+                    status: resp.status,
+                    event_id: Some(resp.event_id),
+                    mitigation_id: resp.mitigation_id,
+                    error: None,
+                }),
+                Err(AppError(e)) => {
+                    *retry |= e.status_code().is_server_error();
+                    Err(AlertmanagerAlertResult {
+                        announcement_outcome: None,
+                        index,
+                        status: "error".to_string(),
+                        event_id: None,
+                        mitigation_id: None,
+                        error: Some(e.to_string()),
+                    })
+                }
             }
-        },
+        }
         _ => match handle_ban(state.clone(), grant, input).await {
             Ok((_status, Json(resp))) => Ok(AlertmanagerAlertResult {
                 announcement_outcome: resp.announcement_outcome,
@@ -617,14 +638,17 @@ async fn process_alertmanager_alert(
                 mitigation_id: None,
                 error: None,
             }),
-            Err(AppError(e)) => Err(AlertmanagerAlertResult {
-                announcement_outcome: None,
-                index,
-                status: "error".to_string(),
-                event_id: None,
-                mitigation_id: None,
-                error: Some(e.to_string()),
-            }),
+            Err(AppError(e)) => {
+                *retry |= e.status_code().is_server_error();
+                Err(AlertmanagerAlertResult {
+                    announcement_outcome: None,
+                    index,
+                    status: "error".to_string(),
+                    event_id: None,
+                    mitigation_id: None,
+                    error: Some(e.to_string()),
+                })
+            }
         },
     }
 }
@@ -995,7 +1019,7 @@ pub struct WebhookResponse {
     request_body(content = serde_json::Value, description = "Arbitrary JSON payload mapped via the adapter's JSONPath fields"),
     responses(
         (status = 200, description = "Events processed", body = WebhookResponse),
-        (status = 503, description = "An unban failed on the controller's side; the per-event results say which, and a resend is safe", body = WebhookResponse),
+        (status = 503, description = "A ban or unban encountered a server error; per-event results identify it. Stable source IDs preserve retry identity", body = WebhookResponse),
         (status = 400, description = "Malformed payload or no mappable events"),
         (status = 401, description = "HMAC/bearer verification failed"),
         (status = 403, description = "A bearer credential is not bound to the adapter name"),
@@ -1130,8 +1154,7 @@ async fn ingest_webhook_inner(
     let mut results = Vec::with_capacity(mapped.len());
     let mut processed = 0u32;
     let mut failed = 0u32;
-    // An unban that failed on the controller's side is answered 503 so the
-    // sender resends; see the Alertmanager adapter.
+    // Server failures need a resend; see the Alertmanager adapter.
     let mut retry = false;
 
     for (index, mapped_event) in mapped.into_iter().enumerate() {
@@ -1212,6 +1235,7 @@ async fn ingest_webhook_inner(
                     }
                     Err(AppError(e)) => {
                         failed += 1;
+                        retry |= e.status_code().is_server_error();
                         results.push(WebhookEventResult {
                             announcement_outcome: None,
                             index,

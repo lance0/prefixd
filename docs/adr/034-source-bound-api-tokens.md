@@ -1287,3 +1287,152 @@ host-only token never reaches hostgroup ingestion.
   contract is not yet qualified (section 13's open checks). Until it is, a
   hostgroup shim posts prefix events with its own `fastnetmon-hostgroup` token,
   as the FastNetMon guide shows.
+
+## Amendment: Alertmanager firing identity
+
+Amended 2026-11-16.
+
+Alertmanager's fingerprint identifies a label set, so it repeats when the same
+alert fires again. Permanent deduplication on that fingerprint suppressed every
+firing after the first. Both firing and resolved notifications now use the
+fingerprint plus the parsed `startsAt` instant, formatted in UTC with nanosecond
+precision, as their external event ID. Equivalent timestamp offsets identify
+the same firing. A missing or blank fingerprint, or a missing or invalid
+`startsAt`, fails that alert before storage; there is no current-time fallback.
+Alertmanager supplies these fields in its
+[notification data](https://prometheus.io/docs/alerting/latest/notifications/).
+
+The native Alertmanager adapter explicitly selects an episode when resolving.
+Under the lifecycle mutex, the first resolve selects only live mitigations
+owned by its source on this POP, for its victim and vector, whose
+`last_event_id` is the matching firing's stored event. A newer firing or an
+extension by another source supersedes that event, so an older resolve cannot
+withdraw the extended mitigation. A resolve without a matching firing selects
+nothing. Stored unban target sets still govern retries and replays; they never
+select again. Generic events and FastNetMon retain the victim-based unban
+decision above.
+
+Before upgrading, drain or let expire active Alertmanager mitigations created
+with fingerprint-only IDs. New episode IDs do not pair with those historical
+events. No schema migration or fingerprint-only fallback is added.
+
+
+## Amendment: atomic detector unban intent
+
+Amended 2026-11-16.
+
+The unban event, POP, accepted targets and every initial immutable withdrawal
+request commit in one PostgreSQL transaction before any speaker call. A failed
+write rolls back all of them. Definitive ownership refusals stay outside the
+accepted set. Replay loads only stored pending requests; it never rebuilds a
+request from the current mitigation. An active historical target without an
+intent returns a conflict for operator review.
+
+The transaction locks target mitigation rows in UUID order and rechecks their
+revision, last event, route ownership and speaker binding. Detector extensions
+take the same row lock and check pending intent in a fresh READ COMMITTED
+statement. A cancelled COMMIT may still land, so an unban replay lookup takes
+the same transaction advisory lock as the unban write, keyed by POP, source
+and external event ID, before deciding that the record is absent. Lock and
+statement waits use the existing five-second storage bounds. This preserves
+immutable intent across a dropped HTTP future as well as an explicit error.
+
+## Amendment: interrupted ban retries (2026-11-16)
+
+A stored event is not proof that its admission completed. All ban entry points
+hold the lifecycle mutex through the final outcome write's five-second
+attempt, then release it before refusal auditing. A failed or timed-out outcome
+write keeps the original HTTP result and cannot erase committed admission IDs.
+PostgreSQL lock and statement deadlines bound residual work after cancellation.
+A retry of an
+incomplete or failed attempt reuses its event UUID and original payload and
+rechecks current policy, ownership and guardrails. A failed duplicate lookup
+refuses the request; it never authorizes a fresh admission.
+
+PostgreSQL can finish a commit after its request future is dropped. Duplicate
+lookup locks the event row to observe a committed admission before deciding
+whether it can resume. Detector extension locks its mitigation row, compares
+the complete stored snapshot, then reads pending withdrawal intent in a fresh
+statement. Unban admission takes the same row lock before recording immutable
+intent. An extension whose snapshot changed or began withdrawal returns a
+retryable `503` without writing an extension or admitted ID; an ordinary final
+conflict would incorrectly consume this unapplied event.
+
+Creating or extending a mitigation atomically appends its ID to the ban's
+`outcome_mitigation_ids`. The final outcome write preserves those IDs, and only
+a failed ban outcome can be replaced by recovery. A final outcome or any
+committed mitigation ID ends admission for that event ID, even after the
+mitigation is withdrawn or a later event extends it. If a multi-rule request
+is interrupted after the first commit, it remains a partial admission under
+[ADR 028](028-amplification-matches.md); a resend does not extend the committed
+rules or create the remainder. Reconciliation completes any unconfirmed
+speaker work. Recorded intent is not evidence of current router enforcement.
+
+Completed ban retries still return `409`, with `event_outcome` containing the
+stored result. The FastNetMon script recognizes its own retried duplicate as
+recorded intent only when that result says `mitigated`, `extended` or `dry_run`
+and lists mitigation IDs. An absent, refused or interrupted outcome remains an
+error, rather than being reported as successful delivery.
+
+Older controllers could commit a detector extension without its outcome, then
+overwrite its only event association (`last_event_id`) with another extension.
+Migration 026 adds an internal `ban_retryable` marker, false on existing rows
+and explicitly true on new inserts. It rewrites no old event or outcome. An
+old incomplete or failed ban without committed IDs therefore returns a
+conflict saying its historical admission outcome is unknown. Inspect its event,
+mitigations and audit before authorizing a new admission with a new ID. No
+historical success or failure is inferred by the migration.
+
+### Amendment: an interrupted ban stays on its admitting POP
+
+A ban's `(source, external_event_id)` remains a database-wide identity. The
+partial unique index from migration 018 reserves that identity when the event
+is inserted. The still-unreleased migration 026 records `ban_admission_pop`
+instead of a separate retry flag: a non-null value is the immutable POP that
+stored a current ban under the atomic admission protocol; null identifies
+historical events whose unfinished admission cannot be reconstructed safely.
+
+Only the original POP may resume an unfinished ban. A different POP receives a
+scope-conflict `409` with no `event_outcome`, including after the original ban
+completed. This check runs before assigning the event to the request's outcome
+trace, so a foreign retry changes neither intent nor the saved outcome. Separate
+intended admissions on different POPs use different external IDs. The original
+POP's restart still resumes the same event UUID and payload with current guards.
+Completed historical outcomes retain their existing deduplication behavior;
+unfinished historical events stay unknown. Migration never infers an owner from
+mutable mitigation rows, and a retry never claims or changes the owner.
+
+
+### Amendment: validate duplicate responses before reporting intent
+
+The bundled FastNetMon script now requires `jq` alongside bash and curl. This
+supersedes the earlier bash-and-curl-only prerequisite. A retried duplicate
+confirms local intent only after curl succeeds and jq validates exactly one
+JSON response with this event's duplicate identity, an admitted outcome and a
+nonempty array of complete mitigation UUIDs. Truncated bodies, transport errors,
+malformed responses and unknown outcomes remain errors. The existing 2xx event
+acceptance behavior is unchanged. Install jq before replacing the script; the
+shipped FastNetMon lab image includes it.
+
+
+### Amendment: transient ban refusals remain retryable
+
+Pending withdrawal is a typed ownership result. Manual admission and lifetime
+operations still report it as `409`; detector admission maps it to the existing
+retryable `503` at both its initial ownership lookup and its later blackhole
+admission check. This keeps an already-stored, unapplied ban in `failed` while
+immutable withdrawal intent is pending. Cleanup allows the same event UUID and
+original payload to resume. Other ownership and policy conflicts stay final.
+
+When no rule was admitted, any server error takes precedence over a permanent
+refusal from an earlier rule. Otherwise that refusal would consume an event
+whose later rule could recover. Once any rule commits, the partial admission
+remains terminal and retains its first refusal diagnostic.
+
+Alertmanager and generic webhook responses use `503` when any ban or unban
+encounters a server error. They continue processing the remaining items and
+report every result. With stable event IDs, completed items deduplicate and
+unapplied items retry on resend. Generic webhook senders configure
+`fields.source_id` for that guarantee; a ban without an ID is evaluated as a
+new event on every resend. Client and policy refusals keep their existing aggregate response;
+`/v1/events/batch` retains `207` with per-item results for any rejected item.

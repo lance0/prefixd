@@ -762,6 +762,7 @@ mod tests {
             action: "ban".into(),
             raw_details: None,
             outcome: Default::default(),
+            ban_admission_pop: None,
         })
         .await
         .unwrap();

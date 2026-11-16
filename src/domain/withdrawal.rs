@@ -320,14 +320,19 @@ pub async fn request_withdrawal(
     persist_withdrawal(repo, request, binding).await
 }
 
-/// [`request_withdrawal`] for a detector unban, which records the bound
-/// `source` it withdraws for. A retry finds the intent already pending and
-/// returns it unchanged, never a second request.
+/// A detector's proposed immutable intent and its complete captured revision.
+pub struct PreparedDetectorWithdrawal {
+    pub request: WithdrawalRequest,
+    pub expected: Mitigation,
+}
+
+/// Prepare a detector withdrawal without writing it. The repository commits
+/// all prepared intents together with the unban's replay record.
 #[allow(
     clippy::too_many_arguments,
     reason = "Persist immutable withdrawal metadata together with its verified speaker target"
 )]
-pub async fn request_detector_withdrawal(
+pub async fn prepare_detector_withdrawal(
     repo: &dyn RepositoryTrait,
     mitigation: &Mitigation,
     source: &str,
@@ -336,7 +341,7 @@ pub async fn request_detector_withdrawal(
     reason: String,
     speaker_delete_required: bool,
     binding: Option<&super::VerifiedSpeakerBinding>,
-) -> Result<WithdrawalRequest> {
+) -> Result<PreparedDetectorWithdrawal> {
     let mut request = WithdrawalRequest::new(
         mitigation,
         false,
@@ -346,7 +351,15 @@ pub async fn request_detector_withdrawal(
         speaker_delete_required && !mitigation.is_dry_run_origin(),
     )?;
     request.detector_source = Some(source.into());
-    persist_withdrawal(repo, request, binding).await
+    request.target_id = binding.map(super::VerifiedSpeakerBinding::target_id);
+    if let Some(binding) = binding {
+        binding.validate_request(&request.pop, request.target_id)?;
+    }
+    check_withdrawal_owner(repo, &request).await?;
+    Ok(PreparedDetectorWithdrawal {
+        request,
+        expected: mitigation.clone(),
+    })
 }
 
 async fn persist_withdrawal(
@@ -394,10 +407,9 @@ pub async fn find_mitigation_owner(
                 .iter()
                 .any(|owner| owner.mitigation_id == request.mitigation_id)
         {
-            return Err(PrefixdError::Conflict(format!(
-                "{} has a pending withdrawal",
-                route.noun()
-            )));
+            return Err(PrefixdError::PendingWithdrawal {
+                route: route.noun(),
+            });
         }
     }
     if owners.len() > 1 {
@@ -417,29 +429,36 @@ async fn check_withdrawal_owner(
         .get_mitigation(request.mitigation_id)
         .await?
         .ok_or(PrefixdError::MitigationNotFound(request.mitigation_id))?;
+    let owners = repo.active_mitigations_for_pop(&request.pop).await?;
+    validate_withdrawal_owner(request, &current, &owners)
+}
+
+/// The transaction repeats this check after locking the mitigation row.
+pub(crate) fn validate_withdrawal_owner(
+    request: &WithdrawalRequest,
+    current: &Mitigation,
+    owners: &[Mitigation],
+) -> Result<()> {
     if !current.is_active()
         || current.pop != request.pop
         || current.updated_at != request.mitigation_updated_at
-        || MitigationRoute::of(&current).kind() != request.rule_kind
-        || request_identity(&current)? != request.nlri_hash
+        || MitigationRoute::of(current).kind() != request.rule_kind
+        || request_identity(current)? != request.nlri_hash
     {
         return Err(PrefixdError::Conflict(
             "withdrawal intent no longer matches mitigation".into(),
         ));
     }
-    let route = MitigationRoute::of(&current);
+    let route = MitigationRoute::of(current);
     let key = route.ownership_key();
     let now = Utc::now();
-    if repo
-        .active_mitigations_for_pop(&request.pop)
-        .await?
-        .iter()
-        .any(|owner| {
-            owner.mitigation_id != request.mitigation_id
-                && owner.expires_at > now
-                && MitigationRoute::of(owner).ownership_key() == key
-        })
-    {
+    if owners.iter().any(|owner| {
+        owner.mitigation_id != request.mitigation_id
+            && owner.is_active()
+            && owner.pop == request.pop
+            && owner.expires_at > now
+            && MitigationRoute::of(owner).ownership_key() == key
+    }) {
         return Err(PrefixdError::Conflict(format!(
             "{} has another active owner",
             route.noun()
@@ -1065,16 +1084,20 @@ mod tests {
             mitigation_rule(&candidate).unwrap().nlri_hash(),
             mitigation_rule(&original).unwrap().nlri_hash()
         );
-        assert!(matches!(
-            find_mitigation_owner(
-                &repo,
-                "test",
-                &MitigationRoute::of(&candidate),
-                &candidate.scope_hash
-            )
-            .await,
-            Err(PrefixdError::Conflict(message)) if message == "FlowSpec rule has a pending withdrawal"
-        ));
+        let error = find_mitigation_owner(
+            &repo,
+            "test",
+            &MitigationRoute::of(&candidate),
+            &candidate.scope_hash,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, PrefixdError::PendingWithdrawal { .. }));
+        assert_eq!(error.status_code(), axum::http::StatusCode::CONFLICT);
+        assert_eq!(
+            error.to_string(),
+            "conflict: FlowSpec rule has a pending withdrawal"
+        );
     }
 
     #[tokio::test]

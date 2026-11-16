@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrade notes
 
+- **Alertmanager notifications identify a firing.** Both firing and resolved
+  alerts require a nonblank `fingerprint` and valid RFC3339 `startsAt`; their
+  shared event ID combines both. Drain or let expire existing Alertmanager
+  mitigations before upgrading, because new episode IDs do not pair with
+  historical fingerprint-only bans. Standard Alertmanager webhooks already
+  supply both fields. Historical unban replays with an active target but no
+  saved withdrawal intent now return `409` for operator review. See [the upgrade guide](docs/how-to/upgrading.md#alertmanager-firing-identity).
+
+- **Interrupted detector bans.** Migration 026 preserves the original admission
+  POP: new incomplete or failed bans with no admitted intent can resume using
+  the same event ID on that POP. Another POP refuses the replay; use separate
+  event IDs for separate intended POP admissions. Historical ambiguous attempts return an explicit unknown
+  outcome conflict; inspect their event, mitigation and audit before
+  authorizing a new admission with a new ID. Install `jq` on FastNetMon hosts
+  before reinstalling the script: it requires successful curl completion and
+  valid JSON with a recorded admitted outcome and mitigation UUIDs before
+  treating a retried `409` as local intent, and logs `INTENT_RECORDED`. See
+  [interrupted detector bans](docs/how-to/upgrading.md#interrupted-detector-bans).
+
 - **Portless detector police rules match the whole protocol.** UDP/TCP events
   without destination ports no longer borrow the service's `allowed_ports`.
   New rules police all traffic of that protocol to the victim, legitimate
@@ -26,6 +45,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `PrefixdLeasedMitigationsAtRisk`, which uses new leased-intent and renewal
   metrics from the upgraded controller. Keep 15-second scrape and evaluation
   intervals; see [leased outage alert](docs/how-to/upgrading.md#leased-mitigation-outage-alert).
+
 - **Compose needs `POSTGRES_PASSWORD`.** `docker-compose.yml` no longer falls
   back to the published `prefixd_secret`; every Compose command refuses to run
   until the variable is set. Before upgrading an existing Compose stack, put
@@ -70,7 +90,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   gone. An unban with a vector other than `unknown` withdraws only that
   vector's mitigations, with UDP floods and amplification as one family;
   FastNetMon unbans send `unknown`. The unban is stored with its POP and
-  targets first and answers `503`, touching nothing, if that write fails. A
+  targets and all immutable withdrawal intents atomically before any delete;
+  it answers `503`, touching nothing, if that transaction fails. A
   resend of an unban event ID on the same POP reuses those targets, and one
   naming another victim gets `409`. With correlation, only the source whose
   event met the threshold withdraws the mitigation by unban. The first failed
@@ -544,6 +565,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Skip unrelated live-mitigation inventory for an unban with no targets while
+  preserving its durable empty replay record.
+
+- Keep an unapplied detector ban retryable while withdrawal is pending, including
+  when an earlier rule has a permanent refusal. Alertmanager and generic
+  webhooks return `503` for ban-side server failures and deduplicate successful
+  items with stable event IDs when a notification is resent.
+
+- Alertmanager can mitigate a new firing after the same alert resolves.
+  Resends still deduplicate within one firing, and delayed or replayed resolves
+  cannot withdraw a rule created or extended by a newer episode. An older
+  resolved alert also leaves a rule another source extended in place.
+
+- A ban interrupted after storing its event can resume safely. Creation and
+  detector extension retain their event association atomically, and a final
+  outcome write cannot erase it. Completed retries return their stored outcome
+  with `409`; they never re-announce or re-extend withdrawn intent, including
+  a partial multi-rule admission.
+
 - Interactive `prefixdctl operators create`, including the first Compose Admin,
   now asks for hidden password confirmation. A mismatch asks again, and
   cancellation creates no operator. Explicit `--password` automation is unchanged.
@@ -571,6 +611,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Interop run, including the FastNetMon lane, blocks publication even when CI
   passes. The FastNetMon lab now catches API refusals written only to stderr,
   including during readiness, instead of accepting their zero exit status.
+
 - `prefixdctl` works in the Compose controller. Both controller services set
   `PREFIXD_API=http://127.0.0.1:8080`, so `docker compose exec` runs no longer
   fail against the CLI's default port 80.

@@ -219,17 +219,22 @@ pub trait RepositoryTrait: Send + Sync {
         source: &str,
         external_id: &str,
     ) -> Result<Option<AttackEvent>>;
-    /// Store a detector unban with its replay record, the POP and the
-    /// mitigations it withdraws, in one write before any withdrawal intent.
-    async fn insert_unban_event(
+    /// Seed the historical pre-atomic replay shape for regression tests only.
+    #[cfg(any(test, feature = "test-utils"))]
+    async fn insert_legacy_unban_for_test(
         &self,
         event: &AttackEvent,
         pop: &str,
         targets: &[Uuid],
     ) -> Result<()>;
-    /// Replace a stored unban's targets with those whose withdrawal intent
-    /// was recorded.
-    async fn set_unban_targets(&self, event_id: Uuid, targets: &[Uuid]) -> Result<()>;
+    /// Commit the unban and every accepted immutable intent atomically, before
+    /// any speaker call. Cancellation or failure cannot leave a partial set.
+    async fn begin_unban(
+        &self,
+        event: &AttackEvent,
+        pop: &str,
+        targets: &[crate::domain::PreparedDetectorWithdrawal],
+    ) -> Result<Vec<WithdrawalRequest>>;
     /// The first unban `source` sent on `pop` with this external ID that has
     /// a replay record: the targets a resend or replay of it reuses. Unbans
     /// stored without one are not returned.
@@ -247,8 +252,8 @@ pub trait RepositoryTrait: Send + Sync {
         .await
     }
     async fn list_events_filtered(&self, params: &EventListParams) -> Result<Vec<AttackEvent>>;
-    /// Record what ingestion did with a stored event. An outcome is written
-    /// once; a later call for the same event changes nothing.
+    /// Record what ingestion did with a stored event, preserving committed
+    /// mitigation IDs. Final outcomes are write-once; a failed ban may recover.
     async fn record_event_outcome(
         &self,
         event_id: Uuid,
@@ -281,6 +286,14 @@ pub trait RepositoryTrait: Send + Sync {
         actor: &crate::observability::CreationActor,
     ) -> Result<()>;
     async fn update_mitigation(&self, m: &Mitigation) -> Result<()>;
+    /// Extend unchanged detector intent and associate it with `last_event_id`
+    /// atomically. Recheck the expected row and pending withdrawal after taking
+    /// the mutation lock, including an earlier request's in-flight commit.
+    async fn extend_mitigation_for_event(
+        &self,
+        expected: &Mitigation,
+        updated: &Mitigation,
+    ) -> Result<()>;
     /// Atomically extend an unchanged live FlowSpec row and its authenticated
     /// audit. Implementations must recheck time, binding and pending withdrawal
     /// after waiting for their mutation lock. An unchanged horizon writes nothing.

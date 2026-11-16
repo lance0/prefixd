@@ -156,6 +156,9 @@ pub struct AttackEvent {
     #[sqlx(flatten)]
     #[serde(flatten)]
     pub outcome: EventOutcomeRecord,
+    /// Immutable owner of a current ban; historical admission ownership is unknown.
+    #[serde(skip)]
+    pub ban_admission_pop: Option<String>,
 }
 
 /// What ingestion did with a stored event.
@@ -241,9 +244,9 @@ impl EventOutcome {
             PrefixdError::GuardrailViolation(_) | PrefixdError::UnsupportedFlowSpecScope { .. } => {
                 Some(Self::GuardrailRejected)
             }
-            PrefixdError::Conflict(_) | PrefixdError::InjectionOwnerMismatch { .. } => {
-                Some(Self::Conflict)
-            }
+            PrefixdError::Conflict(_)
+            | PrefixdError::PendingWithdrawal { .. }
+            | PrefixdError::InjectionOwnerMismatch { .. } => Some(Self::Conflict),
             _ => None,
         }
     }
@@ -271,7 +274,8 @@ impl From<Option<String>> for EventOutcome {
     }
 }
 
-/// The persisted outcome of an event, written once after ingestion decides it.
+/// The persisted outcome of an event. Final outcomes are write-once; a failed
+/// ban can recover. Mitigation IDs are committed with admission, before its RPC.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, FromRow, ToSchema)]
 pub struct EventOutcomeRecord {
     #[sqlx(try_from = "Option<String>")]
@@ -350,6 +354,7 @@ impl AttackEvent {
             action: input.action,
             raw_details: input.raw_details,
             outcome: EventOutcomeRecord::default(),
+            ban_admission_pop: None,
         }
     }
 

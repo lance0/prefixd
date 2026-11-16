@@ -469,6 +469,9 @@ pub struct ErrorResponse {
     /// Retry after seconds (for rate limiting)
     #[serde(skip_serializing_if = "Option::is_none")]
     retry_after_seconds: Option<u32>,
+    /// Stored result of a duplicate ban; IDs prove local intent, not enforcement.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    event_outcome: Option<EventOutcomeRecord>,
 }
 
 // Request types
@@ -1053,8 +1056,8 @@ async fn complete_withdrawal(
 /// `no_active_mitigation`, so a detector needs no state to pair its unban.
 ///
 /// The unban is stored with its replay record, this POP and the selected
-/// targets, in one write before any withdrawal intent; if that write fails the
-/// answer is a 503 and nothing is touched. An unban whose event ID the source
+/// targets, atomically with all immutable withdrawal intents before any RPC;
+/// if that write fails the answer is a 503 and nothing is touched. An unban whose event ID the source
 /// already sent on this POP reuses that record and never selects again: a
 /// resend after a 503 or a dropped request completes the original set, and a
 /// replayed unban cannot withdraw a mitigation a later ban created. A resend
@@ -1062,7 +1065,22 @@ async fn complete_withdrawal(
 pub(crate) async fn handle_unban(
     state: Arc<AppState>,
     grant: &crate::api::auth::SourceGrant,
+    input: AttackEventInput,
+) -> Result<(StatusCode, Json<EventResponse>), AppError> {
+    handle_unban_with_selection(state, grant, input, UnbanSelection::Victim).await
+}
+
+pub(crate) enum UnbanSelection {
+    Victim,
+    /// Native Alertmanager resolves only the firing that last changed a rule.
+    Episode,
+}
+
+pub(crate) async fn handle_unban_with_selection(
+    state: Arc<AppState>,
+    grant: &crate::api::auth::SourceGrant,
     mut input: AttackEventInput,
+    selection: UnbanSelection,
 ) -> Result<(StatusCode, Json<EventResponse>), AppError> {
     input.source = grant.source().to_string();
     // Every unban path (single, batch, signal adapters) routes through here.
@@ -1109,24 +1127,42 @@ pub(crate) async fn handle_unban(
                 "unban event ID {external_id:?} was already sent for another victim"
             ))));
         }
-        let mut live = Vec::new();
+        let pending = state
+            .repo
+            .pending_withdrawals(Some(pop))
+            .await
+            .map_err(unavailable)?;
+        let mut requests = Vec::new();
         for id in &original.target_ids {
-            if let Some(mitigation) = state.repo.get_mitigation(*id).await.map_err(unavailable)?
-                && mitigation.is_active()
-                && mitigation.pop == pop
-            {
-                live.push(mitigation);
+            let mitigation = state
+                .repo
+                .get_mitigation(*id)
+                .await
+                .map_err(unavailable)?
+                .ok_or_else(|| {
+                    AppError(PrefixdError::Conflict(
+                        "unban target no longer exists".into(),
+                    ))
+                })?;
+            if mitigation.pop != pop {
+                return Err(AppError(PrefixdError::Conflict(
+                    "unban target belongs to another POP".into(),
+                )));
+            }
+            if mitigation.is_active() {
+                let request = pending.iter().find(|request| request.mitigation_id == *id)
+                    .ok_or_else(|| AppError(PrefixdError::Conflict(
+                        "unban target has no recorded withdrawal intent; operator review is required".into(),
+                    )))?;
+                requests.push(request.clone());
             }
         }
-        tracing::debug!(source = %grant.source(), external_id,
-            targets = original.target_ids.len(), live = live.len(),
-            "detector unban resent; reusing its original targets");
-        let (ids, failure) = withdraw_unban_targets(
+        let (ids, failure) = complete_unban_targets(
             &state,
-            grant,
             original.event_id,
             &original.target_ids,
-            &live,
+            &requests,
+            None,
         )
         .await;
         if let Some(error) = failure {
@@ -1134,6 +1170,23 @@ pub(crate) async fn handle_unban(
         }
         return Ok(answer(original.event_id, original.external_event_id, ids));
     }
+
+    let episode = match selection {
+        UnbanSelection::Victim => None,
+        UnbanSelection::Episode => {
+            let external_id = input.event_id.as_deref().ok_or_else(|| {
+                AppError(PrefixdError::InvalidRequest(
+                    "an episode unban requires an event ID".into(),
+                ))
+            })?;
+            state
+                .repo
+                .find_ban_event_by_external_id(grant.source(), external_id)
+                .await
+                .map_err(unavailable)?
+                .map(|event| event.event_id)
+        }
+    };
 
     // Every live rule the source created for the victim: one ban can create
     // several (ADR 028), and a re-ban extends rather than adds. A real vector
@@ -1155,33 +1208,57 @@ pub(crate) async fn handle_unban(
         .await
         .map_err(unavailable)?
         .into_iter()
+        .filter(|mitigation| match selection {
+            UnbanSelection::Victim => true,
+            UnbanSelection::Episode => episode == Some(mitigation.last_event_id),
+        })
         .filter(|mitigation| {
             vector == crate::domain::AttackVector::Unknown
                 || mitigation.vector == vector
                 || (udp(vector) && udp(mitigation.vector))
         })
         .collect();
-    let targets: Vec<_> = mitigations.iter().map(|m| m.mitigation_id).collect();
-
-    // The replay record comes first, even when nothing matches, so a resend
-    // or replay of the event ID finds this exact set instead of selecting
-    // anew, whatever happens after this write.
     let unban_event = AttackEvent::from_input(input);
-    if let Err(error) = state
-        .repo
-        .insert_unban_event(&unban_event, pop, &targets)
+    let binding = state.verified_speaker_binding().map_err(AppError)?;
+    let mut prepared = Vec::with_capacity(mitigations.len());
+    let mut refusal = None;
+    for mitigation in &mitigations {
+        match crate::domain::prepare_detector_withdrawal(
+            state.repo.as_ref(),
+            mitigation,
+            grant.source(),
+            grant.actor_type().as_str(),
+            grant.actor_id(),
+            format!("Detector unban: {}", grant.source()),
+            !state.is_dry_run(),
+            binding,
+        )
         .await
-    {
-        tracing::warn!(%error, source = %grant.source(), "failed to store detector unban");
-        return Err(AppError(PrefixdError::UnbanStorageUnavailable));
+        {
+            Ok(request) => prepared.push(request),
+            Err(error) if error.status_code().is_client_error() => {
+                refusal.get_or_insert(error);
+            }
+            Err(error) => return Err(unavailable(error)),
+        }
     }
-    if targets.is_empty() {
-        tracing::debug!(source = %grant.source(), victim_ip = %victim,
-            "detector unban found no live mitigation");
-    }
-
+    let requests = state
+        .repo
+        .begin_unban(&unban_event, pop, &prepared)
+        .await
+        .map_err(|error| {
+            if error.status_code().is_client_error() {
+                AppError(error)
+            } else {
+                unavailable(error)
+            }
+        })?;
+    let targets: Vec<_> = requests
+        .iter()
+        .map(|request| request.mitigation_id)
+        .collect();
     let (ids, failure) =
-        withdraw_unban_targets(&state, grant, unban_event.event_id, &targets, &mitigations).await;
+        complete_unban_targets(&state, unban_event.event_id, &targets, &requests, refusal).await;
     if let Some(error) = failure {
         audit_refusal(&state, grant, &unban_event, &error, None, true).await;
         return Err(AppError(error));
@@ -1193,96 +1270,31 @@ pub(crate) async fn handle_unban(
     ))
 }
 
-/// Caller holds the lifecycle mutex and has stored the unban's replay record
-/// with `stored`. Record withdrawal intent for every `live` target before any
-/// delete, so a failed delete cannot leave the others unrecorded, then narrow
-/// the record to drop the targets whose intent was definitively refused (a
-/// client error such as another live owner's 409): those are never part of
-/// the unban. An intent that could not be recorded for any other reason, such
-/// as a storage error, keeps its target in the record and deletes nothing, so
-/// a resend retries it. Then delete, stopping at the first failure of any
-/// kind, so a wedged or failing speaker holds the mutex for one bounded
-/// attempt and the rest stay pending for reconciliation and the resend.
-/// Records the unban's outcome and returns its targets with the first error:
-/// a failed delete, intent or record write is a 503, otherwise a refused
-/// intent is reported as itself.
-async fn withdraw_unban_targets(
+/// All intents and the replay record are committed. Stop after one failed
+/// bounded delete; reconciliation and resends use the same persisted requests.
+async fn complete_unban_targets(
     state: &AppState,
-    grant: &crate::api::auth::SourceGrant,
     event_id: Uuid,
     stored: &[Uuid],
-    live: &[Mitigation],
+    requests: &[crate::domain::WithdrawalRequest],
+    refusal: Option<PrefixdError>,
 ) -> (Vec<Uuid>, Option<PrefixdError>) {
-    let binding = match state.verified_speaker_binding() {
-        Ok(binding) => binding,
-        Err(error) => return (stored.to_vec(), Some(error)),
-    };
-    let reason = format!("Detector unban: {}", grant.source());
-    let mut requests = Vec::with_capacity(live.len());
-    let mut refused = Vec::new();
-    let mut refusal = None;
-    let mut unrecorded = false;
-    for mitigation in live {
-        match crate::domain::request_detector_withdrawal(
-            state.repo.as_ref(),
-            mitigation,
-            grant.source(),
-            grant.actor_type().as_str(),
-            grant.actor_id(),
-            reason.clone(),
-            !state.is_dry_run(),
-            binding,
-        )
-        .await
-        {
-            Ok(request) => requests.push(request),
-            Err(error) if error.status_code().is_client_error() => {
-                refused.push(mitigation.mitigation_id);
-                refusal.get_or_insert(error);
+    let ids = stored.to_vec();
+    let mut failure = None;
+    for (completed, request) in requests.iter().enumerate() {
+        match complete_withdrawal(state, request).await {
+            Ok(mitigation) => {
+                tracing::info!(mitigation_id = %mitigation.mitigation_id,
+                    victim_ip = %mitigation.victim_ip, "withdrew mitigation via detector unban");
             }
             Err(error) => {
-                tracing::warn!(mitigation_id = %mitigation.mitigation_id, %error,
-                    "detector unban could not record withdrawal intent; it stays a target");
-                unrecorded = true;
-            }
-        }
-    }
-    let ids: Vec<_> = stored
-        .iter()
-        .copied()
-        .filter(|id| !refused.contains(id))
-        .collect();
-    let mut failure = None;
-    if !refused.is_empty()
-        && let Err(error) = state.repo.set_unban_targets(event_id, &ids).await
-    {
-        tracing::warn!(%event_id, %error, "failed to narrow a detector unban's targets");
-        failure = Some(PrefixdError::UnbanStorageUnavailable);
-    }
-    if unrecorded {
-        failure.get_or_insert(PrefixdError::UnbanStorageUnavailable);
-    }
-    if failure.is_none() {
-        let mut completed = 0;
-        for request in &requests {
-            match complete_withdrawal(state, request).await {
-                Ok(mitigation) => {
-                    tracing::info!(
-                        mitigation_id = %mitigation.mitigation_id,
-                        victim_ip = %mitigation.victim_ip,
-                        "withdrew mitigation via detector unban"
-                    );
-                    completed += 1;
-                }
-                Err(error) => {
-                    tracing::warn!(mitigation_id = %request.mitigation_id, %error,
-                        "detector unban delete failed; it and the rest stay pending");
-                    failure = Some(PrefixdError::WithdrawalIncomplete(format!(
-                        "{completed} of {} deletes completed; the rest are pending: {error}",
-                        requests.len()
-                    )));
-                    break;
-                }
+                tracing::warn!(mitigation_id = %request.mitigation_id, %error,
+                    "detector unban delete failed; it and the rest stay pending");
+                failure = Some(PrefixdError::WithdrawalIncomplete(format!(
+                    "{completed} of {} deletes completed; the rest are pending: {error}",
+                    requests.len()
+                )));
+                break;
             }
         }
     }
@@ -1339,6 +1351,8 @@ pub(crate) async fn handle_ban(
     mut input: AttackEventInput,
 ) -> Result<(StatusCode, Json<EventResponse>), AppError> {
     input.source = grant.source().to_string();
+    // Keep dedup, admission and the final outcome in one lifecycle turn.
+    let mitigation_guard = state.mitigation_lock.lock().await;
     let mut trace = BanTrace::default();
     let result = admit_ban(state.clone(), grant, input, &mut trace).await;
     let Some(event) = &trace.event else {
@@ -1355,6 +1369,7 @@ pub(crate) async fn handle_ban(
             record_event_outcome(&state, event.event_id, &record).await;
         }
     }
+    drop(mitigation_guard);
     // A refusal before storage leaves no event row, so the detector may retry
     // the same event ID (ADR 033); the audit entry is its only record.
     if let Some(error) = error {
@@ -1409,9 +1424,21 @@ async fn audit_refusal(
 }
 
 async fn record_event_outcome(state: &AppState, event_id: Uuid, record: &EventOutcomeRecord) {
-    if let Err(error) = state.repo.record_event_outcome(event_id, record).await {
-        tracing::error!(%event_id, outcome = record.outcome.as_str(), %error,
-            "failed to record event outcome");
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        state.repo.record_event_outcome(event_id, record),
+    )
+    .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            tracing::error!(%event_id, outcome = record.outcome.as_str(), %error,
+                "failed to record event outcome");
+        }
+        Err(_) => {
+            tracing::error!(%event_id, outcome = record.outcome.as_str(),
+                "event outcome recording deadline elapsed; admission evidence is retained");
+        }
     }
 }
 
@@ -1425,28 +1452,53 @@ async fn admit_ban(
     reject_corroborating_source(&state, &input.source, &input.action).await?;
     validate_confidence(input.confidence).map_err(AppError)?;
     validate_top_src_ports(input.top_src_ports.as_deref()).map_err(AppError)?;
-    // shortcut: one controller per speaker; use a leader fence before supporting active-active controllers.
-    let _mitigation_guard = state.mitigation_lock.lock().await;
     state.verified_speaker_binding().map_err(AppError)?;
-    // Check for duplicate ban event (only bans are checked, not unbans)
-    if let Some(ref ext_id) = input.event_id {
-        if let Ok(Some(_)) = state
+    let previous = if let Some(ref ext_id) = input.event_id {
+        state
             .repo
             .find_ban_event_by_external_id(&input.source, ext_id)
             .await
+            .map_err(AppError)?
+    } else {
+        None
+    };
+    let event = if let Some(event) = previous {
+        if event
+            .ban_admission_pop
+            .as_deref()
+            .is_some_and(|pop| pop != state.settings.pop)
+        {
+            return Err(AppError(PrefixdError::Conflict(
+                "ban event belongs to another POP; retry on its original POP or use a new event ID for a separate admission".into(),
+            )));
+        }
+        if !matches!(
+            event.outcome.outcome,
+            EventOutcome::NotRecorded | EventOutcome::Failed
+        ) || !event.outcome.outcome_mitigation_ids.is_empty()
         {
             crate::observability::metrics::EVENTS_REJECTED
                 .with_label_values(&[input.source.as_str(), "duplicate"])
                 .inc();
             return Err(AppError(PrefixdError::DuplicateEvent {
                 detector_source: input.source.clone(),
-                external_id: ext_id.clone(),
+                external_id: event.external_event_id.clone().unwrap_or_default(),
+                outcome: event.outcome,
             }));
         }
-    }
-
-    // Create internal event
-    let event = AttackEvent::from_input(input);
+        if event.ban_admission_pop.is_none() {
+            return Err(AppError(PrefixdError::Conflict(
+                "historical ban admission outcome is unknown; inspect the event and mitigations before authorizing a new event ID".into(),
+            )));
+        }
+        // A retry cannot replace the original request's destination or policy inputs.
+        trace.stored = true;
+        event
+    } else {
+        let mut event = AttackEvent::from_input(input);
+        event.ban_admission_pop = Some(state.settings.pop.clone());
+        event
+    };
     trace.event = Some(event.clone());
 
     let destination = validate_event_destination(&event.victim_ip).map_err(AppError)?;
@@ -1584,7 +1636,16 @@ async fn admit_ban(
             owners.push(rule_owner(&state, intent).await);
         }
         if !owners.is_empty() && owners.iter().all(Result::is_err) {
-            if let Err(error) = owners.swap_remove(0) {
+            // With no admitted rule, a transient refusal must remain retryable.
+            let index = owners
+                .iter()
+                .position(|owner| {
+                    owner
+                        .as_ref()
+                        .is_err_and(|error| error.status_code().is_server_error())
+                })
+                .unwrap_or(0);
+            if let Err(error) = owners.swap_remove(index) {
                 return Err(AppError(error));
             }
         }
@@ -1638,13 +1699,13 @@ async fn admit_ban(
         prefix_safelisted = Some(safelisted);
     }
 
-    // Store event
-    state.repo.insert_event(&event).await.map_err(AppError)?;
-    trace.stored = true;
-
-    crate::observability::metrics::EVENTS_INGESTED
-        .with_label_values(&[&event.source, &event.attack_vector().to_string()])
-        .inc();
+    if !trace.stored {
+        state.repo.insert_event(&event).await.map_err(AppError)?;
+        trace.stored = true;
+        crate::observability::metrics::EVENTS_INGESTED
+            .with_label_values(&[&event.source, &event.attack_vector().to_string()])
+            .inc();
+    }
 
     // Check if shutting down
     if state.is_shutting_down() {
@@ -2003,6 +2064,7 @@ async fn admit_ban(
     // admitted rule is narrower than the all-UDP alternative and stands alone.
     let mut rules = Vec::with_capacity(decision.intents.len());
     let mut first_error = None;
+    let mut first_later_server_error = None;
     let mut created_any = false;
     for (intent, owner) in decision.intents.into_iter().zip(owners) {
         let scope = intent.match_criteria.clone();
@@ -2010,6 +2072,7 @@ async fn admit_ban(
         let action_type = intent.action_type;
         let admitted = async {
             if let Some(mut existing) = owner? {
+                let expected = existing.clone();
                 if is_prefix {
                     if existing.customer_id != intent.customer_id {
                         return Err(PrefixdError::Conflict(
@@ -2036,7 +2099,10 @@ async fn admit_ban(
                         )?;
                     }
                 }
-                state.repo.update_mitigation(&existing).await?;
+                state
+                    .repo
+                    .extend_mitigation_for_event(&expected, &existing)
+                    .await?;
                 if let Some(lease) = state.lease.as_deref() {
                     lease.observe_leased_write(&existing);
                 }
@@ -2184,16 +2250,24 @@ async fn admit_ban(
                     reason: Some(error.to_string()),
                     announcement_outcome: None,
                 });
-                first_error.get_or_insert(error);
+                if first_error.is_none() {
+                    first_error = Some(error);
+                } else if error.status_code().is_server_error() {
+                    first_later_server_error.get_or_insert(error);
+                }
             }
         }
     }
 
     let mitigation_ids: Vec<Uuid> = rules.iter().filter_map(|rule| rule.mitigation_id).collect();
     if mitigation_ids.is_empty() {
-        // No rule was created or extended: the first rule's error, as before.
-        let error = first_error
-            .unwrap_or_else(|| PrefixdError::Internal("policy produced no rules".into()));
+        // A later transient failure cannot be hidden by a permanent first refusal.
+        let selected = match first_error {
+            Some(error) if error.status_code().is_server_error() => Some(error),
+            first => first_later_server_error.or(first),
+        };
+        let error =
+            selected.unwrap_or_else(|| PrefixdError::Internal("policy produced no rules".into()));
         if matches!(error, PrefixdError::GuardrailViolation(_)) {
             crate::observability::metrics::EVENTS_REJECTED
                 .with_label_values(&[event.source.as_str(), "guardrail"])
@@ -2277,6 +2351,13 @@ fn refuse_prefix_event(
     AppError(error)
 }
 
+fn detector_admission_error(error: PrefixdError) -> PrefixdError {
+    match error {
+        PrefixdError::PendingWithdrawal { .. } => PrefixdError::BanAdmissionChanged,
+        other => other,
+    }
+}
+
 /// The live mitigation a rule would extend, or why this rule cannot proceed.
 async fn rule_owner(
     state: &AppState,
@@ -2292,7 +2373,8 @@ async fn rule_owner(
         ),
         &intent.match_criteria.scope_hash_for(intent.action_type),
     )
-    .await?;
+    .await
+    .map_err(detector_admission_error)?;
     if let Some(owner) = &owner {
         crate::guardrails::check_detector_discard_scope(owner.action_type, &owner.match_criteria)?;
         // Extending a simulation in enforced mode would leave the attack unmitigated.
@@ -2862,6 +2944,7 @@ async fn admit_detector_blackhole(
         state.lease.as_deref(),
     )
     .await
+    .map_err(detector_admission_error)
     .inspect_err(|error| {
         if let PrefixdError::GuardrailViolation(violation) = error {
             crate::observability::metrics::GUARDRAIL_REJECTIONS
@@ -3546,6 +3629,10 @@ impl IntoResponse for AppError {
         let status = self.0.status_code();
         let body = Json(ErrorResponse {
             error: self.0.to_string(),
+            event_outcome: match &self.0 {
+                PrefixdError::DuplicateEvent { outcome, .. } => Some(outcome.clone()),
+                _ => None,
+            },
             retry_after_seconds: match &self.0 {
                 PrefixdError::RateLimited {
                     retry_after_seconds,
@@ -4730,6 +4817,87 @@ mod tests {
             )
         }
 
+        #[tokio::test]
+        async fn late_detector_blackhole_pending_owner_is_retryable_and_manual_stays_conflict() {
+            let _metrics = crate::observability::metrics::METRICS_TEST_LOCK
+                .lock()
+                .await;
+            let repo = Arc::new(MockRepository::new());
+            let speaker = Arc::new(FaultyBlackholes::default());
+            let state =
+                detector_state(OperationMode::Enforced, repo.clone(), speaker.clone()).await;
+            let app = crate::api::create_test_router(state.clone());
+            let (status, body) = send(
+                &app,
+                "/v1/events",
+                None,
+                fastnetmon_ban("fastnetmon", "203.0.113.10"),
+            )
+            .await;
+            assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+            let id = body["mitigation_id"].as_str().unwrap().parse().unwrap();
+            let original = repo.get_mitigation(id).await.unwrap().unwrap();
+            let pending = crate::domain::WithdrawalRequest::new(
+                &original,
+                false,
+                "operator",
+                "test",
+                "pending blackhole".into(),
+                true,
+            )
+            .unwrap();
+            repo.begin_withdrawal(&pending).await.unwrap();
+            let intent = crate::domain::MitigationIntent {
+                event_id: uuid::Uuid::new_v4(),
+                customer_id: original.customer_id.clone(),
+                service_id: original.service_id.clone(),
+                pop: original.pop.clone(),
+                match_criteria: original.match_criteria.clone(),
+                action_type: original.action_type,
+                action_params: original.action_params.clone(),
+                ttl_seconds: 600,
+                reason: "retry".into(),
+            };
+            let grant = crate::api::auth::SourceGrant::for_test("fastnetmon");
+            // Exercise the second ownership check at its detector boundary. The
+            // separate PostgreSQL FlowSpec test covers the dropped-COMMIT interleaving.
+            let guard = state.mitigation_lock.lock().await;
+            let error = super::super::admit_detector_blackhole(
+                &state,
+                intent,
+                &grant.creation_actor(),
+                original.vector,
+                None,
+            )
+            .await
+            .unwrap_err();
+            drop(guard);
+            assert_eq!(
+                error.status_code(),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "{error}"
+            );
+            assert_eq!(
+                crate::domain::EventOutcomeRecord::from_error(&error, vec![]).outcome,
+                crate::domain::EventOutcome::Failed
+            );
+            let (status, body) = send(
+                &app,
+                "/v1/mitigations",
+                None,
+                create("203.0.113.10", Some("203.0.113.10")),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CONFLICT, "{body}");
+            assert_eq!(
+                body["error"],
+                "conflict: blackhole route has a pending withdrawal"
+            );
+            assert_eq!(repo.get_mitigation(id).await.unwrap().unwrap(), original);
+            assert_eq!(speaker.adds.load(SeqCst), 1);
+            assert_eq!(speaker.deletes.load(SeqCst), 0);
+        }
+
         /// FastNetMon ban to a dry-run blackhole with no RPC; a repeated ban extends
         /// it within the cap; another source is refused for creation and extension;
         /// the script's unban (list by victim, withdraw each) and the event unban
@@ -5359,6 +5527,520 @@ playbooks:
 
     async fn get(f: &Fixture, id: Uuid) -> Mitigation {
         f.repo.get_mitigation(id).await.unwrap().unwrap()
+    }
+
+    mod ban_retries {
+        use super::*;
+        use crate::db::{ListParams, MockPause};
+        use crate::domain::{EventOutcome, EventOutcomeRecord};
+        use std::sync::atomic::Ordering::SeqCst;
+        use std::time::Duration;
+
+        fn spawn_ban(
+            f: &Fixture,
+            input: AttackEventInput,
+        ) -> tokio::task::JoinHandle<Result<EventResponse, PrefixdError>> {
+            let state = f.state.clone();
+            tokio::spawn(async move {
+                let grant = crate::api::auth::SourceGrant::for_test(&input.source);
+                handle_ban(state, &grant, input)
+                    .await
+                    .map(|(_, axum::Json(response))| response)
+                    .map_err(|AppError(error)| error)
+            })
+        }
+
+        async fn entered(pause: &MockPause) {
+            tokio::time::timeout(Duration::from_secs(5), pause.entered.notified())
+                .await
+                .expect("request reached the controlled cancellation point");
+        }
+
+        async fn stored(f: &Fixture, id: &str) -> crate::domain::AttackEvent {
+            f.repo
+                .find_ban_event_by_external_id("amp-test", id)
+                .await
+                .unwrap()
+                .unwrap()
+        }
+
+        fn duplicate(error: PrefixdError) -> EventOutcomeRecord {
+            match error {
+                PrefixdError::DuplicateEvent { outcome, .. } => outcome,
+                other => panic!("expected completed duplicate, got {other}"),
+            }
+        }
+
+        async fn unban(f: &Fixture, id: &str) {
+            let mut input = event(id, "udp_flood", None);
+            input.action = "unban".into();
+            let grant = crate::api::auth::SourceGrant::for_test(&input.source);
+            let _ = handle_unban(f.state.clone(), &grant, input)
+                .await
+                .unwrap_or_else(|AppError(error)| panic!("{error}"));
+        }
+
+        #[tokio::test]
+        async fn cancelled_after_insert_resumes_original_event_once() {
+            let _metrics = crate::observability::metrics::METRICS_TEST_LOCK
+                .lock()
+                .await;
+            let f = fixture(OperationMode::Enforced, |_, _| {});
+            let pause = Arc::new(MockPause::default());
+            *f.repo.after_event_insert.lock().unwrap() = Some(pause.clone());
+            let first = spawn_ban(&f, event("interrupted", "udp_flood", None));
+            entered(&pause).await;
+            let original = stored(&f, "interrupted").await;
+            assert!(rows(&f).await.is_empty());
+            first.abort();
+            assert!(first.await.unwrap_err().is_cancelled());
+
+            let mut retry = event("interrupted", "syn_flood", None);
+            retry.victim_ip = "203.0.113.11".into();
+            let recovered = ban(&f, retry.clone()).await.unwrap();
+            assert_eq!(recovered.event_id, original.event_id);
+            let rows = rows(&f).await;
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].victim_ip, original.victim_ip);
+            assert_eq!(rows[0].triggering_event_id, original.event_id);
+            assert_eq!(f.speaker.announced_count().await, 1);
+            let completed = stored(&f, "interrupted").await;
+            assert_eq!(completed.ingested_at, original.ingested_at);
+            assert_eq!(completed.outcome.outcome, EventOutcome::Mitigated);
+            assert_eq!(
+                duplicate(ban(&f, retry).await.unwrap_err()),
+                completed.outcome
+            );
+            assert_eq!(
+                f.repo
+                    .list_events(&ListParams {
+                        limit: 100,
+                        ..Default::default()
+                    })
+                    .await
+                    .unwrap()
+                    .len(),
+                1
+            );
+            assert_eq!(f.repo.count_active_global().await.unwrap(), 1);
+        }
+
+        async fn permanent_first_transient_later(pending_owner: bool) {
+            let f = fixture(OperationMode::Enforced, |_, _| {});
+            let input = event("mixed-retry", "udp_amplification", Some(&[53]));
+            let pause = Arc::new(MockPause::default());
+            *f.repo.after_event_insert.lock().unwrap() = Some(pause.clone());
+            let interrupted = spawn_ban(&f, input.clone());
+            entered(&pause).await;
+            let original = stored(&f, "mixed-retry").await;
+            interrupted.abort();
+            assert!(interrupted.await.unwrap_err().is_cancelled());
+
+            // A dry-run owner is a permanent refusal in enforced mode. For the
+            // early-owner case the second rule also has durable deletion intent.
+            let simulations = fixture_on(
+                f.repo.clone(),
+                f.speaker.clone(),
+                OperationMode::DryRun,
+                |_, playbooks| {
+                    if !pending_owner {
+                        playbooks.playbooks[1].steps[0].rules.truncate(1);
+                    }
+                },
+            );
+            let seeded = ban(
+                &simulations,
+                event("simulated", "udp_amplification", Some(&[53])),
+            )
+            .await
+            .unwrap();
+            let pending = if pending_owner {
+                let second = get(&f, seeded.mitigation_ids[1]).await;
+                let request = crate::domain::WithdrawalRequest::new(
+                    &second,
+                    false,
+                    "operator",
+                    "test",
+                    "retire simulation".into(),
+                    false,
+                )
+                .unwrap();
+                Some(f.repo.begin_withdrawal(&request).await.unwrap())
+            } else {
+                // The later rule has no owner; its admission fails reading quota state.
+                f.repo.fail_quota_reads.store(true, SeqCst);
+                None
+            };
+            let error = ban(&f, input.clone()).await.unwrap_err();
+            assert!(error.status_code().is_server_error(), "{error}");
+            let failed = stored(&f, "mixed-retry").await;
+            assert_eq!(failed.event_id, original.event_id);
+            assert_eq!(failed.outcome.outcome, EventOutcome::Failed);
+            assert!(failed.outcome.outcome_mitigation_ids.is_empty());
+            assert_eq!(f.speaker.announced_count().await, 0);
+            if let Some(request) = pending {
+                f.repo.finish_withdrawal(&request).await.unwrap().unwrap();
+            } else {
+                f.repo.fail_quota_reads.store(false, SeqCst);
+            }
+            let recovered = ban(&f, input.clone()).await.unwrap();
+            assert_eq!(recovered.event_id, original.event_id);
+            assert_eq!(recovered.mitigation_ids.len(), 1);
+            assert_eq!(
+                outcomes(&recovered),
+                [RuleOutcome::Rejected, RuleOutcome::Created]
+            );
+            let completed = stored(&f, "mixed-retry").await.outcome;
+            assert_eq!(completed.outcome, EventOutcome::Mitigated);
+            assert!(
+                completed
+                    .outcome_reason
+                    .as_deref()
+                    .unwrap()
+                    .contains("dry-run simulation")
+            );
+            assert_eq!(duplicate(ban(&f, input).await.unwrap_err()), completed);
+            assert_eq!(f.speaker.announced_count().await, 1);
+        }
+
+        #[tokio::test]
+        async fn pending_owner_after_permanent_refusal_keeps_zero_admission_retryable() {
+            let _metrics = crate::observability::metrics::METRICS_TEST_LOCK
+                .lock()
+                .await;
+            permanent_first_transient_later(true).await;
+        }
+
+        #[tokio::test]
+        async fn storage_failure_after_permanent_refusal_keeps_zero_admission_retryable() {
+            let _metrics = crate::observability::metrics::METRICS_TEST_LOCK
+                .lock()
+                .await;
+            permanent_first_transient_later(false).await;
+        }
+
+        async fn adapter_storage_failure_recovers(webhook: bool) {
+            use axum::body::Body;
+            use axum::http::{Request, StatusCode};
+            use serde_json::json;
+            use tower::ServiceExt;
+            let f = fixture(OperationMode::Enforced, |settings, _| {
+                settings.http.auth.mode = crate::config::AuthMode::None;
+            });
+            f.state.correlation_config.write().await.webhook_adapters = vec![
+                serde_json::from_value(json!({
+                    "name":"storage", "enabled":true, "auth":{"type":"none"},
+                    "fields":{"victim_ip":"$.ip", "vector":"$.vector", "source_id":"$.id"}
+                }))
+                .unwrap(),
+            ];
+            let app = crate::api::create_test_router(f.state.clone());
+            let (path, payload) = if webhook {
+                (
+                    "/v1/signals/webhook/storage",
+                    json!({"id":"storage-retry", "ip":VICTIM, "vector":"udp_flood"}),
+                )
+            } else {
+                (
+                    "/v1/signals/alertmanager",
+                    json!({
+                        "version":"4", "status":"firing", "groupLabels":{}, "commonLabels":{}, "commonAnnotations":{},
+                        "externalURL":"https://alertmanager.example.com", "alerts":[{
+                            "status":"firing", "fingerprint":"storage-retry", "startsAt":"2026-11-16T00:00:00Z",
+                            "labels":{"victim_ip":VICTIM,"vector":"udp_flood","severity":"critical"}, "annotations":{}
+                        }]
+                    }),
+                )
+            };
+            let post = || {
+                let app = app.clone();
+                let body = payload.to_string();
+                async move {
+                    let response = app
+                        .oneshot(
+                            Request::post(path)
+                                .header("content-type", "application/json")
+                                .body(Body::from(body))
+                                .unwrap(),
+                        )
+                        .await
+                        .unwrap();
+                    let status = response.status();
+                    let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+                        .await
+                        .unwrap();
+                    (
+                        status,
+                        serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
+                    )
+                }
+            };
+            f.repo.fail_safelist.store(true, SeqCst);
+            let (status, body) = post().await;
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+            assert_eq!(body["failed"], 1, "{body}");
+            let events = f
+                .repo
+                .list_events(&ListParams {
+                    limit: 100,
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].outcome.outcome, EventOutcome::Failed);
+            assert!(events[0].outcome.outcome_mitigation_ids.is_empty());
+            assert!(rows(&f).await.is_empty());
+            assert_eq!(f.speaker.announced_count().await, 0);
+            f.repo.fail_safelist.store(false, SeqCst);
+            let (status, body) = post().await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(
+                body["results"][0]["event_id"],
+                events[0].event_id.to_string()
+            );
+            assert_eq!(body["failed"], 0, "{body}");
+            let admitted = rows(&f).await;
+            assert_eq!(admitted.len(), 1);
+            let (status, body) = post().await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["results"][0]["status"], "duplicate", "{body}");
+            assert_eq!(rows(&f).await, admitted);
+            assert_eq!(f.speaker.announced_count().await, 1);
+
+            // A permanent policy refusal remains an item error in a 200 response.
+            f.repo
+                .insert_safelist("203.0.113.11/32", "protected", None)
+                .await
+                .unwrap();
+            let mut refused = payload.clone();
+            if webhook {
+                refused["id"] = "policy-refusal".into();
+                refused["ip"] = "203.0.113.11".into();
+            } else {
+                refused["alerts"][0]["fingerprint"] = "policy-refusal".into();
+                refused["alerts"][0]["labels"]["victim_ip"] = "203.0.113.11".into();
+            }
+            let response = app
+                .oneshot(
+                    Request::post(path)
+                        .header("content-type", "application/json")
+                        .body(Body::from(refused.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(body["failed"], 1, "{body}");
+            assert!(
+                body["results"][0]["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("safelist"),
+                "{body}"
+            );
+            assert_eq!(rows(&f).await, admitted);
+            assert_eq!(f.speaker.announced_count().await, 1);
+        }
+
+        #[tokio::test]
+        async fn alertmanager_ban_storage_failure_is_retryable() {
+            let _metrics = crate::observability::metrics::METRICS_TEST_LOCK
+                .lock()
+                .await;
+            adapter_storage_failure_recovers(false).await;
+        }
+
+        #[tokio::test]
+        async fn webhook_ban_storage_failure_is_retryable() {
+            let _metrics = crate::observability::metrics::METRICS_TEST_LOCK
+                .lock()
+                .await;
+            adapter_storage_failure_recovers(true).await;
+        }
+
+        #[tokio::test]
+        async fn failed_admission_retries_but_final_refusal_does_not() {
+            let _metrics = crate::observability::metrics::METRICS_TEST_LOCK
+                .lock()
+                .await;
+            let f = fixture(OperationMode::Enforced, |_, _| {});
+            let input = event("failure", "udp_flood", None);
+            f.repo.fail_safelist.store(true, SeqCst);
+            assert!(ban(&f, input.clone()).await.is_err());
+            let failed = stored(&f, "failure").await;
+            assert_eq!(failed.outcome.outcome, EventOutcome::Failed);
+            assert!(failed.outcome.outcome_mitigation_ids.is_empty());
+            f.repo.fail_safelist.store(false, SeqCst);
+            let recovered = ban(&f, input).await.unwrap();
+            assert_eq!(recovered.event_id, failed.event_id);
+            assert_eq!(
+                stored(&f, "failure").await.outcome.outcome,
+                EventOutcome::Mitigated
+            );
+
+            let mut refused = event("refused", "udp_flood", None);
+            refused.victim_ip = "198.51.100.10".into();
+            assert_eq!(ban(&f, refused.clone()).await.unwrap().mitigation_id, None);
+            assert_eq!(
+                duplicate(ban(&f, refused).await.unwrap_err()).outcome,
+                EventOutcome::NotOwned
+            );
+        }
+
+        #[tokio::test]
+        async fn outcome_write_and_concurrent_retry_share_the_lifecycle_lock() {
+            let _metrics = crate::observability::metrics::METRICS_TEST_LOCK
+                .lock()
+                .await;
+            let f = fixture(OperationMode::Enforced, |_, _| {});
+            let pause = Arc::new(MockPause::default());
+            *f.repo.before_event_outcome.lock().unwrap() = Some(pause.clone());
+            let input = event("concurrent", "udp_flood", None);
+            let first = spawn_ban(&f, input.clone());
+            entered(&pause).await;
+            assert!(f.state.mitigation_lock.try_lock().is_err());
+            let retry = ban(&f, input);
+            tokio::pin!(retry);
+            assert!(futures_util::poll!(&mut retry).is_pending());
+            pause.release.notify_one();
+            let completed = first.await.unwrap().unwrap();
+            let outcome = duplicate(retry.await.unwrap_err());
+            assert_eq!(outcome.outcome, EventOutcome::Mitigated);
+            assert_eq!(outcome.outcome_mitigation_ids, completed.mitigation_ids);
+            assert_eq!(rows(&f).await.len(), 1);
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn outcome_deadline_releases_lifecycle_without_erasing_admitted_ids() {
+            let _metrics = crate::observability::metrics::METRICS_TEST_LOCK
+                .lock()
+                .await;
+            let f = fixture(OperationMode::Enforced, |_, _| {});
+            let pause = Arc::new(MockPause::default());
+            *f.repo.before_event_outcome.lock().unwrap() = Some(pause.clone());
+            let input = event("slow-outcome", "udp_flood", None);
+            let first = spawn_ban(&f, input.clone());
+            entered(&pause).await;
+            let original = stored(&f, "slow-outcome").await;
+            assert_eq!(original.outcome.outcome_mitigation_ids.len(), 1);
+            tokio::time::advance(Duration::from_millis(4999)).await;
+            assert!(!first.is_finished());
+            assert!(f.state.mitigation_lock.try_lock().is_err());
+            tokio::time::advance(Duration::from_millis(1)).await;
+            let accepted = tokio::time::timeout(Duration::from_secs(1), first)
+                .await
+                .expect("outcome deadline released the lifecycle turn")
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                accepted.mitigation_ids,
+                original.outcome.outcome_mitigation_ids
+            );
+            assert!(f.state.mitigation_lock.try_lock().is_ok());
+            let replay = tokio::time::timeout(Duration::from_secs(1), ban(&f, input))
+                .await
+                .expect("same-ID request progresses after the deadline");
+            assert_eq!(duplicate(replay.unwrap_err()), original.outcome);
+            assert_eq!(rows(&f).await.len(), 1);
+        }
+
+        #[tokio::test]
+        async fn interrupted_partial_admission_and_withdrawal_never_reannounce() {
+            let _metrics = crate::observability::metrics::METRICS_TEST_LOCK
+                .lock()
+                .await;
+            let f = fixture(OperationMode::Enforced, |_, _| {});
+            let hold_publication = f.state.alerting.write().await;
+            let mut feed = f.state.ws_broadcast.subscribe();
+            let input = event("partial", "udp_amplification", Some(&[53, 123]));
+            let first = spawn_ban(&f, input.clone());
+            tokio::time::timeout(Duration::from_secs(5), feed.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            // The first rule committed and announced; the second has not started.
+            let before = rows(&f).await;
+            assert_eq!(before.len(), 1);
+            first.abort();
+            assert!(first.await.unwrap_err().is_cancelled());
+            drop(hold_publication);
+            let record = stored(&f, "partial").await.outcome;
+            assert_eq!(record.outcome, EventOutcome::NotRecorded);
+            assert_eq!(record.outcome_mitigation_ids, [before[0].mitigation_id]);
+            assert_eq!(duplicate(ban(&f, input.clone()).await.unwrap_err()), record);
+            assert_eq!(
+                get(&f, before[0].mitigation_id).await.expires_at,
+                before[0].expires_at
+            );
+            assert_eq!(rows(&f).await.len(), 1);
+            unban(&f, "resolve-partial").await;
+            assert_eq!(f.speaker.announced_count().await, 0);
+            assert_eq!(duplicate(ban(&f, input).await.unwrap_err()), record);
+            assert_eq!(rows(&f).await.len(), 1);
+            assert_eq!(f.repo.count_active_global().await.unwrap(), 0);
+        }
+
+        #[tokio::test]
+        async fn interrupted_extension_survives_later_extensions_and_withdrawal() {
+            let _metrics = crate::observability::metrics::METRICS_TEST_LOCK
+                .lock()
+                .await;
+            let f = fixture(OperationMode::Enforced, |_, _| {});
+            ban(&f, event("created", "udp_flood", None)).await.unwrap();
+            let pause = Arc::new(MockPause::default());
+            *f.repo.before_event_outcome.lock().unwrap() = Some(pause.clone());
+            let input = event("extend-interrupted", "udp_flood", None);
+            let extension = spawn_ban(&f, input.clone());
+            entered(&pause).await;
+            extension.abort();
+            assert!(extension.await.unwrap_err().is_cancelled());
+            let record = stored(&f, "extend-interrupted").await.outcome;
+            assert_eq!(record.outcome_mitigation_ids.len(), 1);
+            ban(&f, event("later-extension", "udp_flood", None))
+                .await
+                .unwrap();
+            let before = rows(&f).await;
+            assert_eq!(duplicate(ban(&f, input.clone()).await.unwrap_err()), record);
+            assert_eq!(
+                get(&f, before[0].mitigation_id).await.last_event_id,
+                before[0].last_event_id
+            );
+            assert_eq!(
+                get(&f, before[0].mitigation_id).await.expires_at,
+                before[0].expires_at
+            );
+            unban(&f, "resolve-extension").await;
+            assert_eq!(duplicate(ban(&f, input).await.unwrap_err()), record);
+            assert_eq!(rows(&f).await.len(), 1);
+            assert_eq!(f.repo.count_active_global().await.unwrap(), 0);
+        }
+
+        #[tokio::test]
+        async fn failed_final_outcome_preserves_admitted_ids_and_lookup_failure_is_closed() {
+            let _metrics = crate::observability::metrics::METRICS_TEST_LOCK
+                .lock()
+                .await;
+            let f = fixture(OperationMode::Enforced, |_, _| {});
+            f.repo.fail_event_outcomes.store(true, SeqCst);
+            let input = event("lost-outcome", "udp_flood", None);
+            let accepted = ban(&f, input.clone()).await.unwrap();
+            let record = stored(&f, "lost-outcome").await.outcome;
+            assert_eq!(record.outcome, EventOutcome::NotRecorded);
+            assert_eq!(record.outcome_mitigation_ids, accepted.mitigation_ids);
+            f.repo.fail_event_outcomes.store(false, SeqCst);
+            assert_eq!(duplicate(ban(&f, input.clone()).await.unwrap_err()), record);
+            f.repo.fail_ban_reads.store(true, SeqCst);
+            assert!(matches!(
+                ban(&f, input).await.unwrap_err(),
+                PrefixdError::Internal(_)
+            ));
+            assert_eq!(rows(&f).await.len(), 1);
+        }
     }
 
     #[tokio::test]

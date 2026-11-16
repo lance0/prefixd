@@ -1357,6 +1357,7 @@ async fn test_timeseries_non_hour_bucket_alignment() {
         action: "ban".to_string(),
         raw_details: None,
         outcome: Default::default(),
+        ban_admission_pop: None,
     };
 
     let event_two = AttackEvent {
@@ -1376,6 +1377,7 @@ async fn test_timeseries_non_hour_bucket_alignment() {
         action: "ban".to_string(),
         raw_details: None,
         outcome: Default::default(),
+        ban_admission_pop: None,
     };
 
     ctx.repo
@@ -1857,6 +1859,7 @@ async fn test_signal_group_add_events_and_list() {
         action: "ban".to_string(),
         raw_details: None,
         outcome: Default::default(),
+        ban_admission_pop: None,
     };
     let event2 = AttackEvent {
         event_id: uuid::Uuid::new_v4(),
@@ -1875,6 +1878,7 @@ async fn test_signal_group_add_events_and_list() {
         action: "ban".to_string(),
         raw_details: None,
         outcome: Default::default(),
+        ban_admission_pop: None,
     };
 
     ctx.repo.insert_event(&event1).await.unwrap();
@@ -4244,7 +4248,7 @@ async fn invalid_manual_actions_never_reach_postgres_or_the_speaker() {
 }
 
 #[tokio::test]
-async fn test_creation_insert_failure_sends_no_rpc_and_retains_detector_id_gap() {
+async fn test_creation_insert_failure_sends_no_rpc_and_retry_recovers_original_event() {
     use std::sync::{Arc, atomic::Ordering::SeqCst};
     let context = TestContext::new().await;
     let version: String = sqlx::query_scalar("SELECT version()")
@@ -4277,19 +4281,39 @@ async fn test_creation_insert_failure_sends_no_rpc_and_retains_detector_id_gap()
             ));
         }
     }
-    assert!(
-        context
-            .repo
-            .find_ban_event_by_external_id("creation-test", "failed-prepare")
-            .await
-            .unwrap()
-            .is_some()
-    );
+    let original = context
+        .repo
+        .find_ban_event_by_external_id("creation-test", "failed-prepare")
+        .await
+        .unwrap()
+        .unwrap();
     sqlx::query("DROP TRIGGER reject_creation ON mitigations")
         .execute(&context.pool)
         .await
         .unwrap();
-    // This pre-existing ingestion gap is deliberately not repaired by deleting/replaying the event.
+    // Recovery resumes the saved event after the preparation fault is removed.
+    let response = app
+        .clone()
+        .oneshot(creation_request(
+            "detector",
+            "203.0.113.10",
+            "failed-prepare",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let recovered = creation_json(response).await;
+    assert_eq!(recovered["event_id"], original.event_id.to_string());
+    assert_eq!(speaker.adds.load(SeqCst), 1);
+    assert_eq!(context.repo.count_active_global().await.unwrap(), 1);
+    let completed = context
+        .repo
+        .find_ban_event_by_external_id("creation-test", "failed-prepare")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(completed.event_id, original.event_id);
+    assert_eq!(completed.outcome.outcome_mitigation_ids.len(), 1);
     let response = app
         .clone()
         .oneshot(creation_request(
@@ -4300,8 +4324,13 @@ async fn test_creation_insert_failure_sends_no_rpc_and_retains_detector_id_gap()
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::CONFLICT);
-    assert_eq!(speaker.adds.load(SeqCst), 0);
-    for (kind, ip) in [("manual", "203.0.113.10"), ("detector", "203.0.113.11")] {
+    assert_eq!(
+        speaker.adds.load(SeqCst),
+        1,
+        "completed retry sends no additional RPC"
+    );
+    assert_eq!(context.repo.count_active_global().await.unwrap(), 1);
+    for (kind, ip) in [("manual", "203.0.113.12"), ("detector", "203.0.113.11")] {
         let response = app
             .clone()
             .oneshot(creation_request(kind, ip, "fresh-prepare"))
@@ -9176,8 +9205,9 @@ async fn a_pending_detector_withdrawal_keeps_its_source_on_postgres() {
 /// A detector unban's replay record is keyed by POP, source and event ID, in
 /// PostgreSQL and the mock alike: two POPs sharing a database each find only
 /// their own, an unban stored without a record (before migration 025) is not
-/// found, so a resend selects afresh, and narrowing replaces the targets.
+/// found, so a resend selects afresh. Historical replay targets stay unchanged.
 /// Negative control: a lookup without the POP returns POP A's record on POP B.
+#[cfg(feature = "test-utils")]
 #[tokio::test]
 async fn unban_replay_is_keyed_by_pop_postgres_mock_parity() {
     use prefixd::db::{MockRepository, RepositoryTrait, UnbanReplay};
@@ -9209,11 +9239,13 @@ async fn unban_replay_is_keyed_by_pop_postgres_mock_parity() {
 
         let (a, b) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
         let on_a = unban("203.0.113.90");
-        repo.insert_unban_event(&on_a, "pop-a", &[a, b])
+        repo.insert_legacy_unban_for_test(&on_a, "pop-a", &[a, b])
             .await
             .unwrap();
         let on_b = unban("203.0.113.91");
-        repo.insert_unban_event(&on_b, "pop-b", &[]).await.unwrap();
+        repo.insert_legacy_unban_for_test(&on_b, "pop-b", &[])
+            .await
+            .unwrap();
 
         assert_eq!(
             repo.find_unban_replay("pop-a", "fastnetmon", "u-1")
@@ -9247,15 +9279,866 @@ async fn unban_replay_is_keyed_by_pop_postgres_mock_parity() {
                 .unwrap(),
             None
         );
+    }
+}
 
-        repo.set_unban_targets(on_a.event_id, &[b]).await.unwrap();
-        assert_eq!(
-            repo.find_unban_replay("pop-a", "fastnetmon", "u-1")
-                .await
-                .unwrap()
-                .unwrap()
-                .target_ids,
-            vec![b]
+fn atomic_unban_event(id: &str) -> prefixd::domain::AttackEvent {
+    prefixd::domain::AttackEvent::from_input(
+        serde_json::from_value(serde_json::json!({
+            "event_id": id, "timestamp": "2026-11-16T00:00:00Z", "source": "alertmanager",
+            "victim_ip": "203.0.113.90", "vector": "unknown", "action": "unban"
+        }))
+        .unwrap(),
+    )
+}
+
+async fn atomic_unban_targets(
+    ctx: &TestContext,
+) -> Vec<prefixd::domain::PreparedDetectorWithdrawal> {
+    let mut targets = Vec::new();
+    for prefix in ["203.0.113.90/32", "203.0.113.91/32"] {
+        let m = inventory_mitigation(
+            prefix,
+            "atomic-pop",
+            chrono::Utc::now(),
+            MitigationStatus::Active,
+        );
+        ctx.repo.insert_mitigation(&m).await.unwrap();
+        // PostgreSQL timestamps have microsecond precision: use the stored revision.
+        let m = ctx
+            .repo
+            .get_mitigation(m.mitigation_id)
+            .await
+            .unwrap()
+            .unwrap();
+        targets.push(
+            prefixd::domain::prepare_detector_withdrawal(
+                ctx.repo.as_ref(),
+                &m,
+                "alertmanager",
+                "detector",
+                "token:original",
+                "original episode resolution".into(),
+                false,
+                None,
+            )
+            .await
+            .unwrap(),
         );
     }
+    targets
+}
+
+async fn wait_for_unban_sql_wait(ctx: &TestContext, query: &str) {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE $1)",
+            ).bind(query).fetch_one(&ctx.pool).await.unwrap();
+            if waiting { break; }
+            tokio::task::yield_now().await;
+        }
+    }).await.expect("database reached the explicit lock barrier");
+}
+
+#[tokio::test]
+async fn atomic_unban_empty_targets_keep_replay_lock_and_skip_inventory_postgres() {
+    let ctx = TestContext::new().await;
+    let targets = atomic_unban_targets(&ctx).await;
+    let unrelated = inventory_mitigation(
+        "203.0.113.92/32",
+        "atomic-pop",
+        chrono::Utc::now(),
+        MitigationStatus::Active,
+    );
+    ctx.repo.insert_mitigation(&unrelated).await.unwrap();
+    sqlx::query("UPDATE mitigations SET match_json = '{' WHERE mitigation_id = $1")
+        .bind(unrelated.mitigation_id)
+        .execute(&ctx.pool)
+        .await
+        .unwrap();
+    assert!(
+        ctx.repo
+            .active_mitigations_for_pop("atomic-pop")
+            .await
+            .is_err()
+    );
+    let before: serde_json::Value =
+        sqlx::query_scalar("SELECT to_jsonb(m) FROM mitigations m WHERE mitigation_id = $1")
+            .bind(unrelated.mitigation_id)
+            .fetch_one(&ctx.pool)
+            .await
+            .unwrap();
+
+    // A populated withdrawal must still validate the entire ownership inventory.
+    let refused = atomic_unban_event("populated-corrupt-inventory");
+    assert!(
+        ctx.repo
+            .begin_unban(&refused, "atomic-pop", &targets)
+            .await
+            .is_err()
+    );
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM events WHERE event_id = $1")
+        .bind(refused.event_id)
+        .fetch_one(&ctx.pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+    assert!(ctx.repo.pending_withdrawals(None).await.unwrap().is_empty());
+
+    let event = atomic_unban_event("empty-corrupt-inventory");
+    let key = serde_json::to_string(&(
+        "prefixd:unban",
+        "atomic-pop",
+        event.source.as_str(),
+        event.external_event_id.as_deref().unwrap(),
+    ))
+    .unwrap();
+    let mut blocker = ctx.pool.acquire().await.unwrap();
+    sqlx::query("SELECT pg_advisory_lock(hashtextextended($1, 0))")
+        .bind(&key)
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    let write = {
+        let repo = ctx.repo.clone();
+        let event = event.clone();
+        tokio::spawn(async move { repo.begin_unban(&event, "atomic-pop", &[]).await })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            assert!(!write.is_finished(), "empty unban must wait for its replay key before committing");
+            let waiting: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query = 'SELECT pg_advisory_xact_lock(hashtextextended($1, 0))')")
+                .fetch_one(&ctx.pool).await.unwrap();
+            if waiting { break; }
+            tokio::task::yield_now().await;
+        }
+    }).await.expect("empty unban reached the explicit replay-lock barrier");
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM events WHERE event_id = $1")
+        .bind(event.event_id)
+        .fetch_one(&ctx.pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+    sqlx::query("SELECT pg_advisory_unlock(hashtextextended($1, 0))")
+        .bind(&key)
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    let requests = tokio::time::timeout(std::time::Duration::from_secs(5), write)
+        .await
+        .unwrap()
+        .unwrap()
+        .expect("empty unban does not decode unrelated inventory");
+    assert!(requests.is_empty());
+    let replay = ctx
+        .repo
+        .find_unban_replay("atomic-pop", "alertmanager", "empty-corrupt-inventory")
+        .await
+        .unwrap()
+        .expect("empty replay record committed");
+    assert_eq!(replay.event_id, event.event_id);
+    assert_eq!(replay.external_event_id, event.external_event_id);
+    assert_eq!(replay.victim_ip, event.victim_ip);
+    assert!(replay.target_ids.is_empty());
+    let stored: (String, Vec<uuid::Uuid>) =
+        sqlx::query_as("SELECT unban_pop, unban_target_ids FROM events WHERE event_id = $1")
+            .bind(event.event_id)
+            .fetch_one(&ctx.pool)
+            .await
+            .unwrap();
+    assert_eq!(stored, ("atomic-pop".into(), vec![]));
+    assert!(ctx.repo.pending_withdrawals(None).await.unwrap().is_empty());
+    let after: serde_json::Value =
+        sqlx::query_scalar("SELECT to_jsonb(m) FROM mitigations m WHERE mitigation_id = $1")
+            .bind(unrelated.mitigation_id)
+            .fetch_one(&ctx.pool)
+            .await
+            .unwrap();
+    assert_eq!(after, before);
+}
+
+#[tokio::test]
+async fn atomic_unban_empty_http_replay_preserves_a_later_matching_mitigation_postgres() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let ctx = TestContext::new().await;
+    let (state, speaker) = quota_state_in(
+        &ctx,
+        "empty-unban-pop",
+        common::test_settings().quotas,
+        prefixd::config::OperationMode::Enforced,
+    )
+    .await;
+    let app = prefixd::api::create_test_router(state.clone());
+    let unrelated = inventory_mitigation(
+        "203.0.113.91/32",
+        "empty-unban-pop",
+        chrono::Utc::now(),
+        MitigationStatus::Active,
+    );
+    ctx.repo.insert_mitigation(&unrelated).await.unwrap();
+    sqlx::query("UPDATE mitigations SET match_json = '{' WHERE mitigation_id = $1")
+        .bind(unrelated.mitigation_id)
+        .execute(&ctx.pool)
+        .await
+        .unwrap();
+    assert!(
+        ctx.repo
+            .active_mitigations_for_pop("empty-unban-pop")
+            .await
+            .is_err()
+    );
+    let post = |id: &str| {
+        let app = app.clone();
+        let body = serde_json::json!({
+            "event_id":id, "timestamp":chrono::Utc::now(), "source":"alertmanager",
+            "victim_ip":"203.0.113.90", "vector":"unknown", "action":"unban",
+        })
+        .to_string();
+        async move {
+            let response = app
+                .oneshot(
+                    Request::post("/v1/events")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = response.status();
+            (status, creation_json(response).await)
+        }
+    };
+    let (status, first) = post("empty-http").await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{first}");
+    assert_eq!(first["status"], "no_active_mitigation");
+    let original_id: uuid::Uuid = first["event_id"].as_str().unwrap().parse().unwrap();
+    let replay = ctx
+        .repo
+        .find_unban_replay("empty-unban-pop", "alertmanager", "empty-http")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(replay.event_id, original_id);
+    assert!(replay.target_ids.is_empty());
+
+    let later_event = prefixd::domain::AttackEvent::from_input(
+        serde_json::from_value(serde_json::json!({
+            "event_id":"later-ban", "timestamp":chrono::Utc::now(), "source":"alertmanager",
+            "victim_ip":"203.0.113.90", "vector":"udp_flood", "action":"ban",
+        }))
+        .unwrap(),
+    );
+    ctx.repo.insert_event(&later_event).await.unwrap();
+    let mut later = inventory_mitigation(
+        "203.0.113.90/32",
+        "empty-unban-pop",
+        chrono::Utc::now(),
+        MitigationStatus::Active,
+    );
+    later.triggering_event_id = later_event.event_id;
+    later.last_event_id = later_event.event_id;
+    ctx.repo.insert_mitigation(&later).await.unwrap();
+    let later = ctx
+        .repo
+        .get_mitigation(later.mitigation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    speaker
+        .inner
+        .announce(&prefixd::domain::mitigation_rule(&later).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        ctx.repo
+            .list_live_by_victim_and_source("203.0.113.90/32", "empty-unban-pop", "alertmanager")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    let (status, repeated) = post("empty-http").await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{repeated}");
+    assert_eq!(repeated["event_id"], first["event_id"]);
+    assert_eq!(repeated["status"], "no_active_mitigation");
+    assert_eq!(
+        ctx.repo
+            .get_mitigation(later.mitigation_id)
+            .await
+            .unwrap()
+            .unwrap(),
+        later
+    );
+    assert_eq!(speaker.list_active().await.unwrap().len(), 1);
+    assert_eq!(speaker.adds.load(SeqCst), 0);
+    assert_eq!(speaker.deletes.load(SeqCst), 0);
+    assert!(ctx.repo.pending_withdrawals(None).await.unwrap().is_empty());
+    let unbans: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM events WHERE source = 'alertmanager' AND action = 'unban'",
+    )
+    .fetch_one(&ctx.pool)
+    .await
+    .unwrap();
+    assert_eq!(unbans, 1);
+
+    // A fresh unban with an actual target must still fail closed on that inventory.
+    let (status, failed) = post("populated-http").await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{failed}");
+    assert!(
+        ctx.repo
+            .find_unban_replay("empty-unban-pop", "alertmanager", "populated-http")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(ctx.repo.pending_withdrawals(None).await.unwrap().is_empty());
+    assert_eq!(
+        ctx.repo
+            .get_mitigation(later.mitigation_id)
+            .await
+            .unwrap()
+            .unwrap(),
+        later
+    );
+    assert_eq!(speaker.deletes.load(SeqCst), 0);
+}
+
+#[tokio::test]
+async fn atomic_unban_storage_failure_rolls_back_every_target_postgres() {
+    let ctx = TestContext::new().await;
+    let targets = atomic_unban_targets(&ctx).await;
+    sqlx::raw_sql(&format!(
+        "CREATE FUNCTION reject_unban_target() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.mitigation_id = '{}'::uuid THEN RAISE EXCEPTION 'seeded intent failure'; END IF; RETURN NEW; END $$; CREATE TRIGGER reject_unban_target BEFORE INSERT ON withdrawal_requests FOR EACH ROW EXECUTE FUNCTION reject_unban_target();",
+        targets[1].request.mitigation_id
+    )).execute(&ctx.pool).await.unwrap();
+    let event = atomic_unban_event("atomic-failure");
+    assert!(
+        ctx.repo
+            .begin_unban(&event, "atomic-pop", &targets)
+            .await
+            .is_err()
+    );
+    assert!(
+        ctx.repo
+            .find_unban_replay("atomic-pop", "alertmanager", "atomic-failure")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(ctx.repo.pending_withdrawals(None).await.unwrap().is_empty());
+    let events: i64 = sqlx::query_scalar("SELECT count(*) FROM events")
+        .fetch_one(&ctx.pool)
+        .await
+        .unwrap();
+    assert_eq!(events, 0);
+    sqlx::query("DROP TRIGGER reject_unban_target ON withdrawal_requests")
+        .execute(&ctx.pool)
+        .await
+        .unwrap();
+    let requests = ctx
+        .repo
+        .begin_unban(&event, "atomic-pop", &targets)
+        .await
+        .unwrap();
+    assert_eq!(requests.len(), 2);
+    for (request, prepared) in requests.iter().zip(&targets) {
+        assert_eq!(request.operation_id, prepared.request.operation_id);
+        assert_eq!(request.rule_json, prepared.request.rule_json);
+        assert_eq!(request.actor, "token:original");
+        assert_eq!(request.reason, "original episode resolution");
+        assert_eq!(request.detector_source.as_deref(), Some("alertmanager"));
+    }
+}
+
+#[tokio::test]
+async fn atomic_unban_cancel_before_commit_rolls_back_postgres() {
+    let ctx = TestContext::new().await;
+    let targets = atomic_unban_targets(&ctx).await;
+    let mut blocker = ctx.pool.acquire().await.unwrap();
+    sqlx::query("SELECT pg_advisory_lock(1886545528, 337301)")
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    sqlx::raw_sql(&format!(
+        "CREATE FUNCTION block_unban_target() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.mitigation_id = '{}'::uuid THEN PERFORM pg_advisory_xact_lock(1886545528, 337301); END IF; RETURN NEW; END $$; CREATE TRIGGER block_unban_target BEFORE INSERT ON withdrawal_requests FOR EACH ROW EXECUTE FUNCTION block_unban_target();",
+        targets[1].request.mitigation_id
+    )).execute(&ctx.pool).await.unwrap();
+    let write = {
+        let repo = ctx.repo.clone();
+        tokio::spawn(async move {
+            repo.begin_unban(&atomic_unban_event("cancel-before"), "atomic-pop", &targets)
+                .await
+        })
+    };
+    wait_for_unban_sql_wait(&ctx, "INSERT INTO withdrawal_requests%").await;
+    write.abort();
+    assert!(write.await.unwrap_err().is_cancelled());
+    sqlx::query("SELECT pg_advisory_unlock(1886545528, 337301)")
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    assert!(
+        ctx.repo
+            .find_unban_replay("atomic-pop", "alertmanager", "cancel-before")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(ctx.repo.pending_withdrawals(None).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn atomic_unban_cancel_during_commit_keeps_complete_intent_postgres() {
+    let ctx = TestContext::new().await;
+    let targets = atomic_unban_targets(&ctx).await;
+    let expected: Vec<_> = targets
+        .iter()
+        .map(|t| {
+            (
+                t.request.operation_id,
+                t.request.mitigation_id,
+                t.request.rule_json.clone(),
+            )
+        })
+        .collect();
+    let mut blocker = ctx.pool.acquire().await.unwrap();
+    sqlx::query("SELECT pg_advisory_lock(1886545528, 337302)")
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    sqlx::raw_sql(
+        "CREATE FUNCTION block_unban_commit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_advisory_xact_lock(1886545528, 337302); RETURN NEW; END $$; CREATE CONSTRAINT TRIGGER block_unban_commit AFTER INSERT ON events DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION block_unban_commit();"
+    ).execute(&ctx.pool).await.unwrap();
+    let write = {
+        let repo = ctx.repo.clone();
+        tokio::spawn(async move {
+            repo.begin_unban(&atomic_unban_event("cancel-commit"), "atomic-pop", &targets)
+                .await
+        })
+    };
+    wait_for_unban_sql_wait(&ctx, "COMMIT%").await;
+    write.abort();
+    assert!(write.await.unwrap_err().is_cancelled());
+    let mut replay = {
+        let repo = ctx.repo.clone();
+        tokio::spawn(async move {
+            repo.find_unban_replay("atomic-pop", "alertmanager", "cancel-commit")
+                .await
+        })
+    };
+    tokio::select! {
+        () = wait_for_unban_sql_wait(&ctx, "SELECT pg_advisory_xact_lock(hashtextextended%") => (),
+        result = &mut replay => panic!("replay returned before the blocked COMMIT: {result:?}"),
+    }
+    sqlx::query("SELECT pg_advisory_unlock(1886545528, 337302)")
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    let replay = replay
+        .await
+        .unwrap()
+        .unwrap()
+        .expect("committed replay must be visible");
+    assert_eq!(replay.target_ids.len(), 2);
+    let pending = ctx.repo.pending_withdrawals(None).await.unwrap();
+    assert_eq!(pending.len(), 2);
+    for (operation, mitigation, rule) in expected {
+        let stored = pending
+            .iter()
+            .find(|p| p.mitigation_id == mitigation)
+            .unwrap();
+        assert_eq!(stored.operation_id, operation);
+        assert_eq!(stored.rule_json, rule);
+        assert_eq!(stored.actor, "token:original");
+        assert_eq!(stored.reason, "original episode resolution");
+        assert_eq!(stored.detector_source.as_deref(), Some("alertmanager"));
+    }
+}
+
+#[tokio::test]
+async fn cancelled_http_unban_commit_blocks_a_newer_ban_without_replacing_intent() {
+    use std::sync::atomic::Ordering::SeqCst;
+
+    let ctx = TestContext::new().await;
+    let (state, speaker) = quota_state_in(
+        &ctx,
+        "commit-race-pop",
+        common::test_settings().quotas,
+        prefixd::config::OperationMode::Enforced,
+    )
+    .await;
+    let target_id = state
+        .verified_speaker_binding()
+        .unwrap()
+        .unwrap()
+        .target_id();
+    let app = prefixd::api::create_test_router(state);
+    let event = |id: &str, action: &str| {
+        Request::post("/v1/events")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "event_id": id, "timestamp": chrono::Utc::now(),
+                    "source": "commit-race", "victim_ip": "203.0.113.10",
+                    "vector": "udp_flood", "confidence": 0.9, "pps": 50000,
+                    "top_dst_ports": [53], "action": action,
+                })
+                .to_string(),
+            ))
+            .unwrap()
+    };
+    let response = app
+        .clone()
+        .oneshot(event("original-ban", "ban"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let body = creation_json(response).await;
+    let id = body["mitigation_id"].as_str().unwrap().parse().unwrap();
+    // Compare PostgreSQL's captured row, including its timestamp precision.
+    let original = ctx.repo.get_mitigation(id).await.unwrap().unwrap();
+    let rule = prefixd::domain::mitigation_rule(&original).unwrap();
+    assert_eq!(speaker.adds.load(SeqCst), 1);
+    assert_eq!(speaker.deletes.load(SeqCst), 0);
+    assert_eq!(speaker.list_active().await.unwrap().len(), 1);
+
+    let mut blocker = ctx.pool.acquire().await.unwrap();
+    sqlx::query("SELECT pg_advisory_lock(1886545528, 337305)")
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    sqlx::raw_sql(
+        "CREATE FUNCTION block_http_unban_commit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_advisory_xact_lock(1886545528, 337305); RETURN NEW; END $$; CREATE CONSTRAINT TRIGGER block_http_unban_commit AFTER INSERT ON withdrawal_requests DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION block_http_unban_commit();",
+    )
+    .execute(&ctx.pool)
+    .await
+    .unwrap();
+    let unban = tokio::spawn(app.clone().oneshot(event("original-unban", "unban")));
+    wait_for_unban_sql_wait(&ctx, "COMMIT%").await;
+    assert!(ctx.repo.pending_withdrawals(None).await.unwrap().is_empty());
+    assert_eq!(speaker.adds.load(SeqCst), 1);
+    assert_eq!(speaker.deletes.load(SeqCst), 0);
+    unban.abort();
+    assert!(unban.await.unwrap_err().is_cancelled());
+
+    let mut newer = tokio::spawn(app.clone().oneshot(event("newer-ban", "ban")));
+    tokio::select! {
+        () = wait_for_unban_sql_wait(&ctx, "%mitigations%") => (),
+        result = &mut newer => panic!("newer ban returned before the unban COMMIT: {result:?}"),
+    }
+    assert_eq!(speaker.adds.load(SeqCst), 1);
+    assert_eq!(speaker.deletes.load(SeqCst), 0);
+    sqlx::query("SELECT pg_advisory_unlock(1886545528, 337305)")
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    let response = tokio::time::timeout(std::time::Duration::from_secs(5), newer)
+        .await
+        .expect("newer ban finishes once the unban COMMIT is released")
+        .unwrap()
+        .unwrap();
+    let status = response.status();
+    let body = creation_json(response).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    let newer_event = ctx
+        .repo
+        .find_ban_event_by_external_id("commit-race", "newer-ban")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        newer_event.outcome.outcome,
+        prefixd::domain::EventOutcome::Failed
+    );
+    assert!(newer_event.outcome.outcome_mitigation_ids.is_empty());
+    let original_event_payload: serde_json::Value = sqlx::query_scalar(
+        "SELECT to_jsonb(e) - 'outcome' - 'outcome_reason' - 'outcome_mitigation_ids' FROM events e WHERE event_id = $1",
+    )
+    .bind(newer_event.event_id)
+    .fetch_one(&ctx.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        ctx.repo.get_mitigation(id).await.unwrap().unwrap(),
+        original
+    );
+    assert_eq!(speaker.adds.load(SeqCst), 1);
+    assert_eq!(speaker.deletes.load(SeqCst), 0);
+
+    let pending = ctx.repo.pending_withdrawals(None).await.unwrap();
+    assert_eq!(pending.len(), 1);
+    let request = &pending[0];
+    assert!(!request.operation_id.is_nil());
+    assert_eq!(request.mitigation_id, id);
+    assert_eq!(request.pop, "commit-race-pop");
+    assert_eq!(request.target_id, Some(target_id));
+    assert_eq!(request.nlri_hash, rule.nlri_hash());
+    assert_eq!(request.rule_kind, "flowspec");
+    assert_eq!(request.rule_json, serde_json::to_string(&rule).unwrap());
+    assert_eq!(request.mitigation_updated_at, original.updated_at);
+    assert_eq!(request.actor_type, "operator");
+    assert_eq!(request.actor, "anonymous");
+    assert_eq!(request.reason, "Detector unban: commit-race");
+    assert_eq!(request.detector_source.as_deref(), Some("commit-race"));
+    assert_eq!(request.terminal_status, "withdrawn");
+    assert!(request.speaker_delete_required);
+    assert!(request.completed_at.is_none());
+    let immutable_before: serde_json::Value = sqlx::query_scalar(
+        "SELECT to_jsonb(w) - 'completed_at' FROM withdrawal_requests w WHERE operation_id = $1",
+    )
+    .bind(request.operation_id)
+    .fetch_one(&ctx.pool)
+    .await
+    .unwrap();
+
+    let response = app
+        .clone()
+        .oneshot(event("newer-ban", "ban"))
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = creation_json(response).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    let still_waiting = ctx
+        .repo
+        .find_ban_event_by_external_id("commit-race", "newer-ban")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(still_waiting.event_id, newer_event.event_id);
+    assert_eq!(
+        still_waiting.outcome.outcome,
+        prefixd::domain::EventOutcome::Failed
+    );
+    assert!(still_waiting.outcome.outcome_mitigation_ids.is_empty());
+    assert_eq!(
+        ctx.repo.get_mitigation(id).await.unwrap().unwrap(),
+        original
+    );
+    assert_eq!(speaker.adds.load(SeqCst), 1);
+    assert_eq!(speaker.deletes.load(SeqCst), 0);
+    let still_pending: serde_json::Value = sqlx::query_scalar(
+        "SELECT to_jsonb(w) - 'completed_at' FROM withdrawal_requests w WHERE operation_id = $1 AND completed_at IS NULL",
+    )
+    .bind(request.operation_id)
+    .fetch_one(&ctx.pool)
+    .await
+    .unwrap();
+    assert_eq!(still_pending, immutable_before);
+
+    let response = app
+        .clone()
+        .oneshot(event("original-unban", "unban"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let body = creation_json(response).await;
+    assert_eq!(body["mitigation_ids"], serde_json::json!([id]));
+    assert_eq!(speaker.adds.load(SeqCst), 1);
+    assert_eq!(speaker.deletes.load(SeqCst), 1);
+    assert!(speaker.list_active().await.unwrap().is_empty());
+    assert!(ctx.repo.pending_withdrawals(None).await.unwrap().is_empty());
+    let saved: Vec<(serde_json::Value, bool)> = sqlx::query_as(
+        "SELECT to_jsonb(w) - 'completed_at', completed_at IS NOT NULL FROM withdrawal_requests w WHERE mitigation_id = $1",
+    )
+    .bind(id)
+    .fetch_all(&ctx.pool)
+    .await
+    .unwrap();
+    assert_eq!(saved, [(immutable_before, true)]);
+    assert_eq!(
+        ctx.repo.get_mitigation(id).await.unwrap().unwrap().status,
+        MitigationStatus::Withdrawn
+    );
+
+    // Recovery keeps the saved event's destination and ports, not the resend's.
+    let changed_payload = Request::post("/v1/events")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::json!({
+                "event_id": "newer-ban", "timestamp": chrono::Utc::now(),
+                "source": "commit-race", "victim_ip": "203.0.113.11",
+                "vector": "udp_flood", "confidence": 0.9, "pps": 90000,
+                "top_dst_ports": [123], "action": "ban",
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let response = app.clone().oneshot(changed_payload).await.unwrap();
+    let status = response.status();
+    let body = creation_json(response).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    assert_eq!(body["event_id"], newer_event.event_id.to_string());
+    let recovered_id: uuid::Uuid = body["mitigation_id"].as_str().unwrap().parse().unwrap();
+    assert_ne!(recovered_id, id);
+    let recovered = ctx
+        .repo
+        .get_mitigation(recovered_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(recovered.last_event_id, newer_event.event_id);
+    assert_eq!(recovered.victim_ip, newer_event.victim_ip);
+    assert_eq!(recovered.match_criteria, original.match_criteria);
+    assert_eq!(speaker.adds.load(SeqCst), 2);
+    assert_eq!(speaker.deletes.load(SeqCst), 1);
+    assert_eq!(speaker.list_active().await.unwrap().len(), 1);
+    assert_eq!(ctx.repo.count_active_global().await.unwrap(), 1);
+
+    let response = app.oneshot(event("newer-ban", "ban")).await.unwrap();
+    let status = response.status();
+    let body = creation_json(response).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["event_outcome"]["outcome"], "mitigated");
+    assert_eq!(
+        body["event_outcome"]["outcome_mitigation_ids"],
+        serde_json::json!([recovered_id])
+    );
+    let completed = ctx
+        .repo
+        .find_ban_event_by_external_id("commit-race", "newer-ban")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(completed.event_id, newer_event.event_id);
+    assert_eq!(
+        completed.outcome.outcome,
+        prefixd::domain::EventOutcome::Mitigated
+    );
+    assert_eq!(completed.outcome.outcome_mitigation_ids, [recovered_id]);
+    assert_eq!(speaker.adds.load(SeqCst), 2);
+    assert_eq!(speaker.deletes.load(SeqCst), 1);
+    assert_eq!(ctx.repo.count_active_global().await.unwrap(), 1);
+    let completed_event_payload: serde_json::Value = sqlx::query_scalar(
+        "SELECT to_jsonb(e) - 'outcome' - 'outcome_reason' - 'outcome_mitigation_ids' FROM events e WHERE event_id = $1",
+    )
+    .bind(newer_event.event_id)
+    .fetch_one(&ctx.pool)
+    .await
+    .unwrap();
+    assert_eq!(completed_event_payload, original_event_payload);
+}
+
+#[tokio::test]
+async fn atomic_unban_rechecks_the_complete_snapshot_under_the_row_lock() {
+    let ctx = TestContext::new().await;
+    let targets = atomic_unban_targets(&ctx).await;
+    let original = targets[0].expected.clone();
+    for field in [
+        "injection_owner",
+        "action",
+        "expiry",
+        "last_event",
+        "origin_mode",
+    ] {
+        let mut changed = original.clone();
+        match field {
+            "injection_owner" => changed.action_params.injection_owner = "other-owner".into(),
+            "action" => {
+                changed.action_type = prefixd::domain::ActionType::Police;
+                changed.action_params.rate_bps = Some(1_000_000);
+            }
+            "expiry" => changed.expires_at += chrono::Duration::seconds(60),
+            "last_event" => changed.last_event_id = uuid::Uuid::new_v4(),
+            "origin_mode" => (),
+            _ => unreachable!(),
+        }
+        // Keep updated_at identical: the full snapshot, not the clock, is authoritative.
+        ctx.repo.update_mitigation(&changed).await.unwrap();
+        if field == "origin_mode" {
+            sqlx::query("UPDATE mitigations SET origin_mode = 'enforced' WHERE mitigation_id = $1")
+                .bind(changed.mitigation_id)
+                .execute(&ctx.pool)
+                .await
+                .unwrap();
+        }
+        let error = ctx
+            .repo
+            .begin_unban(
+                &atomic_unban_event("stale-snapshot"),
+                "atomic-pop",
+                &targets,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.status_code(), StatusCode::CONFLICT, "{field}");
+        assert!(
+            ctx.repo.pending_withdrawals(None).await.unwrap().is_empty(),
+            "{field}"
+        );
+        assert!(
+            ctx.repo
+                .find_unban_replay("atomic-pop", "alertmanager", "stale-snapshot")
+                .await
+                .unwrap()
+                .is_none(),
+            "{field}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn generic_withdrawal_holds_the_mitigation_lock_until_commit() {
+    let ctx = TestContext::new().await;
+    let mut targets = atomic_unban_targets(&ctx).await;
+    let mut request = targets.remove(0).request;
+    request.actor_type = "operator".into();
+    request.actor = "operator-original".into();
+    request.detector_source = None;
+    let id = request.mitigation_id;
+    let operation = request.operation_id;
+    let mut blocker = ctx.pool.acquire().await.unwrap();
+    for key in [337303, 337304] {
+        sqlx::query("SELECT pg_advisory_lock(1886545528, $1)")
+            .bind(key)
+            .execute(&mut *blocker)
+            .await
+            .unwrap();
+    }
+    sqlx::raw_sql(
+        "CREATE FUNCTION block_generic_insert() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_advisory_xact_lock(1886545528, 337303); RETURN NEW; END $$; CREATE TRIGGER block_generic_insert BEFORE INSERT ON withdrawal_requests FOR EACH ROW EXECUTE FUNCTION block_generic_insert();
+         CREATE FUNCTION block_generic_commit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_advisory_xact_lock(1886545528, 337304); RETURN NEW; END $$; CREATE CONSTRAINT TRIGGER block_generic_commit AFTER INSERT ON withdrawal_requests DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION block_generic_commit();"
+    ).execute(&ctx.pool).await.unwrap();
+    let write = {
+        let repo = ctx.repo.clone();
+        tokio::spawn(async move { repo.begin_withdrawal(&request).await })
+    };
+    // Before INSERT, the foreign key has not taken its own key-share lock.
+    // Blocking here proves the explicit mitigation lock, not the FK side effect.
+    wait_for_unban_sql_wait(&ctx, "INSERT INTO withdrawal_requests%").await;
+    let mut next = {
+        let pool = ctx.pool.clone();
+        tokio::spawn(async move {
+            sqlx::query_scalar::<_, uuid::Uuid>("SELECT mitigation_id FROM mitigations /* extension barrier */ WHERE mitigation_id = $1 FOR UPDATE")
+                .bind(id).fetch_one(&pool).await.unwrap()
+        })
+    };
+    tokio::select! {
+        () = wait_for_unban_sql_wait(&ctx, "%extension barrier%") => (),
+        result = &mut next => panic!("mitigation was not locked before intent INSERT: {result:?}"),
+    }
+    sqlx::query("SELECT pg_advisory_unlock(1886545528, 337303)")
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    wait_for_unban_sql_wait(&ctx, "COMMIT%").await;
+    write.abort();
+    assert!(write.await.unwrap_err().is_cancelled());
+    tokio::select! {
+        () = wait_for_unban_sql_wait(&ctx, "%extension barrier%") => (),
+        result = &mut next => panic!("mitigation lock was released before COMMIT: {result:?}"),
+    }
+    sqlx::query("SELECT pg_advisory_unlock(1886545528, 337304)")
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    assert_eq!(next.await.unwrap(), id);
+    assert!(
+        ctx.repo
+            .pending_withdrawal(operation, "atomic-pop")
+            .await
+            .unwrap()
+            .is_some()
+    );
 }

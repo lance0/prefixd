@@ -60,8 +60,8 @@ jobs:
         with:
           just-version: "1"
 
-      - name: Install protobuf compiler
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Install test dependencies
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler jq
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
