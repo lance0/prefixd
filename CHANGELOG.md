@@ -515,6 +515,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The API and upgrade guides distinguish an isolated session-store failure
+  from a database outage. Scoped-token requests need a current database read
+  and return `503` when it fails, including on `/v1/health/detail`; a stale
+  cookie does not change that response.
 - `prefixdctl` works in the Compose controller. Both controller services set
   `PREFIXD_API=http://127.0.0.1:8080`, so `docker compose exec` runs no longer
   fail against the CLI's default port 80.
