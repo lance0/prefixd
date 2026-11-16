@@ -20,8 +20,9 @@ use super::handlers::AppError;
 use crate::AppState;
 use crate::auth::AuthSession;
 use crate::config::AuthMode;
-use crate::domain::{ApiToken, Operator, OperatorRole, TokenScope};
+use crate::domain::{ApiToken, Operator, OperatorRole, TOKEN_ACTOR_PREFIX, TokenScope};
 use crate::error::PrefixdError;
+use crate::observability::{ActorType, CreationActor};
 
 /// How an operator-equivalent principal authenticated.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -228,7 +229,10 @@ impl FromRequestParts<Arc<AppState>> for AuthPrincipal {
     }
 }
 
-/// The principal of an ingest route, which may be an ingest token.
+/// The principal of an ingest route, which may be an ingest token. Only a
+/// principal that can hold a source grant gets past extraction (see
+/// [`require_ingest`]), so an Operator gets 403 and a request without a
+/// credential 401 before the body is parsed.
 #[derive(Clone, Debug)]
 pub struct IngestPrincipal(pub AuthPrincipal);
 
@@ -239,10 +243,11 @@ impl FromRequestParts<Arc<AppState>> for IngestPrincipal {
         parts: &mut Parts,
         state: &Arc<AppState>,
     ) -> Result<Self, Self::Rejection> {
-        extract(parts, state)
+        let principal = extract(parts, state)
             .await
-            .map(Self)
-            .map_err(|error| AppError(error).into_response())
+            .map_err(|error| AppError(error).into_response())?;
+        require_ingest(&principal).map_err(|error| AppError(error).into_response())?;
+        Ok(Self(principal))
     }
 }
 
@@ -278,20 +283,159 @@ pub fn require_role(
     }
 }
 
-/// The ingest routes accept an ingest token or an Operator. Ingest endpoints
-/// are mutations even when they carry detector metadata, so Viewers are refused.
+/// The principals an ingest route can grant a source to: an ingest token, or
+/// an Admin (session, admin token, mTLS client or `none` mode). A route that
+/// must parse its body to learn the claimed source checks this first, so an
+/// Operator or Viewer gets 403 before its body is read. [`authorize_ingest`]
+/// then binds the source.
 pub fn require_ingest(principal: &AuthPrincipal) -> Result<(), PrefixdError> {
-    if let Some(Principal::Ingest { .. }) = principal.0 {
-        return Ok(());
-    }
-    match require_role(principal, OperatorRole::Operator) {
-        Ok(_) => Ok(()),
-        Err(StatusCode::FORBIDDEN) => Err(PrefixdError::Forbidden(
-            "operator role or an ingest token required".into(),
-        )),
-        Err(_) => Err(PrefixdError::Unauthorized("authentication required".into())),
+    match &principal.0 {
+        None => Err(PrefixdError::Unauthorized("authentication required".into())),
+        Some(Principal::Ingest { .. }) => Ok(()),
+        Some(Principal::Operator(operator, _))
+            if operator.role.has_permission(&OperatorRole::Admin) =>
+        {
+            Ok(())
+        }
+        Some(Principal::Operator(operator, _)) => {
+            refused_operator(operator);
+            Err(PrefixdError::Forbidden(
+                "ingest routes need an ingest token bound to the event source, or an Admin".into(),
+            ))
+        }
     }
 }
+
+fn refused_operator(operator: &Operator) {
+    tracing::warn!(username = %operator.username, role = %operator.role,
+        "refused an ingest request from a principal without a source grant");
+    crate::observability::metrics::EVENTS_REJECTED
+        .with_label_values(&["unbound", "source_not_bound"])
+        .inc();
+}
+
+/// The source an ingest request acts as, and the actor it is audited as
+/// (ADR 034 §4 and §6). Only this module builds one: [`authorize_ingest`]
+/// from a principal, [`authorize_webhook_hmac`] from a verified adapter
+/// signature, and a test constructor. Every ingest route sets the event's or
+/// signal's `source` from the grant, so every source-keyed check (blackhole and
+/// prefix allowlists, correlation weight, `min_sources`, corroborating mode and
+/// the unban lookup) reads an authorized source.
+#[derive(Clone, Debug)]
+pub struct SourceGrant {
+    source: String,
+    actor_type: ActorType,
+    actor_id: String,
+}
+
+impl SourceGrant {
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+
+    /// `detector` for an ingest token or an HMAC adapter, `operator` for an
+    /// Admin who claimed the source.
+    pub fn actor_type(&self) -> ActorType {
+        self.actor_type
+    }
+
+    /// `token:<name>`, `webhook:<adapter>`, or the Admin's identity.
+    pub fn actor_id(&self) -> &str {
+        &self.actor_id
+    }
+
+    pub fn creation_actor(&self) -> CreationActor {
+        CreationActor::Detector {
+            source: self.source.clone(),
+            actor_type: self.actor_type,
+            actor_id: self.actor_id.clone(),
+        }
+    }
+
+    /// A grant for unit tests that drive the ingest functions directly.
+    #[cfg(test)]
+    pub fn for_test(source: &str) -> Self {
+        Self {
+            source: source.into(),
+            actor_type: ActorType::Detector,
+            actor_id: format!("{TOKEN_ACTOR_PREFIX}test"),
+        }
+    }
+}
+
+/// Grant `claimed` to the principal (ADR 034 §4). An ingest token gets only
+/// the source it is bound to; its POP binding was checked when it was
+/// verified. An Admin, including an mTLS client and `none` mode, may claim any
+/// source and is audited as itself. An Operator and a Viewer get 403, and a
+/// request without a credential gets 401. A refusal is counted under the bound
+/// source, never the claimed one, so a caller cannot grow label cardinality.
+pub fn authorize_ingest(
+    principal: &AuthPrincipal,
+    claimed: &str,
+) -> Result<SourceGrant, PrefixdError> {
+    match &principal.0 {
+        None => Err(PrefixdError::Unauthorized("authentication required".into())),
+        Some(Principal::Ingest { token, source, .. }) if source == claimed => Ok(SourceGrant {
+            source: source.clone(),
+            actor_type: ActorType::Detector,
+            actor_id: format!("{TOKEN_ACTOR_PREFIX}{token}"),
+        }),
+        Some(Principal::Ingest { token, source, .. }) => {
+            tracing::warn!(token = %token, bound = %source, claimed = %claimed,
+                "refused an ingest token claiming a source it is not bound to");
+            crate::observability::metrics::EVENTS_REJECTED
+                .with_label_values(&[source.as_str(), "source_not_bound"])
+                .inc();
+            Err(PrefixdError::SourceNotBound {
+                claimed: claimed.into(),
+                bound: Some(source.clone()),
+            })
+        }
+        Some(Principal::Operator(operator, _))
+            if operator.role.has_permission(&OperatorRole::Admin) =>
+        {
+            Ok(SourceGrant {
+                source: claimed.into(),
+                actor_type: ActorType::Operator,
+                actor_id: operator.username.clone(),
+            })
+        }
+        Some(Principal::Operator(operator, _)) => {
+            refused_operator(operator);
+            Err(PrefixdError::SourceNotBound {
+                claimed: claimed.into(),
+                bound: None,
+            })
+        }
+    }
+}
+
+/// Grant an HMAC webhook adapter its own name (ADR 034 §4). The adapter's
+/// secret is the credential, so no principal is involved and `Authorization`
+/// is ignored. `signature` is the configured header's value; a missing or
+/// mismatched signature gets 401.
+pub fn authorize_webhook_hmac(
+    adapter: &str,
+    secret: &[u8],
+    body: &[u8],
+    signature: Option<&str>,
+) -> Result<SourceGrant, PrefixdError> {
+    let signature = signature
+        .ok_or_else(|| PrefixdError::Unauthorized("missing HMAC signature header".into()))?;
+    if !crate::correlation::verify_hmac_sha256(secret, body, signature) {
+        return Err(PrefixdError::Unauthorized(
+            "HMAC signature verification failed".into(),
+        ));
+    }
+    Ok(SourceGrant {
+        source: adapter.into(),
+        actor_type: ActorType::Detector,
+        actor_id: format!("{WEBHOOK_ACTOR_PREFIX}{adapter}"),
+    })
+}
+
+/// The audit actor prefix of an HMAC webhook adapter, `webhook:<adapter>`.
+pub const WEBHOOK_ACTOR_PREFIX: &str = "webhook:";
 
 /// Identity management needs a session: an operator signed in with a
 /// password. It covers API tokens, operator accounts and passwords. No token
@@ -416,7 +560,20 @@ mod tests {
             require_ingest(&viewer),
             Err(PrefixdError::Forbidden(_))
         ));
-        assert!(require_ingest(&operator(OperatorRole::Operator, Credential::Token)).is_ok());
+        for credential in [Credential::Session, Credential::Token] {
+            assert!(matches!(
+                require_ingest(&operator(OperatorRole::Operator, credential)),
+                Err(PrefixdError::Forbidden(_))
+            ));
+        }
+        for credential in [
+            Credential::Session,
+            Credential::Token,
+            Credential::Mtls,
+            Credential::Anonymous,
+        ] {
+            assert!(require_ingest(&operator(OperatorRole::Admin, credential)).is_ok());
+        }
     }
 
     #[test]

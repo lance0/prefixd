@@ -144,7 +144,10 @@ async fn refused_event_is_distinguishable_from_a_mitigated_one_and_audited() {
     assert_eq!(audit.len(), 1, "{audit:?}");
     assert_eq!(audit[0]["target_type"], "event");
     assert_eq!(audit[0]["target_id"], refused_row["event_id"]);
-    assert_eq!(audit[0]["actor_id"], "outcome-test");
+    // Auth mode none: the anonymous Admin claimed the source.
+    assert_eq!(audit[0]["actor_type"], "operator");
+    assert_eq!(audit[0]["actor_id"], "anonymous");
+    assert_eq!(audit[0]["details"]["source"], "outcome-test");
     let details = &audit[0]["details"];
     assert_eq!(details["outcome"], "safelisted");
     assert_eq!(details["guardrail"], "Safelisted");
@@ -377,10 +380,12 @@ async fn refused_unban_records_a_conflict_and_is_audited() {
     let (state, repo) = state(OperationMode::Enforced);
     let (_, ban) = post(&state, event("foreign", "203.0.113.10", "udp_flood")).await;
     let id = ban["mitigation_id"].as_str().unwrap().parse().unwrap();
-    // The mitigation now belongs to another POP, so this controller refuses it.
-    let mut mitigation = repo.get_mitigation(id).await.unwrap().unwrap();
-    mitigation.pop = "other-pop".into();
-    repo.update_mitigation(&mitigation).await.unwrap();
+    // A second live owner of the same rule, created later, makes withdrawing
+    // the first a conflict.
+    let mut owner = repo.get_mitigation(id).await.unwrap().unwrap();
+    owner.mitigation_id = uuid::Uuid::new_v4();
+    owner.created_at += chrono::Duration::seconds(1);
+    repo.insert_mitigation(&owner).await.unwrap();
 
     let mut unban = event("foreign", "203.0.113.10", "udp_flood");
     unban["action"] = "unban".into();
@@ -397,8 +402,10 @@ async fn refused_unban_records_a_conflict_and_is_audited() {
     assert_eq!(audit[0]["details"]["outcome"], "conflict");
     assert_eq!(audit[0]["details"]["guardrail"], "Conflict");
     assert_eq!(audit[0]["details"]["stored"], true);
-    // The failing mitigation is linked, so its status can be checked.
-    assert_eq!(row["outcome_mitigation_ids"], json!([ban["mitigation_id"]]));
+    // Only mitigations whose withdrawal intent was recorded are the unban's
+    // targets; both were refused here, so none is linked or replayed.
+    assert_eq!(row["outcome_mitigation_ids"], json!([]));
+    assert!(repo.pending_withdrawals(None).await.unwrap().is_empty());
 }
 
 /// A prefix playbook whose step has rules cannot produce a narrow prefix match.

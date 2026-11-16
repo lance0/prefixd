@@ -764,6 +764,8 @@ pub struct WithdrawRequest {
     responses(
         (status = 202, description = "Event accepted", body = EventResponse),
         (status = 400, description = "Invalid input, including non-finite or out-of-range confidence"),
+        (status = 401, description = "Authentication required"),
+        (status = 403, description = "The credential is not bound to the body `source`: an ingest token bound to another source, an Operator or a Viewer"),
         (status = 409, description = "Duplicate event"),
         (status = 422, description = "Guardrail rejection"),
     )
@@ -775,22 +777,23 @@ pub async fn ingest_event(
 ) -> impl IntoResponse {
     let input = input.0;
     crate::api::auth::require_ingest(&principal).map_err(AppError)?;
+    validate_string_len(&input.source, "source", MAX_STRING_LEN).map_err(AppError)?;
+    let grant = crate::api::auth::authorize_ingest(&principal, &input.source).map_err(AppError)?;
 
     // Validate input
     validate_event_destination(&input.victim_ip).map_err(AppError)?;
-    validate_string_len(&input.source, "source", MAX_STRING_LEN).map_err(AppError)?;
     validate_string_len(&input.victim_ip, "victim_ip", 64).map_err(AppError)?;
     if let Some(ref eid) = input.event_id {
         validate_string_len(eid, "event_id", MAX_STRING_LEN).map_err(AppError)?;
     }
 
     // Reject before branching so a corroborating source cannot use unban here either (ADR 021).
-    reject_corroborating_source(&state, &input).await?;
+    reject_corroborating_source(&state, grant.source(), &input.action).await?;
 
     // Branch on action type
     match input.action.as_str() {
-        "unban" => handle_unban(state, input).await,
-        "ban" => handle_ban(state, input).await,
+        "unban" => handle_unban(state, &grant, input).await,
+        "ban" => handle_ban(state, &grant, input).await,
         unknown => {
             tracing::warn!(action = %unknown, "unknown action type");
             Err(AppError(PrefixdError::InvalidRequest(format!(
@@ -992,11 +995,22 @@ async fn withdraw_and_notify(
         binding,
     )
     .await?;
+    complete_withdrawal(state, &request).await
+}
+
+/// Caller holds the lifecycle mutex. Make one bounded delete attempt for a
+/// recorded withdrawal intent and announce the outcome. A failure leaves the
+/// intent pending for reconciliation.
+async fn complete_withdrawal(
+    state: &AppState,
+    request: &crate::domain::WithdrawalRequest,
+) -> crate::error::Result<Mitigation> {
+    let binding = state.verified_speaker_binding()?;
     let mitigation = execute_withdrawal(
         state.repo.as_ref(),
         state.announcer.as_ref(),
         state.is_dry_run(),
-        &request,
+        request,
         binding,
         crate::bgp::RetryPolicy::Bounded,
     )
@@ -1031,166 +1045,279 @@ async fn withdraw_and_notify(
     Ok(mitigation)
 }
 
-/// Handle unban action - withdraw mitigation by external_event_id
-async fn handle_unban(
+/// A detector unban withdraws the live mitigations for its victim on this POP
+/// that the grant's source created (ADR 034, 2026-11-16 amendment). The victim
+/// is compared in canonical form, and a vector other than `unknown` narrows
+/// the set. Mitigations other sources created and manual mitigations are
+/// never touched, and nothing to withdraw is the definitive
+/// `no_active_mitigation`, so a detector needs no state to pair its unban.
+///
+/// The unban is stored with its replay record, this POP and the selected
+/// targets, in one write before any withdrawal intent; if that write fails the
+/// answer is a 503 and nothing is touched. An unban whose event ID the source
+/// already sent on this POP reuses that record and never selects again: a
+/// resend after a 503 or a dropped request completes the original set, and a
+/// replayed unban cannot withdraw a mitigation a later ban created. A resend
+/// that names another victim is a 409.
+pub(crate) async fn handle_unban(
     state: Arc<AppState>,
-    input: AttackEventInput,
+    grant: &crate::api::auth::SourceGrant,
+    mut input: AttackEventInput,
 ) -> Result<(StatusCode, Json<EventResponse>), AppError> {
+    input.source = grant.source().to_string();
+    // Every unban path (single, batch, signal adapters) routes through here.
+    reject_corroborating_source(&state, &input.source, &input.action).await?;
     validate_event_destination(&input.victim_ip).map_err(AppError)?;
     validate_confidence(input.confidence).map_err(AppError)?;
     validate_top_src_ports(input.top_src_ports.as_deref()).map_err(AppError)?;
-    let ext_id = match &input.event_id {
-        Some(id) => id.clone(),
-        None => {
-            // No external ID, can't find the original event
-            tracing::warn!(source = %input.source, "unban without event_id, ignoring");
-            return Ok((
-                StatusCode::ACCEPTED,
-                Json(EventResponse::new(
-                    Uuid::new_v4(),
-                    None,
-                    "ignored_no_event_id",
-                    None,
-                )),
-            ));
-        }
-    };
+    let victim = crate::domain::canonical_destination(&input.victim_ip)
+        .map_err(|error| AppError(PrefixdError::InvalidPrefix(error.to_string())))?;
 
     let _mitigation_guard = state.mitigation_lock.lock().await;
     state.verified_speaker_binding().map_err(AppError)?;
+    let pop = state.settings.pop.as_str();
+    // A failed read is not an empty one: the sender retries the 503.
+    let unavailable = |error: PrefixdError| {
+        tracing::warn!(%error, source = %grant.source(), "detector unban storage read failed");
+        AppError(PrefixdError::UnbanStorageUnavailable)
+    };
+    let answer = |event_id, external_event_id, ids: Vec<Uuid>| {
+        let status = if ids.is_empty() {
+            "no_active_mitigation"
+        } else {
+            "withdrawn"
+        };
+        let mut response =
+            EventResponse::new(event_id, external_event_id, status, ids.first().copied());
+        response.mitigation_ids = ids;
+        (StatusCode::ACCEPTED, Json(response))
+    };
 
-    // Find original ban event
-    let original_event = match state
-        .repo
-        .find_ban_event_by_external_id(&input.source, &ext_id)
-        .await
+    if let Some(external_id) = input.event_id.as_deref().filter(|id| !id.is_empty())
+        && let Some(original) = state
+            .repo
+            .find_unban_replay(pop, grant.source(), external_id)
+            .await
+            .map_err(unavailable)?
     {
-        Ok(Some(e)) => e,
-        Ok(None) => {
-            tracing::debug!(source = %input.source, external_id = %ext_id, "unban for unknown event");
-            return Ok((
-                StatusCode::ACCEPTED,
-                Json(EventResponse::new(
-                    Uuid::new_v4(),
-                    Some(ext_id),
-                    "not_found",
-                    None,
-                )),
-            ));
+        if crate::domain::canonical_destination(&original.victim_ip)
+            .ok()
+            .as_deref()
+            != Some(victim.as_str())
+        {
+            return Err(AppError(PrefixdError::Conflict(format!(
+                "unban event ID {external_id:?} was already sent for another victim"
+            ))));
         }
-        Err(e) => return Err(AppError(e)),
-    };
-
-    // Every live rule the ban created: one event can create several (ADR 028).
-    let mitigations = match state
-        .repo
-        .list_active_by_triggering_event(original_event.event_id)
-        .await
-    {
-        Ok(found) if !found.is_empty() => found,
-        Ok(_) => {
-            tracing::debug!(event_id = %original_event.event_id, "no active mitigation for event");
-            return Ok((
-                StatusCode::ACCEPTED,
-                Json(EventResponse::new(
-                    original_event.event_id,
-                    Some(ext_id),
-                    "no_active_mitigation",
-                    None,
-                )),
-            ));
+        let mut live = Vec::new();
+        for id in &original.target_ids {
+            if let Some(mitigation) = state.repo.get_mitigation(*id).await.map_err(unavailable)?
+                && mitigation.is_active()
+                && mitigation.pop == pop
+            {
+                live.push(mitigation);
+            }
         }
-        Err(e) => return Err(AppError(e)),
-    };
-
-    // Store the unban event
-    let source = input.source.clone();
-    let unban_event = AttackEvent::from_input(input);
-    let stored = match state.repo.insert_event(&unban_event).await {
-        Ok(()) => true,
-        Err(e) => {
-            tracing::warn!(error = %e, "failed to insert unban event");
-            false
-        }
-    };
-
-    let mut withdrawn = Vec::with_capacity(mitigations.len());
-    let mut failure = None;
-    for mitigation in &mitigations {
-        match withdraw_and_notify(
+        tracing::debug!(source = %grant.source(), external_id,
+            targets = original.target_ids.len(), live = live.len(),
+            "detector unban resent; reusing its original targets");
+        let (ids, failure) = withdraw_unban_targets(
             &state,
+            grant,
+            original.event_id,
+            &original.target_ids,
+            &live,
+        )
+        .await;
+        if let Some(error) = failure {
+            return Err(AppError(error));
+        }
+        return Ok(answer(original.event_id, original.external_event_id, ids));
+    }
+
+    // Every live rule the source created for the victim: one ban can create
+    // several (ADR 028), and a re-ban extends rather than adds. A real vector
+    // narrows the unban to that attack, so a resolved alert for one vector
+    // leaves the source's other mitigations for the victim. UDP floods and
+    // amplification are one family either way, because a ban's vector can
+    // fall back between them. `unknown` keeps the whole victim, as the
+    // FastNetMon unbans, which carry no reliable attack details, need.
+    let vector = input.vector;
+    let udp = |vector: crate::domain::AttackVector| {
+        matches!(
+            vector,
+            crate::domain::AttackVector::UdpFlood | crate::domain::AttackVector::UdpAmplification
+        )
+    };
+    let mitigations: Vec<_> = state
+        .repo
+        .list_live_by_victim_and_source(&victim, pop, grant.source())
+        .await
+        .map_err(unavailable)?
+        .into_iter()
+        .filter(|mitigation| {
+            vector == crate::domain::AttackVector::Unknown
+                || mitigation.vector == vector
+                || (udp(vector) && udp(mitigation.vector))
+        })
+        .collect();
+    let targets: Vec<_> = mitigations.iter().map(|m| m.mitigation_id).collect();
+
+    // The replay record comes first, even when nothing matches, so a resend
+    // or replay of the event ID finds this exact set instead of selecting
+    // anew, whatever happens after this write.
+    let unban_event = AttackEvent::from_input(input);
+    if let Err(error) = state
+        .repo
+        .insert_unban_event(&unban_event, pop, &targets)
+        .await
+    {
+        tracing::warn!(%error, source = %grant.source(), "failed to store detector unban");
+        return Err(AppError(PrefixdError::UnbanStorageUnavailable));
+    }
+    if targets.is_empty() {
+        tracing::debug!(source = %grant.source(), victim_ip = %victim,
+            "detector unban found no live mitigation");
+    }
+
+    let (ids, failure) =
+        withdraw_unban_targets(&state, grant, unban_event.event_id, &targets, &mitigations).await;
+    if let Some(error) = failure {
+        audit_refusal(&state, grant, &unban_event, &error, None, true).await;
+        return Err(AppError(error));
+    }
+    Ok(answer(
+        unban_event.event_id,
+        unban_event.external_event_id,
+        ids,
+    ))
+}
+
+/// Caller holds the lifecycle mutex and has stored the unban's replay record
+/// with `stored`. Record withdrawal intent for every `live` target before any
+/// delete, so a failed delete cannot leave the others unrecorded, then narrow
+/// the record to drop the targets whose intent was definitively refused (a
+/// client error such as another live owner's 409): those are never part of
+/// the unban. An intent that could not be recorded for any other reason, such
+/// as a storage error, keeps its target in the record and deletes nothing, so
+/// a resend retries it. Then delete, stopping at the first failure of any
+/// kind, so a wedged or failing speaker holds the mutex for one bounded
+/// attempt and the rest stay pending for reconciliation and the resend.
+/// Records the unban's outcome and returns its targets with the first error:
+/// a failed delete, intent or record write is a 503, otherwise a refused
+/// intent is reported as itself.
+async fn withdraw_unban_targets(
+    state: &AppState,
+    grant: &crate::api::auth::SourceGrant,
+    event_id: Uuid,
+    stored: &[Uuid],
+    live: &[Mitigation],
+) -> (Vec<Uuid>, Option<PrefixdError>) {
+    let binding = match state.verified_speaker_binding() {
+        Ok(binding) => binding,
+        Err(error) => return (stored.to_vec(), Some(error)),
+    };
+    let reason = format!("Detector unban: {}", grant.source());
+    let mut requests = Vec::with_capacity(live.len());
+    let mut refused = Vec::new();
+    let mut refusal = None;
+    let mut unrecorded = false;
+    for mitigation in live {
+        match crate::domain::request_detector_withdrawal(
+            state.repo.as_ref(),
             mitigation,
-            "detector",
-            &source,
-            format!("Detector unban: {}", source),
+            grant.source(),
+            grant.actor_type().as_str(),
+            grant.actor_id(),
+            reason.clone(),
+            !state.is_dry_run(),
+            binding,
         )
         .await
         {
-            Ok(mitigation) => {
-                tracing::info!(
-                    mitigation_id = %mitigation.mitigation_id,
-                    victim_ip = %mitigation.victim_ip,
-                    "withdrew mitigation via detector unban"
-                );
-                withdrawn.push(mitigation.mitigation_id);
+            Ok(request) => requests.push(request),
+            Err(error) if error.status_code().is_client_error() => {
+                refused.push(mitigation.mitigation_id);
+                refusal.get_or_insert(error);
             }
             Err(error) => {
-                failure = Some((mitigation.mitigation_id, error));
-                break;
+                tracing::warn!(mitigation_id = %mitigation.mitigation_id, %error,
+                    "detector unban could not record withdrawal intent; it stays a target");
+                unrecorded = true;
             }
         }
     }
-    let failure = failure.map(|(failed_id, error)| {
-        // The failing mitigation is linked too: its status, not this outcome,
-        // says whether withdrawal intent was retained.
-        let mut ids = withdrawn.clone();
-        ids.push(failed_id);
-        (ids, error)
-    });
-    if stored {
-        let record = match &failure {
-            None => EventOutcomeRecord::new(EventOutcome::Withdrawn, None, withdrawn.clone()),
-            Some((ids, error)) => EventOutcomeRecord::from_error(error, ids.clone()),
-        };
-        record_event_outcome(&state, unban_event.event_id, &record).await;
+    let ids: Vec<_> = stored
+        .iter()
+        .copied()
+        .filter(|id| !refused.contains(id))
+        .collect();
+    let mut failure = None;
+    if !refused.is_empty()
+        && let Err(error) = state.repo.set_unban_targets(event_id, &ids).await
+    {
+        tracing::warn!(%event_id, %error, "failed to narrow a detector unban's targets");
+        failure = Some(PrefixdError::UnbanStorageUnavailable);
     }
-    if let Some((_, error)) = failure {
-        audit_refusal(&state, &unban_event, &error, None, stored).await;
-        return Err(AppError(error));
+    if unrecorded {
+        failure.get_or_insert(PrefixdError::UnbanStorageUnavailable);
     }
-
-    let mut response = EventResponse::new(
-        unban_event.event_id,
-        unban_event.external_event_id,
-        "withdrawn",
-        withdrawn.first().copied(),
-    );
-    response.mitigation_ids = withdrawn;
-    Ok((StatusCode::ACCEPTED, Json(response)))
+    if failure.is_none() {
+        let mut completed = 0;
+        for request in &requests {
+            match complete_withdrawal(state, request).await {
+                Ok(mitigation) => {
+                    tracing::info!(
+                        mitigation_id = %mitigation.mitigation_id,
+                        victim_ip = %mitigation.victim_ip,
+                        "withdrew mitigation via detector unban"
+                    );
+                    completed += 1;
+                }
+                Err(error) => {
+                    tracing::warn!(mitigation_id = %request.mitigation_id, %error,
+                        "detector unban delete failed; it and the rest stay pending");
+                    failure = Some(PrefixdError::WithdrawalIncomplete(format!(
+                        "{completed} of {} deletes completed; the rest are pending: {error}",
+                        requests.len()
+                    )));
+                    break;
+                }
+            }
+        }
+    }
+    let failure = failure.or(refusal);
+    let record = match &failure {
+        Some(error) => EventOutcomeRecord::from_error(error, ids.clone()),
+        None if ids.is_empty() => {
+            EventOutcomeRecord::new(EventOutcome::NoActiveMitigation, None, Vec::new())
+        }
+        None => EventOutcomeRecord::new(EventOutcome::Withdrawn, None, ids.clone()),
+    };
+    // Write-once: a resend fills an outcome the first attempt never wrote.
+    record_event_outcome(state, event_id, &record).await;
+    (ids, failure)
 }
 
 /// A `mode: corroborating` source must never create a mitigation by itself (ADR 021).
 async fn reject_corroborating_source(
     state: &AppState,
-    input: &AttackEventInput,
+    source: &str,
+    action: &str,
 ) -> Result<(), AppError> {
-    if state
-        .correlation_config
-        .read()
-        .await
-        .source_mode(&input.source)
+    if state.correlation_config.read().await.source_mode(source)
         != crate::correlation::SourceMode::Corroborating
     {
         return Ok(());
     }
     tracing::warn!(
-        source = %input.source,
-        action = %input.action,
+        source = %source,
+        action = %action,
         "rejected /v1/events from corroborating-only source"
     );
     Err(AppError(PrefixdError::InvalidRequest(format!(
         "source '{}' is configured as mode=corroborating and cannot post to /v1/events. Use POST /v1/signals/corroborator instead.",
-        input.source
+        source
     ))))
 }
 
@@ -1206,12 +1333,14 @@ struct BanTrace {
 
 /// Handle ban action - create or extend mitigation, then record the outcome
 /// of a stored event and audit any refusal.
-async fn handle_ban(
+pub(crate) async fn handle_ban(
     state: Arc<AppState>,
-    input: AttackEventInput,
+    grant: &crate::api::auth::SourceGrant,
+    mut input: AttackEventInput,
 ) -> Result<(StatusCode, Json<EventResponse>), AppError> {
+    input.source = grant.source().to_string();
     let mut trace = BanTrace::default();
-    let result = admit_ban(state.clone(), input, &mut trace).await;
+    let result = admit_ban(state.clone(), grant, input, &mut trace).await;
     let Some(event) = &trace.event else {
         return result;
     };
@@ -1229,7 +1358,15 @@ async fn handle_ban(
     // A refusal before storage leaves no event row, so the detector may retry
     // the same event ID (ADR 033); the audit entry is its only record.
     if let Some(error) = error {
-        audit_refusal(&state, event, error, trace.refusal.as_deref(), trace.stored).await;
+        audit_refusal(
+            &state,
+            grant,
+            event,
+            error,
+            trace.refusal.as_deref(),
+            trace.stored,
+        )
+        .await;
     }
     result
 }
@@ -1238,6 +1375,7 @@ async fn handle_ban(
 /// not refusals. `label` is a detector prefix refusal's guardrail reason.
 async fn audit_refusal(
     state: &AppState,
+    grant: &crate::api::auth::SourceGrant,
     event: &AttackEvent,
     error: &PrefixdError,
     label: Option<&str>,
@@ -1258,6 +1396,7 @@ async fn audit_refusal(
     );
     let entry = crate::observability::AuditEntry::guardrail_rejected(
         event,
+        (grant.actor_type(), grant.actor_id()),
         outcome.as_str(),
         &guardrail,
         &error.to_string(),
@@ -1278,11 +1417,12 @@ async fn record_event_outcome(state: &AppState, event_id: Uuid, record: &EventOu
 
 async fn admit_ban(
     state: Arc<AppState>,
+    grant: &crate::api::auth::SourceGrant,
     input: AttackEventInput,
     trace: &mut BanTrace,
 ) -> Result<(StatusCode, Json<EventResponse>), AppError> {
     // Every ban path (single, batch, signal adapters) routes through here.
-    reject_corroborating_source(&state, &input).await?;
+    reject_corroborating_source(&state, &input.source, &input.action).await?;
     validate_confidence(input.confidence).map_err(AppError)?;
     validate_top_src_ports(input.top_src_ports.as_deref()).map_err(AppError)?;
     // shortcut: one controller per speaker; use a leader fence before supporting active-active controllers.
@@ -1832,7 +1972,7 @@ async fn admit_ban(
                 ));
             } else {
                 trace.outcome = Some(EventOutcomeRecord::from_error(&e, Vec::new()));
-                audit_refusal(&state, &event, &e, None, true).await;
+                audit_refusal(&state, grant, &event, &e, None, true).await;
             }
             return Ok((
                 StatusCode::ACCEPTED,
@@ -1854,7 +1994,7 @@ async fn admit_ban(
             .await
             .map_err(AppError)?,
     };
-    let actor = CreationActor::Detector(event.source.clone());
+    let actor = grant.creation_actor();
 
     // Each rule is admitted on its own, in policy priority order (ADR 028): every
     // admitted rule is narrower than the all-UDP alternative and stands alone.
@@ -1920,7 +2060,7 @@ async fn admit_ban(
 
             let (mitigation, announcement_outcome) = if intent.action_type == ActionType::Blackhole
             {
-                admit_detector_blackhole(&state, intent, &event, decision.vector, signal_group_id)
+                admit_detector_blackhole(&state, intent, &actor, decision.vector, signal_group_id)
                     .await?
             } else {
                 if let Err(e) = guardrails
@@ -2187,7 +2327,7 @@ async fn rule_owner(
         ("q" = Option<String>, Query, description = "Literal case-insensitive substring of IP or event UUID; maximum 256 UTF-8 bytes, no NUL. Empty matches every row."),
         ("source" = Option<String>, Query, description = "Exact case-sensitive source, 1-256 UTF-8 bytes without NUL; omit for every source. All and all are literal identifiers."),
         ("vector" = Option<String>, Query, description = "Exact case-sensitive vector, 1-256 UTF-8 bytes without NUL; omit for every vector."),
-        ("outcome" = Option<String>, Query, description = "Comma-separated exact outcomes: mitigated, extended, dry_run, guardrail_rejected, safelisted, no_playbook, not_owned, awaiting_corroboration, conflict, failed, withdrawn, not_recorded; every token must be valid and nonempty"),
+        ("outcome" = Option<String>, Query, description = "Comma-separated exact outcomes: mitigated, extended, dry_run, guardrail_rejected, safelisted, no_playbook, not_owned, awaiting_corroboration, conflict, failed, withdrawn, no_active_mitigation, not_recorded; every token must be valid and nonempty"),
         ("limit" = Option<u32>, Query, description = "Max results (default 100, max 1000)"),
         ("cursor" = Option<String>, Query, description = "Opaque e1 continuation from next_cursor (max 128 bytes); superseded timestamp-only cursors are rejected"),
         ("start" = Option<String>, Query, description = "Inclusive RFC3339 start; empty or malformed supplied values are invalid"),
@@ -2697,7 +2837,7 @@ pub async fn create_mitigation(
 async fn admit_detector_blackhole(
     state: &AppState,
     intent: MitigationIntent,
-    event: &AttackEvent,
+    actor: &CreationActor,
     vector: crate::domain::AttackVector,
     signal_group_id: Option<Uuid>,
 ) -> crate::error::Result<(Mitigation, Option<AnnouncementOutcome>)> {
@@ -2712,7 +2852,7 @@ async fn admit_detector_blackhole(
         intent,
         vector,
         signal_group_id,
-        &CreationActor::Detector(event.source.clone()),
+        actor,
         state.announcer.as_ref(),
         binding,
         state.lease.as_deref(),
@@ -3217,6 +3357,8 @@ pub struct BatchEventResponse {
         (status = 207, description = "Batch results (partial success)", body = BatchEventResponse),
         (status = 202, description = "All events accepted", body = BatchEventResponse),
         (status = 400, description = "Empty batch or exceeds limit"),
+        (status = 401, description = "Authentication required"),
+        (status = 403, description = "An item's `source` is not bound to the credential; the whole batch is refused and nothing is stored"),
     )
 )]
 pub async fn ingest_events_batch(
@@ -3234,12 +3376,32 @@ pub async fn ingest_events_batch(
         ))));
     }
 
-    let mut results = Vec::with_capacity(req.events.len());
+    // Authorize every item before any runs (ADR 034 §4): one item whose source
+    // the credential is not bound to refuses the whole batch, so nothing is
+    // stored or actuated. An item that does not parse, or whose source is too
+    // long, has no source to authorize; it keeps its per-item rejection.
+    let items: Vec<_> = req
+        .events
+        .into_iter()
+        .map(serde_json::from_value::<DetectorEventRequest>)
+        .collect();
+    let mut grants = Vec::with_capacity(items.len());
+    for item in &items {
+        grants.push(match item {
+            Ok(input) if input.0.source.len() <= MAX_STRING_LEN => Some(
+                crate::api::auth::authorize_ingest(&principal, &input.0.source)
+                    .map_err(AppError)?,
+            ),
+            _ => None,
+        });
+    }
+
+    let mut results = Vec::with_capacity(items.len());
     let mut accepted = 0u32;
     let mut rejected = 0u32;
 
-    for (index, value) in req.events.into_iter().enumerate() {
-        let input = match serde_json::from_value::<DetectorEventRequest>(value) {
+    for (index, (item, grant)) in items.into_iter().zip(grants).enumerate() {
+        let input = match item {
             Ok(input) => input.0,
             Err(error) => {
                 rejected += 1;
@@ -3282,10 +3444,25 @@ pub async fn ingest_events_batch(
             continue;
         }
 
+        // Validation above refuses the over-long source, the only parsed item
+        // without a grant; refuse it here too rather than trust that order.
+        let Some(grant) = grant else {
+            rejected += 1;
+            results.push(BatchEventResult {
+                announcement_outcome: None,
+                index,
+                event_id: Uuid::nil(),
+                status: "rejected".to_string(),
+                mitigation_id: None,
+                mitigation_ids: Vec::new(),
+                error: Some("source exceeds maximum length".into()),
+            });
+            continue;
+        };
         let action = input.action.clone();
         let result = match action.as_str() {
-            "unban" => handle_unban(state.clone(), input).await,
-            "ban" => handle_ban(state.clone(), input).await,
+            "unban" => handle_unban(state.clone(), &grant, input).await,
+            "ban" => handle_ban(state.clone(), &grant, input).await,
             unknown => Err(AppError(PrefixdError::InvalidRequest(format!(
                 "unknown action: '{}', expected 'ban' or 'unban'",
                 unknown
@@ -3462,7 +3639,7 @@ mod tests {
                 let result = persist_new_mitigation(
                     &state,
                     &mut mitigation,
-                    &CreationActor::Detector("test".into()),
+                    &CreationActor::detector("test"),
                 )
                 .await;
                 let persisted = repo.get_mitigation(mitigation.mitigation_id).await.unwrap();
@@ -3552,7 +3729,7 @@ mod tests {
                     let outcome = persist_new_mitigation(
                         &state,
                         &mut mitigation,
-                        &CreationActor::Detector("test".into()),
+                        &CreationActor::detector("test"),
                     )
                     .await
                     .unwrap();
@@ -5169,7 +5346,8 @@ playbooks:
     }
 
     async fn ban(f: &Fixture, input: AttackEventInput) -> Result<EventResponse, PrefixdError> {
-        handle_ban(f.state.clone(), input)
+        let grant = crate::api::auth::SourceGrant::for_test(&input.source);
+        handle_ban(f.state.clone(), &grant, input)
             .await
             .map(|(_, axum::Json(response))| response)
             .map_err(|AppError(error)| error)
@@ -5398,7 +5576,8 @@ playbooks:
         // The detector unban withdraws what the ban created and is still live.
         let mut unban = event("old", "udp_amplification", None);
         unban.action = "unban".into();
-        let (_, axum::Json(response)) = handle_unban(f.state.clone(), unban)
+        let grant = crate::api::auth::SourceGrant::for_test(&unban.source);
+        let (_, axum::Json(response)) = handle_unban(f.state.clone(), &grant, unban)
             .await
             .map_err(|AppError(error)| error)
             .unwrap();
@@ -5833,7 +6012,8 @@ playbooks:
             .unwrap();
         let mut unban = event("u1", "udp_amplification", None);
         unban.action = "unban".into();
-        let (_, axum::Json(response)) = handle_unban(f.state.clone(), unban)
+        let grant = crate::api::auth::SourceGrant::for_test(&unban.source);
+        let (_, axum::Json(response)) = handle_unban(f.state.clone(), &grant, unban)
             .await
             .map_err(|AppError(error)| error)
             .unwrap();
@@ -6013,7 +6193,7 @@ mod wedged_speaker_tests {
             let outcome = persist_new_mitigation(
                 &state,
                 &mut mitigation,
-                &CreationActor::Detector("amp-test".into()),
+                &CreationActor::detector("amp-test"),
             )
             .await
             .unwrap();

@@ -14,7 +14,8 @@ use uuid::Uuid;
 
 use crate::AppState;
 use crate::api::auth::{
-    AuthPrincipal, IngestPrincipal, require_auth, require_ingest, require_role,
+    AuthPrincipal, IngestPrincipal, SourceGrant, authorize_ingest, authorize_webhook_hmac,
+    require_auth, require_ingest, require_role,
 };
 use crate::auth::AuthSession;
 use crate::db::ListParams;
@@ -271,7 +272,7 @@ pub struct AlertmanagerAlertResult {
     pub announcement_outcome: Option<AnnouncementOutcome>,
     /// Index in the alerts array
     pub index: usize,
-    /// Processing status (processed, duplicate, withdrawn, error)
+    /// Processing status: a ban's status, `duplicate`, an unban's `withdrawn` or `no_active_mitigation`, or `error`
     pub status: String,
     /// Event ID created for this alert (if any)
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -372,8 +373,10 @@ fn parse_optional_i64(annotations: &HashMap<String, String>, key: &str) -> Optio
     request_body = AlertmanagerWebhookPayload,
     responses(
         (status = 200, description = "Alerts processed", body = AlertmanagerWebhookResponse),
+        (status = 503, description = "An unban failed on the controller's side; the per-alert results say which, and a resend is safe", body = AlertmanagerWebhookResponse),
         (status = 400, description = "Malformed payload"),
         (status = 401, description = "Authentication required"),
+        (status = 403, description = "The credential is not bound to `alertmanager`"),
     )
 )]
 pub async fn ingest_alertmanager(
@@ -389,7 +392,7 @@ async fn ingest_alertmanager_inner(
     principal: AuthPrincipal,
     body: axum::body::Bytes,
 ) -> Result<(StatusCode, Json<AlertmanagerWebhookResponse>), AppError> {
-    require_ingest(&principal).map_err(AppError)?;
+    let grant = authorize_ingest(&principal, "alertmanager").map_err(AppError)?;
 
     // Parse body as JSON — return 400 for malformed payloads
     let payload: AlertmanagerWebhookPayload = serde_json::from_slice(&body).map_err(|e| {
@@ -417,9 +420,13 @@ async fn ingest_alertmanager_inner(
     let mut results = Vec::with_capacity(payload.alerts.len());
     let mut processed = 0u32;
     let mut failed = 0u32;
+    // An unban that failed on the controller's side is answered 503 so
+    // Alertmanager resends; a resent ban is a duplicate and a resent unban
+    // reuses the pending withdrawal intent.
+    let mut retry = false;
 
     for (index, alert) in payload.alerts.into_iter().enumerate() {
-        match process_alertmanager_alert(&state, &alert, index).await {
+        match process_alertmanager_alert(&state, &grant, &alert, index, &mut retry).await {
             Ok(result) => {
                 processed += 1;
                 results.push(result);
@@ -439,7 +446,11 @@ async fn ingest_alertmanager_inner(
     );
 
     Ok((
-        StatusCode::OK,
+        if retry {
+            StatusCode::SERVICE_UNAVAILABLE
+        } else {
+            StatusCode::OK
+        },
         Json(AlertmanagerWebhookResponse {
             processed,
             failed,
@@ -452,8 +463,10 @@ async fn ingest_alertmanager_inner(
 /// failure — both carry the per-alert result.
 async fn process_alertmanager_alert(
     state: &Arc<AppState>,
+    grant: &SourceGrant,
     alert: &AlertmanagerAlert,
     index: usize,
+    retry: &mut bool,
 ) -> Result<AlertmanagerAlertResult, AlertmanagerAlertResult> {
     // Extract vector
     let vector_str = match extract_vector(&alert.labels) {
@@ -565,25 +578,29 @@ async fn process_alertmanager_alert(
 
     // Delegate to the existing event ingestion pipeline
     match input.action.as_str() {
-        "unban" => match handle_unban(state.clone(), input).await {
+        "unban" => match handle_unban(state.clone(), grant, input).await {
+            // `withdrawn` or `no_active_mitigation`, as the unban answered.
             Ok((_status, Json(resp))) => Ok(AlertmanagerAlertResult {
                 announcement_outcome: resp.announcement_outcome,
                 index,
-                status: "withdrawn".to_string(),
+                status: resp.status,
                 event_id: Some(resp.event_id),
                 mitigation_id: resp.mitigation_id,
                 error: None,
             }),
-            Err(AppError(e)) => Ok(AlertmanagerAlertResult {
-                announcement_outcome: None,
-                index,
-                status: "withdrawn_noop".to_string(),
-                event_id: None,
-                mitigation_id: None,
-                error: Some(e.to_string()),
-            }),
+            Err(AppError(e)) => {
+                *retry |= e.status_code().is_server_error();
+                Err(AlertmanagerAlertResult {
+                    announcement_outcome: None,
+                    index,
+                    status: "error".to_string(),
+                    event_id: None,
+                    mitigation_id: None,
+                    error: Some(e.to_string()),
+                })
+            }
         },
-        _ => match handle_ban(state.clone(), input).await {
+        _ => match handle_ban(state.clone(), grant, input).await {
             Ok((_status, Json(resp))) => Ok(AlertmanagerAlertResult {
                 announcement_outcome: resp.announcement_outcome,
                 index,
@@ -816,6 +833,8 @@ fn classify_fastnetmon(
         (status = 202, description = "Event accepted", body = EventResponse),
         (status = 400, description = "Malformed payload"),
         (status = 401, description = "Authentication required"),
+        (status = 403, description = "The credential is not bound to `fastnetmon` (host alerts) or `fastnetmon-hostgroup` (any other `alert_scope`)"),
+        (status = 503, description = "An unban's delete failed or is ambiguous; the intent is pending and a resend is safe"),
     )
 )]
 pub async fn ingest_fastnetmon(
@@ -840,6 +859,13 @@ async fn ingest_fastnetmon_inner(
             e
         )))
     })?;
+    // A host alert is `fastnetmon`; any other scope is a hostgroup alert,
+    // which has its own source so prefix authority stays separate (ADR 034 §12).
+    let claimed = match payload.alert_scope.as_deref() {
+        None | Some("host") => "fastnetmon",
+        Some(_) => "fastnetmon-hostgroup",
+    };
+    let grant = authorize_ingest(&principal, claimed).map_err(AppError)?;
 
     // Validate required fields
     if payload.ip.is_empty() {
@@ -862,11 +888,19 @@ async fn ingest_fastnetmon_inner(
         )));
     }
 
-    let (vector, top_src_ports) = classify_fastnetmon(&payload, &state.settings.amplification);
+    // FastNetMon bans and unbans a host, not an attack: an unban's counters
+    // describe the end of the attack and its dump may be gone, so classifying
+    // it could name another vector than the ban's and miss its rules. An
+    // unban withdraws everything the source created for the victim.
+    let (vector, top_src_ports) = if payload.action == "unban" {
+        (AttackVector::Unknown, None)
+    } else {
+        classify_fastnetmon(&payload, &state.settings.amplification)
+    };
 
     // Compute confidence from action type via configurable mapping
     let correlation_config = state.correlation_config.read().await;
-    let confidence = correlation_config.source_action_confidence("fastnetmon", &payload.action);
+    let confidence = correlation_config.source_action_confidence(grant.source(), &payload.action);
     drop(correlation_config);
 
     // Extract traffic metrics from attack details
@@ -902,7 +936,7 @@ async fn ingest_fastnetmon_inner(
     let input = AttackEventInput {
         event_id: external_event_id,
         timestamp,
-        source: "fastnetmon".to_string(),
+        source: grant.source().to_string(),
         victim_ip: payload.ip,
         vector,
         bps,
@@ -916,14 +950,8 @@ async fn ingest_fastnetmon_inner(
 
     // Delegate to the existing event ingestion pipeline
     match input.action.as_str() {
-        "unban" => match handle_unban(state.clone(), input).await {
-            Ok(resp) => Ok(resp),
-            Err(e) => Err(e),
-        },
-        _ => match handle_ban(state.clone(), input).await {
-            Ok(resp) => Ok(resp),
-            Err(e) => Err(e),
-        },
+        "unban" => handle_unban(state.clone(), &grant, input).await,
+        _ => handle_ban(state.clone(), &grant, input).await,
     }
 }
 
@@ -940,7 +968,7 @@ pub struct WebhookEventResult {
     pub announcement_outcome: Option<AnnouncementOutcome>,
     /// Position in the payload (0 for single-event adapters, 0..N for root_path).
     pub index: usize,
-    /// Processing status (processed, duplicate, withdrawn, withdrawn_noop, error).
+    /// Processing status: a ban's status, `duplicate`, an unban's `withdrawn` or `no_active_mitigation`, or `error`.
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub event_id: Option<Uuid>,
@@ -967,8 +995,10 @@ pub struct WebhookResponse {
     request_body(content = serde_json::Value, description = "Arbitrary JSON payload mapped via the adapter's JSONPath fields"),
     responses(
         (status = 200, description = "Events processed", body = WebhookResponse),
+        (status = 503, description = "An unban failed on the controller's side; the per-event results say which, and a resend is safe", body = WebhookResponse),
         (status = 400, description = "Malformed payload or no mappable events"),
         (status = 401, description = "HMAC/bearer verification failed"),
+        (status = 403, description = "A bearer credential is not bound to the adapter name"),
         (status = 404, description = "Adapter not configured or disabled"),
     )
 )]
@@ -1017,8 +1047,8 @@ async fn ingest_webhook_inner(
         (adapter, compiled)
     };
 
-    // Auth check per adapter
-    match &adapter.auth {
+    // Each adapter's credential grants its own name as the source (ADR 034 §4).
+    let grant = match &adapter.auth {
         crate::correlation::WebhookAuth::Hmac {
             secret_env,
             header,
@@ -1034,31 +1064,21 @@ async fn ingest_webhook_inner(
                     "adapter '{name}' HMAC secret env var '{secret_env}' not set"
                 ))));
             };
-            let sig = headers
-                .get(header.as_str())
-                .and_then(|v| v.to_str().ok())
-                .ok_or_else(|| {
-                    AppError(PrefixdError::Unauthorized(format!(
-                        "missing HMAC signature header '{header}'"
-                    )))
-                })?;
-            if !crate::correlation::verify_hmac_sha256(secret.as_bytes(), &body, sig) {
-                return Err(AppError(PrefixdError::Unauthorized(
-                    "HMAC signature verification failed".into(),
-                )));
-            }
+            let signature = headers.get(header.as_str()).and_then(|v| v.to_str().ok());
+            authorize_webhook_hmac(&adapter.name, secret.as_bytes(), &body, signature)
+                .map_err(AppError)?
         }
-        crate::correlation::WebhookAuth::Bearer => {
-            // Resolved only here: an HMAC adapter ignores `Authorization`.
+        // An HMAC adapter ignores `Authorization`, so the principal is
+        // resolved only here. `auth.type: none` is refused outside auth mode
+        // `none` (ADR 034 §5), where the principal is the anonymous Admin;
+        // anywhere else it gets no grant.
+        crate::correlation::WebhookAuth::Bearer | crate::correlation::WebhookAuth::None => {
             let principal = AuthPrincipal::resolve(&state, &headers, Some(&auth_session))
                 .await
                 .map_err(AppError)?;
-            require_ingest(&principal).map_err(AppError)?;
+            authorize_ingest(&principal, &adapter.name).map_err(AppError)?
         }
-        crate::correlation::WebhookAuth::None => {
-            // No-auth is caller's responsibility; logged once at startup.
-        }
-    }
+    };
 
     // Parse body
     let payload: serde_json::Value = serde_json::from_slice(&body).map_err(|e| {
@@ -1074,9 +1094,45 @@ async fn ingest_webhook_inner(
         )));
     }
 
+    // A signed body carries no nonce: only its event ID makes a replay a
+    // duplicate. An adapter on an allowlist reaches blackholes or prefix
+    // rules, so a ban without an ID refuses the whole payload before
+    // admission, whatever made `fields.source_id` miss (absent, null, wrong
+    // type or ambiguous). An HMAC adapter's unban needs one too, so a replay
+    // reuses its original targets instead of withdrawing a later ban's
+    // mitigation; only that item is refused.
+    let allowlisted = state
+        .settings
+        .blackhole
+        .detector_sources
+        .contains(&adapter.name)
+        || state
+            .settings
+            .guardrails
+            .detector_prefix_sources
+            .contains(&adapter.name);
+    let signed = matches!(adapter.auth, crate::correlation::WebhookAuth::Hmac { .. });
+    let unidentified =
+        |input: &AttackEventInput| input.event_id.as_deref().is_none_or(str::is_empty);
+    if allowlisted
+        && let Some(index) = mapped.iter().position(|event| {
+            event
+                .as_ref()
+                .is_ok_and(|input| input.action != "unban" && unidentified(input))
+        })
+    {
+        return Err(AppError(PrefixdError::InvalidRequest(format!(
+            "event {index}: adapter '{}': the adapter is on a detector allowlist, so every ban needs fields.source_id to resolve to an ID",
+            adapter.name
+        ))));
+    }
+
     let mut results = Vec::with_capacity(mapped.len());
     let mut processed = 0u32;
     let mut failed = 0u32;
+    // An unban that failed on the controller's side is answered 503 so the
+    // sender resends; see the Alertmanager adapter.
+    let mut retry = false;
 
     for (index, mapped_event) in mapped.into_iter().enumerate() {
         match mapped_event {
@@ -1091,32 +1147,47 @@ async fn ingest_webhook_inner(
                     error: Some(e.to_string()),
                 });
             }
+            Ok(input) if signed && input.action == "unban" && unidentified(&input) => {
+                failed += 1;
+                results.push(WebhookEventResult {
+                    announcement_outcome: None,
+                    index,
+                    status: "error".into(),
+                    event_id: None,
+                    mitigation_id: None,
+                    error: Some(format!(
+                        "adapter '{}': an unban from an HMAC adapter needs fields.source_id to resolve to an ID",
+                        adapter.name
+                    )),
+                });
+            }
             Ok(input) => match input.action.as_str() {
-                "unban" => match handle_unban(state.clone(), input).await {
+                "unban" => match handle_unban(state.clone(), &grant, input).await {
                     Ok((_status, Json(resp))) => {
                         processed += 1;
                         results.push(WebhookEventResult {
                             announcement_outcome: resp.announcement_outcome,
                             index,
-                            status: "withdrawn".into(),
+                            status: resp.status,
                             event_id: Some(resp.event_id),
                             mitigation_id: resp.mitigation_id,
                             error: None,
                         });
                     }
                     Err(AppError(e)) => {
-                        processed += 1;
+                        failed += 1;
+                        retry |= e.status_code().is_server_error();
                         results.push(WebhookEventResult {
                             announcement_outcome: None,
                             index,
-                            status: "withdrawn_noop".into(),
+                            status: "error".into(),
                             event_id: None,
                             mitigation_id: None,
                             error: Some(e.to_string()),
                         });
                     }
                 },
-                _ => match handle_ban(state.clone(), input).await {
+                _ => match handle_ban(state.clone(), &grant, input).await {
                     Ok((_status, Json(resp))) => {
                         processed += 1;
                         results.push(WebhookEventResult {
@@ -1164,7 +1235,11 @@ async fn ingest_webhook_inner(
     );
 
     Ok((
-        StatusCode::OK,
+        if retry {
+            StatusCode::SERVICE_UNAVAILABLE
+        } else {
+            StatusCode::OK
+        },
         Json(WebhookResponse {
             processed,
             failed,
@@ -1228,6 +1303,7 @@ pub struct CorroboratorResponse {
         (status = 200, description = "Signal ingested", body = CorroboratorResponse),
         (status = 400, description = "Invalid source mode, dimensions or confidence"),
         (status = 401, description = "Authentication required"),
+        (status = 403, description = "The credential is not bound to the body `source`"),
     )
 )]
 pub async fn ingest_corroborator(
@@ -1236,13 +1312,22 @@ pub async fn ingest_corroborator(
     Json(input): Json<CorroboratorInput>,
 ) -> impl IntoResponse {
     require_ingest(&principal).map_err(AppError)?;
-    ingest_corroborator_inner(state, input).await
+    if input.source.len() > super::MAX_STRING_LEN {
+        return Err(AppError(PrefixdError::InvalidRequest(
+            "source exceeds maximum length".into(),
+        )));
+    }
+    let grant = authorize_ingest(&principal, &input.source).map_err(AppError)?;
+    ingest_corroborator_inner(state, grant, input).await
 }
 
 async fn ingest_corroborator_inner(
     state: Arc<AppState>,
-    input: CorroboratorInput,
+    grant: SourceGrant,
+    mut input: CorroboratorInput,
 ) -> Result<impl IntoResponse, AppError> {
+    // The signal's source, weight and mode come from the grant.
+    input.source = grant.source().to_string();
     validate_confidence(input.confidence).map_err(AppError)?;
     use crate::correlation::{CorrelationEngine, CorroboratingSignal, EventDimensions, SourceMode};
 
@@ -1867,9 +1952,10 @@ mod tests {
             }))
             .unwrap();
             input.confidence = Some(confidence);
+            let grant = crate::api::auth::SourceGrant::for_test("typed-primary");
             for result in [
-                super::handle_ban(state.clone(), input.clone()).await,
-                super::handle_unban(state.clone(), input).await,
+                super::handle_ban(state.clone(), &grant, input.clone()).await,
+                super::handle_unban(state.clone(), &grant, input).await,
             ] {
                 let error = match result {
                     Err(error) => error,
@@ -1888,7 +1974,8 @@ mod tests {
                 confidence: Some(confidence),
                 raw_details: None,
             };
-            let error = match super::ingest_corroborator_inner(state.clone(), input).await {
+            let grant = crate::api::auth::SourceGrant::for_test("typed-corrob");
+            let error = match super::ingest_corroborator_inner(state.clone(), grant, input).await {
                 Err(error) => error,
                 Ok(_) => panic!("invalid typed corroborator confidence accepted"),
             };

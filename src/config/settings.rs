@@ -935,6 +935,15 @@ impl Settings {
         Ok((settings, unknown_keys))
     }
 
+    /// The `prefixd.yaml` inputs of the correlation refusals (ADR 034 §5).
+    pub fn ingest_authorization(&self) -> crate::correlation::IngestAuthorization<'_> {
+        crate::correlation::IngestAuthorization {
+            auth_mode: self.http.auth.mode,
+            detector_sources: &self.blackhole.detector_sources,
+            prefix_sources: &self.guardrails.detector_prefix_sources,
+        }
+    }
+
     /// Every cross-check startup runs before it connects, in startup order.
     /// Each message names the key it refuses and never a value.
     pub fn validate_errors(&self) -> Vec<String> {
@@ -993,7 +1002,27 @@ impl Settings {
         if self.quotas.max_active_prefix_per_customer == 0 {
             errors.push("quotas.max_active_prefix_per_customer must be nonzero".to_string());
         }
-        let correlation_errors = self.correlation.validate();
+        for (key, sources) in [
+            (
+                "blackhole.detector_sources",
+                &self.blackhole.detector_sources,
+            ),
+            (
+                "guardrails.detector_prefix_sources",
+                &self.guardrails.detector_prefix_sources,
+            ),
+        ] {
+            // Every allowlisted source must be one a credential can carry.
+            if sources
+                .iter()
+                .any(|source| !crate::domain::is_valid_token_source(source))
+            {
+                errors.push(format!(
+                    "{key} entries must match ^[a-z0-9][a-z0-9_-]{{0,63}}$, the token source pattern"
+                ));
+            }
+        }
+        let correlation_errors = self.correlation.validate(&self.ingest_authorization());
         if !correlation_errors.is_empty() {
             errors.push(format!(
                 "invalid correlation config in settings: {}",

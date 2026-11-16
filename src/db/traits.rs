@@ -13,6 +13,16 @@ use crate::observability::AuditEntry;
 
 use super::{GlobalStats, PopInfo, SafelistEntry, TimeseriesBucket};
 
+/// What a stored detector unban withdraws, for a resend or replay of its
+/// event ID on the same POP.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnbanReplay {
+    pub event_id: Uuid,
+    pub external_event_id: Option<String>,
+    pub victim_ip: String,
+    pub target_ids: Vec<Uuid>,
+}
+
 /// Return value for `delete_expired_corroborating_signals`.
 ///
 /// `unattached_expired` is per-source counts of signals the scheduler
@@ -209,6 +219,26 @@ pub trait RepositoryTrait: Send + Sync {
         source: &str,
         external_id: &str,
     ) -> Result<Option<AttackEvent>>;
+    /// Store a detector unban with its replay record, the POP and the
+    /// mitigations it withdraws, in one write before any withdrawal intent.
+    async fn insert_unban_event(
+        &self,
+        event: &AttackEvent,
+        pop: &str,
+        targets: &[Uuid],
+    ) -> Result<()>;
+    /// Replace a stored unban's targets with those whose withdrawal intent
+    /// was recorded.
+    async fn set_unban_targets(&self, event_id: Uuid, targets: &[Uuid]) -> Result<()>;
+    /// The first unban `source` sent on `pop` with this external ID that has
+    /// a replay record: the targets a resend or replay of it reuses. Unbans
+    /// stored without one are not returned.
+    async fn find_unban_replay(
+        &self,
+        pop: &str,
+        source: &str,
+        external_id: &str,
+    ) -> Result<Option<UnbanReplay>>;
     async fn list_events(&self, params: &ListParams) -> Result<Vec<AttackEvent>> {
         self.list_events_filtered(&EventListParams {
             pagination: params.clone(),
@@ -266,8 +296,15 @@ pub trait RepositoryTrait: Send + Sync {
     async fn get_mitigation(&self, id: Uuid) -> Result<Option<Mitigation>>;
     async fn find_active_by_scope(&self, scope_hash: &str, pop: &str)
     -> Result<Option<Mitigation>>;
-    /// Live mitigations an event created, oldest first; one event can create several.
-    async fn list_active_by_triggering_event(&self, event_id: Uuid) -> Result<Vec<Mitigation>>;
+    /// Live mitigations for any spelling of `victim_ip` on `pop` whose triggering
+    /// event came from `source`, oldest first: what a detector unban withdraws.
+    /// Manual mitigations have no triggering event and never match.
+    async fn list_live_by_victim_and_source(
+        &self,
+        victim_ip: &str,
+        pop: &str,
+        source: &str,
+    ) -> Result<Vec<Mitigation>>;
     async fn list_mitigations(
         &self,
         status_filter: Option<&[MitigationStatus]>,

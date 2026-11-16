@@ -53,6 +53,21 @@ pub enum PrefixdError {
     #[error("forbidden: {0}")]
     Forbidden(String),
 
+    /// An ingest request claimed a source its credential is not bound to
+    /// (ADR 034 §4). The message names the claimed source and, for a token,
+    /// the bound one, and echoes no other request field.
+    #[error(
+        "forbidden: source {claimed:?} is not bound to this credential{}",
+        match bound {
+            Some(bound) => format!(" (bound to {bound:?})"),
+            None => "; ingest routes need an ingest token bound to the source, or an Admin".into(),
+        }
+    )]
+    SourceNotBound {
+        claimed: String,
+        bound: Option<String>,
+    },
+
     #[error("not found: {0}")]
     NotFound(String),
 
@@ -63,6 +78,18 @@ pub enum PrefixdError {
         "controller is in standby: another controller holds this POP's fence; retry against the active controller"
     )]
     Standby,
+
+    /// A detector unban recorded withdrawal intent for every mitigation it
+    /// selected, but at least one delete failed or its outcome is unknown.
+    /// The intents stay pending for reconciliation; a retry is idempotent.
+    #[error("withdrawal incomplete; the pending intent is retained and reconciled: {0}")]
+    WithdrawalIncomplete(String),
+
+    /// A detector unban could not read or write its storage: its replay
+    /// record, its targets or a withdrawal intent. It deleted nothing; any
+    /// intent it recorded stays pending. A resend is safe.
+    #[error("detector unban storage unavailable; nothing was deleted, resend it")]
+    UnbanStorageUnavailable,
 
     /// The API token store could not be read. Distinct from 401 so a storage
     /// outage does not look like a credential problem.
@@ -242,11 +269,13 @@ impl PrefixdError {
             Self::InvalidRequest(_) => StatusCode::BAD_REQUEST,
             Self::RateLimited { .. } => StatusCode::TOO_MANY_REQUESTS,
             Self::Unauthorized(_) => StatusCode::UNAUTHORIZED,
-            Self::Forbidden(_) => StatusCode::FORBIDDEN,
+            Self::Forbidden(_) | Self::SourceNotBound { .. } => StatusCode::FORBIDDEN,
             Self::NotFound(_) | Self::MitigationNotFound(_) => StatusCode::NOT_FOUND,
-            Self::ShuttingDown | Self::Standby | Self::CredentialStoreUnavailable => {
-                StatusCode::SERVICE_UNAVAILABLE
-            }
+            Self::ShuttingDown
+            | Self::Standby
+            | Self::CredentialStoreUnavailable
+            | Self::WithdrawalIncomplete(_)
+            | Self::UnbanStorageUnavailable => StatusCode::SERVICE_UNAVAILABLE,
             Self::DuplicateEvent { .. }
             | Self::Conflict(_)
             | Self::InjectionOwnerMismatch { .. } => StatusCode::CONFLICT,

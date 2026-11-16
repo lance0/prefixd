@@ -86,6 +86,7 @@ export const EVENT_OUTCOME_LABELS: Record<EventOutcome, string> = {
   conflict: "Conflict",
   failed: "Failed",
   withdrawn: "Withdrawn",
+  no_active_mitigation: "Nothing to withdraw",
   not_recorded: "Outcome not recorded",
 }
 

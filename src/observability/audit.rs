@@ -7,7 +7,7 @@ use std::sync::Mutex;
 use uuid::Uuid;
 
 /// Actor types for audit log entries
-#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ActorType {
     System,
@@ -15,11 +15,40 @@ pub enum ActorType {
     Operator,
 }
 
-/// Who created a mitigation: an operator's username or a detector's source name.
+impl ActorType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::System => "system",
+            Self::Detector => "detector",
+            Self::Operator => "operator",
+        }
+    }
+}
+
+/// Who created a mitigation. `Operator` is a manual mitigation by that
+/// actor. `Detector` is admitted on the detector path for the event's bound
+/// `source`, and `actor_type` and `actor_id` name the credential (ADR 034 §6):
+/// `token:<name>` or `webhook:<adapter>` as a detector, or the Admin who
+/// claimed the source as an operator. Admission reads only the variant.
 #[derive(Debug, Clone)]
 pub enum CreationActor {
     Operator(String),
-    Detector(String),
+    Detector {
+        source: String,
+        actor_type: ActorType,
+        actor_id: String,
+    },
+}
+
+impl CreationActor {
+    /// A detector actor named by its source, for tests and fixtures.
+    pub fn detector(source: &str) -> Self {
+        Self::Detector {
+            source: source.into(),
+            actor_type: ActorType::Detector,
+            actor_id: source.into(),
+        }
+    }
 }
 
 /// Audit log entry
@@ -93,11 +122,13 @@ impl AuditEntry {
 
     /// Entry for an admitted mitigation, written in its admission transaction.
     pub fn mitigation_created(m: &crate::domain::Mitigation, actor: &CreationActor) -> Self {
-        let (actor_type, actor_id, event_id) = match actor {
+        let (actor_type, actor_id, detector) = match actor {
             CreationActor::Operator(id) => (ActorType::Operator, id, None),
-            CreationActor::Detector(source) => {
-                (ActorType::Detector, source, Some(m.triggering_event_id))
-            }
+            CreationActor::Detector {
+                source,
+                actor_type,
+                actor_id,
+            } => (*actor_type, actor_id, Some((m.triggering_event_id, source))),
         };
         let mut details = serde_json::json!({
             "pop": m.pop,
@@ -111,8 +142,9 @@ impl AuditEntry {
             "origin_mode": m.origin_mode.map(crate::config::OperationMode::as_str),
             "reason": m.reason,
         });
-        if let Some(event_id) = event_id {
+        if let Some((event_id, source)) = detector {
             details["event_id"] = serde_json::json!(event_id);
+            details["source"] = serde_json::json!(source);
         }
         Self::new(
             actor_type,
@@ -165,18 +197,20 @@ impl AuditEntry {
     /// came before the event was stored: `target_id` then names no event row.
     pub fn guardrail_rejected(
         event: &crate::domain::AttackEvent,
+        actor: (ActorType, &str),
         outcome: &str,
         guardrail: &str,
         reason: &str,
         stored: bool,
     ) -> Self {
         Self::new(
-            ActorType::Detector,
-            Some(event.source.clone()),
+            actor.0,
+            Some(actor.1.to_string()),
             "reject",
             Some("event"),
             Some(event.event_id.to_string()),
             serde_json::json!({
+                "source": event.source,
                 "external_event_id": event.external_event_id,
                 "victim_ip": event.victim_ip,
                 "vector": event.vector,

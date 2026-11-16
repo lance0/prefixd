@@ -86,9 +86,11 @@ curl -K - -X POST https://prefixd.example.com/v1/signals/corroborator \
          }'
 ```
 
-Required: `source`. The signal must also populate at least one of the
-source's declared `match_dimensions` (`pop` or `customer_id` here), or
-the API returns `400`.
+Required: `source`, which must be the source the token is bound to: a token
+bound to another source, an operator token or an Operator session gets `403`,
+and the signal's weight and mode are the bound source's. The signal must also
+populate at least one of the source's declared `match_dimensions` (`pop` or
+`customer_id` here), or the API returns `400`.
 
 Response:
 

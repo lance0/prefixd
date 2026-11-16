@@ -26,6 +26,8 @@ import re
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -58,11 +60,6 @@ UNBAN_SECONDS = 2 * ban_time(CONF.read_text()) + 60
 BAN_OUTCOME = re.compile(
     r"^(SUCCESS|NO_MITIGATION) \((\d{3}), status=([^)]*)\): (.*)$|^(ERROR)\b(.*)$"
 )
-UNBAN_OUTCOME = re.compile(
-    r"^SUCCESS: Withdrew mitigation (\S+) for (\S+)"
-    r"|^(No active mitigations found for \S+ after \d+ attempts)"
-    r"|^(ERROR)\b(.*)$"
-)
 
 
 def messages(log_text):
@@ -70,19 +67,19 @@ def messages(log_text):
     return [line.split(" ", 1)[1] if " " in line else line for line in log_text.splitlines()]
 
 
-def ban_outcome(lines, victim):
-    """The outcome of the first ban for victim in lines, or None while it is running.
+def ban_outcome(lines, victim, action="ban"):
+    """The outcome of the first ban (or unban) for victim in lines, or None while it runs.
 
     Returns {"result", "http", "status", "body"}; result is SUCCESS,
-    NO_MITIGATION or ERROR. A ban for another address is not this ban's outcome.
+    NO_MITIGATION or ERROR. A call for another address is not this outcome.
     """
     started = False
     for line in lines:
-        if line.startswith(f"Sending ban for {victim} "):
+        if line.startswith(f"Sending {action} for {victim} "):
             started = True
             continue
         # "ERROR: ..." lines come before the script sends anything (no curl,
-        # no victim, an empty PREFIXD_OPERATOR), so the call is already over.
+        # no victim, an unreadable or malformed token), so the call is over.
         if line.startswith("ERROR: "):
             return {"result": "ERROR", "http": None, "status": None, "body": line}
         if not started:
@@ -102,28 +99,20 @@ def ban_outcome(lines, victim):
 
 
 def unban_outcome(lines, victim):
-    """The outcome of the first unban for victim: withdrawn IDs, nothing found, or ERROR."""
-    started = False
-    withdrawn = []
-    for line in lines:
-        if line.startswith("ERROR: "):
-            return {"result": "ERROR", "mitigation_ids": [], "body": line}
-        if line.startswith(f"Querying active mitigations for {victim} "):
-            started = True
-            continue
-        if not started:
-            continue
-        match = UNBAN_OUTCOME.match(line)
-        if not match:
-            continue
-        if match.group(1):
-            withdrawn.append(match.group(1))
-            # One withdrawal per live mitigation; the lane keeps one per victim.
-            return {"result": "WITHDRAWN", "mitigation_ids": withdrawn, "body": line}
-        if match.group(3):
-            return {"result": "NOTHING_FOUND", "mitigation_ids": [], "body": line}
-        return {"result": "ERROR", "mitigation_ids": [], "body": line}
-    return None
+    """The outcome of the first unban for victim: withdrawn IDs, nothing to withdraw, or ERROR.
+
+    The script posts an unban event; prefixd answers `withdrawn` with the IDs
+    it withdrew, or the definitive `no_active_mitigation`.
+    """
+    outcome = ban_outcome(lines, victim, action="unban")
+    if outcome is None:
+        return None
+    body = outcome["body"]
+    if outcome["result"] == "SUCCESS" and outcome["status"] == "withdrawn":
+        return {"result": "WITHDRAWN", "mitigation_ids": body["mitigation_ids"], "body": body}
+    if outcome["result"] == "NO_MITIGATION" and outcome["status"] == "no_active_mitigation":
+        return {"result": "NOTHING_FOUND", "mitigation_ids": [], "body": body}
+    return {"result": "ERROR", "mitigation_ids": [], "body": body}
 
 
 def police(victim, rate_bps, proto=None, dst_ports=()):
@@ -249,6 +238,9 @@ class FastNetMonLab(Lab):
         state = {}
 
         self.wait_frr("00-baseline", [])
+        # ADR 034 section 16: neither a token bound to another source nor an
+        # operator token may ingest as fastnetmon.
+        self.step("token-negative-controls", lambda: self.token_controls(manual), [])
 
         # A manual ban: FastNetMon runs the script with "<ip> other 0 ban" and
         # all-zero counters, so the script sends vector unknown.
@@ -404,11 +396,25 @@ class FastNetMonLab(Lab):
             audit = self.api("GET", f"/v1/audit?target_type=mitigation&target_id={mitigation_id}")[
                 "entries"
             ]
-            # prefixd prefixes the reason with the actor ("token:fnm-script: ").
-            reasons = [e["details"].get("reason", "") for e in audit if e["action"] == "withdraw"]
-            wanted = f"FastNetMon unban for {detected} (direction=incoming)"
-            assert len(reasons) == 1 and reasons[0].endswith(wanted), audit
-            self.steps[-1]["withdraw_reason"] = reasons[0]
+            # The detector unban withdraws as the script's ingest token.
+            withdrawals = [e for e in audit if e["action"] == "withdraw"]
+            assert len(withdrawals) == 1, audit
+            withdrawal = withdrawals[0]
+            assert (withdrawal["actor_type"], withdrawal["actor_id"]) == (
+                "detector",
+                "token:fnm-script",
+            ), withdrawal
+            assert withdrawal["details"]["reason"].endswith("Detector unban: fastnetmon"), (
+                withdrawal
+            )
+            self.steps[-1]["withdraw_actor"] = withdrawal["actor_id"]
+            # FastNetMon's timer passes the ban's direction; the unban event keeps it.
+            unbans = [
+                e
+                for e in self.api("GET", "/v1/events?source=fastnetmon&limit=100")["events"]
+                if e["action"] == "unban" and e["victim_ip"] == detected
+            ]
+            assert [e["raw_details"]["direction"] for e in unbans] == ["incoming"], unbans
             bans = [
                 line
                 for line in self.script_log()
@@ -417,6 +423,36 @@ class FastNetMonLab(Lab):
             assert len(bans) == 1, f"FastNetMon banned {detected} again: {bans}"
 
         self.step("detected-timer-unban", timer_unban, [])
+
+    def token_controls(self, victim):
+        """An ingest token bound to another source and an operator token are
+        both refused on the ingest route with 403, and nothing is stored."""
+        wrong = Path(self.args.wrong_token_file).read_text().strip()
+        event = {
+            "event_id": "lane-token-control",
+            "timestamp": "2026-11-16T00:00:00Z",
+            "source": "fastnetmon",
+            "victim_ip": victim,
+            "vector": "udp_flood",
+            "confidence": 0.9,
+        }
+        for label, token in (("wrong-source ingest token", wrong), ("operator token", self.token)):
+            request = urllib.request.Request(
+                self.args.api + "/v1/events", data=json.dumps(event).encode(), method="POST"
+            )
+            request.add_header("Authorization", f"Bearer {token}")
+            request.add_header("Content-Type", "application/json")
+            try:
+                with urllib.request.urlopen(request, timeout=30) as response:
+                    status, text = response.status, response.read().decode()
+            except urllib.error.HTTPError as error:
+                status, text = error.code, error.read().decode()
+            self.log(f"POST /v1/events as {label} -> {status}")
+            assert status == 403, (label, status, text)
+        events = self.api("GET", "/v1/events?source=fastnetmon&limit=100")["events"]
+        assert not [e for e in events if e["external_event_id"] == "lane-token-control"], events
+        mitigations = self.api("GET", f"/v1/mitigations?victim_ip={victim}")["mitigations"]
+        assert not mitigations, mitigations
 
     def event(self, event_id):
         events = self.api("GET", "/v1/events?source=fastnetmon&limit=100")["events"]
@@ -463,6 +499,7 @@ def main():
         "speaker",
         "api",
         "token-file",
+        "wrong-token-file",
         "frr",
         "speaker-container",
         "fastnetmon",

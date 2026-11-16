@@ -321,6 +321,33 @@ impl AppState {
             }
             None => Vec::new(),
         };
+        // The correlation refusals read prefixd.yaml (ADR 034 §5). What this
+        // reload publishes must pass against the running settings, and against
+        // prefixd.yaml as the next start reads it.
+        if let Some(candidate) = correlation_file
+            .as_ref()
+            .or(settings.as_ref().map(|s| &s.correlation))
+        {
+            let mut errors = candidate.validate(&self.settings.ingest_authorization());
+            if let Some(next) = &settings {
+                for error in candidate.ingest_errors(&next.ingest_authorization()) {
+                    if !errors.contains(&error) {
+                        errors.push(error);
+                    }
+                }
+            }
+            if !errors.is_empty() {
+                let file = if correlation_file.is_some() {
+                    "correlation.yaml"
+                } else {
+                    "prefixd.yaml"
+                };
+                return Err(invalid(
+                    file,
+                    format!("invalid correlation config: {}", errors.join("; ")),
+                ));
+            }
+        }
         let correlation = correlation_file.or(settings.map(|s| s.correlation));
 
         // Everything validated. Take the remaining guards, then publish with no

@@ -1266,10 +1266,12 @@ async fn test_detector_unban_is_recorded_beside_its_ban() {
     assert_eq!(actions(rows.clone()), ["ban", "unban"]);
     assert_eq!(rows[1].0.to_string(), unban["event_id"].as_str().unwrap());
 
-    // A repeated unban is idempotent: no error, withdrawal or extra row.
+    // A repeated unban is idempotent: it answers as the original, reusing its
+    // targets, with no error, withdrawal or extra row.
     let (status, repeat) = post("fnm-1", "unban").await;
     assert_eq!(status, StatusCode::ACCEPTED);
-    assert_eq!(repeat["status"], "no_active_mitigation");
+    assert_eq!(repeat["status"], "withdrawn");
+    assert_eq!(repeat["event_id"], unban["event_id"]);
     assert_eq!(actions(stored("fnm-1").await), ["ban", "unban"]);
 
     // Repeated identical bans stay deduplicated after the unban.
@@ -4067,6 +4069,12 @@ impl FlowSpecWriter for CreationSpeaker {
     async fn withdraw(&self, rule: &prefixd::domain::FlowSpecRule) -> prefixd::error::Result<()> {
         self.deletes
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        // Mode 4: every delete fails.
+        if self.mode.load(std::sync::atomic::Ordering::SeqCst) == 4 {
+            return Err(prefixd::error::PrefixdError::BgpWithdrawalFailed(
+                "seeded delete failure".into(),
+            ));
+        }
         self.inner.withdraw(rule).await
     }
 }
@@ -6281,19 +6289,29 @@ async fn test_creation_audit_manual_event_and_batch_paths() {
         .await;
         let batched = creation_json(app.clone().oneshot(batch).await.unwrap()).await;
         let batched = &batched["results"][0];
+        // Auth mode none is the anonymous Admin: it claims the detector
+        // source and is the actor; the source is in the details (ADR 034 §6).
         let expected = [
-            (&manual["mitigation_id"], "operator", "anonymous", None),
+            (
+                &manual["mitigation_id"],
+                "operator",
+                "anonymous",
+                None,
+                None,
+            ),
             (
                 &event["mitigation_id"],
-                "detector",
-                "creation-test",
+                "operator",
+                "anonymous",
                 Some(&event["event_id"]),
+                Some("creation-test"),
             ),
             (
                 &batched["mitigation_id"],
-                "detector",
-                "batch-test",
+                "operator",
+                "anonymous",
                 Some(&batched["event_id"]),
+                Some("batch-test"),
             ),
         ];
         // Repeat events extend TTL and rejected admissions are not creations.
@@ -6312,7 +6330,7 @@ async fn test_creation_audit_manual_event_and_batch_paths() {
 
         let entries = audit_entries(&app).await;
         assert_eq!(entries.len(), 3, "{mode:?}: {entries:?}");
-        for (mitigation_id, actor_type, actor_id, event_id) in expected {
+        for (mitigation_id, actor_type, actor_id, event_id, source) in expected {
             let entry = entries
                 .iter()
                 .find(|entry| &entry["target_id"] == mitigation_id)
@@ -6323,6 +6341,11 @@ async fn test_creation_audit_manual_event_and_batch_paths() {
             assert_eq!(entry["actor_id"], actor_id);
             let details = &entry["details"];
             assert_eq!(details.get("event_id"), event_id, "{details}");
+            assert_eq!(
+                details.get("source").and_then(|s| s.as_str()),
+                source,
+                "{details}"
+            );
             assert_eq!(details["pop"], "audit-a");
             assert_eq!(
                 details["scope"]["dst_prefix"],
@@ -8778,6 +8801,287 @@ async fn history_lookups_match_every_spelling_of_a_victim() {
         assert!(
             report.contains("# Incident Report — 2001:db8:113::10"),
             "{report}"
+        );
+    }
+}
+
+/// On PostgreSQL, the triggering event's source owns a mitigation: a source
+/// that only extended it gets `no_active_mitigation` on unban, a token bound
+/// to another source cannot unban as the creator, and the creator's unban
+/// withdraws it. Negative control: joining on `last_event_id` as well lets the
+/// extender withdraw it.
+#[tokio::test]
+async fn an_extending_source_cannot_unban_the_creators_mitigation_on_postgres() {
+    use prefixd::domain::TokenScope;
+    use std::sync::Arc;
+
+    let ctx = TestContext::new().await;
+    let app = ctx.router().await;
+    let send = |app: axum::Router, body: serde_json::Value, token: Option<String>| async move {
+        let mut request = Request::post("/v1/events").header("content-type", "application/json");
+        if let Some(token) = token {
+            request = request.header("authorization", format!("Bearer {token}"));
+        }
+        let response = app
+            .oneshot(request.body(Body::from(body.to_string())).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        (
+            status,
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap_or_default(),
+        )
+    };
+    let event = |source: &str, id: &str, action: &str| {
+        serde_json::json!({
+            "event_id": id, "timestamp": chrono::Utc::now(), "source": source,
+            "victim_ip": "203.0.113.10", "vector": "udp_flood", "confidence": 0.9,
+            "action": action,
+        })
+    };
+
+    // Auth mode none: the anonymous Admin claims each source.
+    let (_, created) = send(app.clone(), event("fastnetmon", "a-1", "ban"), None).await;
+    let id: uuid::Uuid = created["mitigation_id"].as_str().unwrap().parse().unwrap();
+    let (_, extended) = send(app.clone(), event("radware", "b-1", "ban"), None).await;
+    assert_eq!(extended["status"], "extended", "{extended}");
+    assert_eq!(extended["mitigation_id"], created["mitigation_id"]);
+    let (status, body) = send(app.clone(), event("radware", "b-2", "unban"), None).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    assert_eq!(body["status"], "no_active_mitigation", "{body}");
+
+    // A token bound to the extender cannot unban as the creator.
+    let mut settings = ctx.state.settings.clone();
+    settings.http.auth.mode = prefixd::config::AuthMode::Credentials;
+    let credentials = prefixd::AppState::new(
+        settings,
+        common::test_inventory(),
+        common::test_playbooks(),
+        ctx.repo.clone(),
+        Arc::new(prefixd::bgp::MockAnnouncer::new()),
+        ".".into(),
+    )
+    .unwrap();
+    let (_, token) = prefixd::auth::token::create(
+        ctx.repo.as_ref(),
+        prefixd::auth::token::NewToken {
+            name: "radware-pop".into(),
+            scope: TokenScope::Ingest,
+            source: Some("radware".into()),
+            pop: None,
+            expires_at: None,
+        },
+        "admin",
+        chrono::Utc::now(),
+    )
+    .await
+    .unwrap();
+    let tokens = prefixd::api::create_test_router(credentials);
+    let (status, body) = send(
+        tokens.clone(),
+        event("fastnetmon", "b-3", "unban"),
+        Some(token.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    let (status, body) = send(tokens, event("radware", "b-4", "unban"), Some(token)).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    assert_eq!(body["status"], "no_active_mitigation", "{body}");
+    assert!(
+        ctx.repo
+            .get_mitigation(id)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_active()
+    );
+
+    let (_, body) = send(app, event("fastnetmon", "a-2", "unban"), None).await;
+    assert_eq!(body["status"], "withdrawn", "{body}");
+    assert_eq!(body["mitigation_ids"], serde_json::json!([id]));
+}
+
+/// On PostgreSQL, a detector unban whose delete fails leaves one pending
+/// withdrawal row with `detector_source`, a resend of the same unban leaves
+/// exactly one row, and the reconciliation that completes it audits the
+/// source.
+#[tokio::test]
+async fn a_pending_detector_withdrawal_keeps_its_source_on_postgres() {
+    use std::sync::atomic::Ordering::SeqCst;
+
+    let ctx = TestContext::new().await;
+    // A registered speaker target, as reconciliation requires.
+    let (state, speaker) = quota_state_in(
+        &ctx,
+        "source-pop",
+        common::test_settings().quotas,
+        prefixd::config::OperationMode::Enforced,
+    )
+    .await;
+    let app = prefixd::api::create_test_router(state.clone());
+    let post = |body: serde_json::Value| {
+        let app = app.clone();
+        async move {
+            let response = app
+                .oneshot(
+                    Request::post("/v1/events")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = response.status();
+            let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+                .await
+                .unwrap();
+            (
+                status,
+                serde_json::from_slice::<serde_json::Value>(&bytes).unwrap_or_default(),
+            )
+        }
+    };
+    let event = |id: &str, action: &str| {
+        serde_json::json!({
+            "event_id": id, "timestamp": chrono::Utc::now(), "source": "fastnetmon",
+            "victim_ip": "203.0.113.10", "vector": "udp_flood", "confidence": 0.9,
+            "action": action,
+        })
+    };
+    let (status, body) = post(event("pg-ban", "ban")).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    let id: uuid::Uuid = body["mitigation_id"].as_str().unwrap().parse().unwrap();
+
+    speaker.mode.store(4, SeqCst);
+    let rows = || async {
+        sqlx::query_as::<_, (Option<String>, bool)>(
+            "SELECT detector_source, completed_at IS NULL FROM withdrawal_requests WHERE mitigation_id = $1",
+        )
+        .bind(id)
+        .fetch_all(&ctx.pool)
+        .await
+        .unwrap()
+    };
+    for attempt in 0..2 {
+        let (status, body) = post(event("pg-unban", "unban")).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{attempt}: {body}");
+        assert_eq!(
+            rows().await,
+            [(Some("fastnetmon".to_string()), true)],
+            "{attempt}"
+        );
+    }
+
+    speaker.mode.store(0, SeqCst);
+    let reconciler =
+        prefixd::scheduler::ReconciliationLoop::new(ctx.repo.clone(), speaker.clone(), 30, false)
+            .with_app_state(state.clone());
+    reconciler.reconcile().await.unwrap();
+    assert_eq!(rows().await, [(Some("fastnetmon".to_string()), false)]);
+    let audit = ctx
+        .repo
+        .list_audit(&prefixd::db::ListParams {
+            limit: 100,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let withdraw = audit
+        .iter()
+        .find(|entry| {
+            entry.action == "withdraw"
+                && entry.target_id.as_deref() == Some(id.to_string().as_str())
+        })
+        .unwrap_or_else(|| panic!("{audit:?}"));
+    assert_eq!(withdraw.details["source"], "fastnetmon");
+}
+
+/// A detector unban's replay record is keyed by POP, source and event ID, in
+/// PostgreSQL and the mock alike: two POPs sharing a database each find only
+/// their own, an unban stored without a record (before migration 025) is not
+/// found, so a resend selects afresh, and narrowing replaces the targets.
+/// Negative control: a lookup without the POP returns POP A's record on POP B.
+#[tokio::test]
+async fn unban_replay_is_keyed_by_pop_postgres_mock_parity() {
+    use prefixd::db::{MockRepository, RepositoryTrait, UnbanReplay};
+    use prefixd::domain::AttackEvent;
+    use std::sync::Arc;
+
+    let ctx = TestContext::new().await;
+    let repositories: [Arc<dyn RepositoryTrait>; 2] =
+        [ctx.repo.clone(), Arc::new(MockRepository::new())];
+    for repo in repositories {
+        let unban = |victim: &str| {
+            AttackEvent::from_input(
+                serde_json::from_value(serde_json::json!({
+                    "event_id": "u-1", "timestamp": "2026-11-16T00:00:00Z",
+                    "source": "fastnetmon", "victim_ip": victim, "vector": "unknown",
+                    "action": "unban",
+                }))
+                .unwrap(),
+            )
+        };
+        let legacy = unban("203.0.113.90");
+        repo.insert_event(&legacy).await.unwrap();
+        assert_eq!(
+            repo.find_unban_replay("pop-a", "fastnetmon", "u-1")
+                .await
+                .unwrap(),
+            None
+        );
+
+        let (a, b) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+        let on_a = unban("203.0.113.90");
+        repo.insert_unban_event(&on_a, "pop-a", &[a, b])
+            .await
+            .unwrap();
+        let on_b = unban("203.0.113.91");
+        repo.insert_unban_event(&on_b, "pop-b", &[]).await.unwrap();
+
+        assert_eq!(
+            repo.find_unban_replay("pop-a", "fastnetmon", "u-1")
+                .await
+                .unwrap(),
+            Some(UnbanReplay {
+                event_id: on_a.event_id,
+                external_event_id: Some("u-1".into()),
+                victim_ip: "203.0.113.90".into(),
+                target_ids: vec![a, b],
+            })
+        );
+        let found_b = repo
+            .find_unban_replay("pop-b", "fastnetmon", "u-1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (found_b.event_id, found_b.target_ids),
+            (on_b.event_id, vec![])
+        );
+        assert_eq!(
+            repo.find_unban_replay("pop-c", "fastnetmon", "u-1")
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            repo.find_unban_replay("pop-a", "other", "u-1")
+                .await
+                .unwrap(),
+            None
+        );
+
+        repo.set_unban_targets(on_a.event_id, &[b]).await.unwrap();
+        assert_eq!(
+            repo.find_unban_replay("pop-a", "fastnetmon", "u-1")
+                .await
+                .unwrap()
+                .unwrap()
+                .target_ids,
+            vec![b]
         );
     }
 }

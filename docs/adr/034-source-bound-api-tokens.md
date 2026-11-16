@@ -5,6 +5,9 @@
 Proposed 2026-11-15 and accepted 2026-11-15. Amended 2026-11-16: identity
 management needs a session, and three resolution details are settled; see
 [Amendment: identity management needs a session](#amendment-identity-management-needs-a-session).
+Amended again 2026-11-16: a detector unban names its victim, and adapter
+secrets live in a fixed namespace; see
+[Amendment: unban by victim](#amendment-unban-by-victim).
 
 This ADR amends [ADR 008](008-session-auth-plus-bearer.md): named, hashed,
 revocable API tokens replace the shared bearer token, and the `bearer` auth mode
@@ -266,7 +269,9 @@ Several effects follow from that one rule:
   credential or an Admin claim, so `min_sources: 2` now needs two credentials
   bound to different sources. Weights and corroborating mode apply to the bound
   source.
-- **Unban.** `handle_unban` resolves the ban event by `(granted source,
+- **Unban.** *Replaced by
+  [unban by victim](#amendment-unban-by-victim) on 2026-11-16.*
+  `handle_unban` resolves the ban event by `(granted source,
   event_id)`. It then withdraws the active mitigations whose
   `triggering_event_id` or `last_event_id` is that event. Matching on
   `last_event_id` covers a mitigation that a later ban extended. A mitigation
@@ -332,6 +337,9 @@ privilege:
 | `none` mode | `operator` | `anonymous` |
 
 The same identity applies to the withdrawal that a detector unban performs.
+*Amended 2026-11-16 ([unban by victim](#amendment-unban-by-victim)):* that withdrawal also records the bound source, so
+its completion audit carries `details.source` and it counts as
+`detector_unban` whoever completes it.
 
 - **Detector audit rows.** Rows for detector-created mitigations carry the
   bound source in their details.
@@ -599,6 +607,10 @@ The bundled script becomes an `ingest` client.
   attempt is therefore bounded, and so is the time a ban holds its lock. The
   current script sets neither.
 
+*The state file and lock below are replaced by
+[unban by victim](#amendment-unban-by-victim) on 2026-11-16; the token
+handling above stands.*
+
 #### Ban
 
 - **Saving the event ID.** Before the first POST, the script writes the
@@ -837,7 +849,9 @@ controller does.
   - detector hosts and shims;
   - Alertmanager and Grafana contact points;
   - CI jobs.
-- **Custom detector scripts.** Any custom notify script that reads
+- **Custom detector scripts.** *Amended 2026-11-16 ([unban by victim](#amendment-unban-by-victim)): the unban names
+  the victim, not the ban's `event_id`, and no state directory is staged.*
+  Any custom notify script that reads
   `/v1/mitigations` or calls `/withdraw` breaks under an ingest token. Rewrite
   its unban as an event `unban` with the ban's `event_id`, as
   [section 12](#12-bundled-fastnetmon-scripts) describes, or give its
@@ -850,8 +864,9 @@ controller does.
   shared secret switch to minting tokens after the migration.
 - Decide one token name, source and POP per detector, and one operator token
   per automation.
-- Stage the new FastNetMon script, its token file path and its state
-  directory.
+- Stage the new FastNetMon script and its token file path (no state
+  directory since the [unban by victim](#amendment-unban-by-victim)
+  amendment).
 - Record the planned cutover time.
 
 ### 2. Configuration
@@ -933,9 +948,9 @@ A compromised detector token can act only as its own source.
   the guardrails, including blackholes when the source is allowlisted.
   Revocation is immediate. Detection relies on the last-used time, the
   revoked-token warning and the audit trail.
-- **Cross-source extension.** If source A creates a mitigation and source B
-  extends it, either source's unban withdraws it. The current code behaves the
-  same way.
+- **Cross-source extension.** *Replaced by [unban by victim](#amendment-unban-by-victim):* only the source that
+  created a mitigation withdraws it by unban; a source that extended it gets
+  `no_active_mitigation`.
 - **Transport.** A token sent over plain HTTP can be captured, so production
   deployments use TLS.
 - **mTLS.** Every certificate is Admin until certificate-to-role mapping
@@ -972,8 +987,8 @@ A compromised detector token can act only as its own source.
   - `bearer` mode, the shared token and mitigate-now's event path are gone.
   - Every detector and automation needs a new credential, and the FastNetMon
     script changes.
-  - Bans that the old script sent before the upgrade cannot be unbanned by the
-    new one.
+  - *Replaced by [unban by victim](#amendment-unban-by-victim):* bans the old script sent before the upgrade pair
+    with the new unban by victim.
 - **Rollback.** Migration 022 makes the release one-way, and a downgrade
   reopens the spoof.
 - **Database dependency.** Token requests add one indexed read. During a
@@ -1002,7 +1017,7 @@ separately:
 2. **Source enforcement.**
    - `authorize_ingest` and `SourceGrant` on every ingest route and the
      corroborator write path;
-   - unban by triggering or last event;
+   - unban by triggering or last event (*replaced by [unban by victim](#amendment-unban-by-victim)*);
    - the configuration refusals at all three entry points;
    - the new actor identity;
    - the FastNetMon scripts;
@@ -1043,7 +1058,9 @@ Tests cover:
   - The allowlists refuse an operator and admit a bound token and an Admin.
   - `min_sources` and weights use the bound source.
   - An unban cannot cross sources at creation, and it withdraws an extended
-    mitigation through `last_event_id`.
+    mitigation through `last_event_id`. *Replaced by [unban by victim](#amendment-unban-by-victim):* an unban withdraws
+    what its source created, an extension by another source does not let
+    that source withdraw it, and a vector narrows it.
 - **Credential precedence.**
   - A Bearer header with a stale cookie, during a database outage, still
     authenticates the token and leaves the cookie intact.
@@ -1067,7 +1084,10 @@ Tests cover:
   `PUT /v1/config/correlation`, the controller refuses:
   - `bearer` mode;
   - `bearer_token_env`, with the right removal version;
-  - webhook `auth.type: none` outside `none` mode;
+  - webhook `auth.type: none` outside `none` mode, and (*amended,
+    [unban by victim](#amendment-unban-by-victim)*) an adapter name outside the source pattern, a `secret_env` outside
+    `PREFIXD_WEBHOOK_` or shorter than 32 bytes, and an ID-less ban from an
+    allowlisted adapter;
   - an allowlisted HMAC adapter without `source_id`;
   - allowlist names outside the token-source pattern.
 - **Migration 022.** It refuses to apply over a username outside the pattern,
@@ -1165,3 +1185,105 @@ request is refused rather than resolved.
   `none` mode moves to `prefixdctl operators` or an Admin session.
 - `none` mode loses operator management through the API; operators there are
   managed with `prefixdctl`.
+
+## Amendment: unban by victim
+
+Amended 2026-11-16.
+
+### Context
+
+Section 4's unban resolved the ban event by `(granted source, event_id)`, so
+the bundled FastNetMon script had to remember each ban's `event_id` until its
+unban. Section 12 built that memory out of a per-victim state file, a `flock`
+held across the ban's retries, a wait budget for the unban, rules for when to
+keep or delete the file, and a documented race in which an unban started at
+nearly the same moment as its ban could run first and leave the rule to its
+TTL. The state was also lost whenever the FastNetMon host was rebuilt, and a
+ban sent before the upgrade could never pair.
+
+The security property the event ID provided does not need it. What must hold
+is that an ingest token cannot read data and cannot withdraw anything outside
+its own source. Scoping the unban to the bound source keeps that.
+
+Implementation also found that `PUT /v1/config/correlation`, which an admin
+token reaches, could point an HMAC adapter's `secret_env` at a guessable
+variable such as `PATH`. A stolen admin token could then keep posting signed
+events as that adapter after the token was revoked.
+
+### Decision
+
+**A detector unban names its victim.** The server withdraws the live
+mitigations for that victim on the controller's POP whose triggering event came
+from the granted source. It compares the victim in canonical form, so a
+zero-padded IPv6 unban matches a canonically stored mitigation. It replaces the
+unban bullet in section 4 and the state file and lock in section 12.
+
+- Mitigations another source created for the same victim, and manual
+  mitigations, are never touched.
+- An unban after an extending re-ban withdraws the mitigation, and so does an
+  unban after a lost earlier unban. No client state is needed.
+- With nothing to withdraw the answer is the definitive
+  `no_active_mitigation`; `not_found` and `ignored_no_event_id` are gone.
+- A vector other than `unknown` narrows the unban to that vector's
+  mitigations, with UDP floods and amplification as one family. The native
+  FastNetMon adapter and the bundled script send `unknown`, because FastNetMon
+  bans and unbans a host and an unban's counters can name another vector.
+- The unban's `event_id` does not select mitigations. It does identify the
+  unban on its POP: a resend or replay of an event ID the source already sent
+  there reuses that unban's targets and never selects again, so a resend
+  after a 503 or a dropped request completes the original set and a replayed
+  signed unban cannot withdraw a later ban's mitigation. A resend that names
+  another victim is a 409. An HMAC adapter that maps `fields.action` must map
+  `fields.source_id`, and an unban without an ID is refused as its item.
+- The unban is stored as an event even when nothing matched, with the
+  outcome `no_active_mitigation`, and the withdrawal is audited as the
+  credential with the reason `Detector unban: <source>`.
+- A POP-bound token cannot unban another POP's mitigation: it is refused on
+  that POP's controller, and a controller's unban considers only its own POP.
+
+The bundled script posts ban and unban to `/v1/events` with its ingest token,
+read from `PREFIXD_TOKEN_FILE` or `PREFIXD_TOKEN` and passed to curl on stdin.
+It keeps the per-attempt timeouts and retries on 503 and transport errors, and
+it has no state directory and no `flock`. It takes the victim from `$1`, never
+from stdin, because a manual IPv6 ban's stdin says `IP: 0.0.0.0`. It needs only
+bash and curl, since the FastNetMon Community image ships neither `jq` nor
+`python3`.
+
+**Adapter secrets live in a fixed namespace.** An HMAC adapter's `secret_env`
+must name a variable starting with `PREFIXD_WEBHOOK_` whose value is at least
+32 bytes. Section 5's refusals apply it at startup, on reload and through
+`PUT /v1/config/correlation`. Config tuning stays automatable, and a changed
+configuration can only reach secrets an operator put in that namespace.
+
+**The native FastNetMon adapter claims by scope.** A host alert claims
+`fastnetmon`; any other `alert_scope` claims `fastnetmon-hostgroup`, so a
+host-only token never reaches hostgroup ingestion.
+
+### Consequences
+
+- The threat model's cross-source extension case narrows: if source A creates
+  a mitigation and source B extends it, only A's unban withdraws it.
+- An unban that names a vector other than `unknown` withdraws only that
+  vector's mitigations for the victim, so a resolved Alertmanager alert for one
+  attack leaves the source's others; `unknown` keeps the whole victim, which
+  the FastNetMon script needs because its unban carries no attack details.
+- With correlation, the triggering event is whichever event met the group's
+  threshold, so only that event's source withdraws the mitigation by unban.
+- The unban is stored with its POP and selected targets (migration 025)
+  before any withdrawal intent, and a failed write answers 503 having touched
+  nothing. Intent is then recorded for every target before any delete, the
+  stored set drops only the targets whose intent was definitively refused (a
+  target whose intent could not be stored stays, and the unban deletes
+  nothing and answers 503), and the first failed delete of any kind stops the unban with a 503 and the rest pending,
+  so one failure cannot strand the rest and a resend is idempotent. The
+  request keeps the bound source (migration 024) for the completion audit and
+  the `detector_unban` metric, whoever completes it.
+- An adapter named in an allowlist refuses a ban that has no event ID, since
+  only the ID makes a replayed signed ban a duplicate.
+- Bans sent before the upgrade pair with the new unban, because the mitigation
+  records its triggering event and that event its source.
+- Not delivered with this amendment: the section 12 hostgroup script and the
+  JSON mode for FastNetMon Advanced's host script. Advanced's hostgroup notify
+  contract is not yet qualified (section 13's open checks). Until it is, a
+  hostgroup shim posts prefix events with its own `fastnetmon-hostgroup` token,
+  as the FastNetMon guide shows.

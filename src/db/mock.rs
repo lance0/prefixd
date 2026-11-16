@@ -27,6 +27,17 @@ struct MockSpeakerBindings {
 pub struct MockRepository {
     speaker_bindings: Mutex<MockSpeakerBindings>,
     events: Mutex<Vec<AttackEvent>>,
+    /// Each stored unban's replay record: its POP and targets, by event ID.
+    unban_replays: Mutex<HashMap<Uuid, (String, Vec<Uuid>)>>,
+    /// Every unban replay write fails, as an unavailable database does.
+    pub fail_unban_records: std::sync::atomic::AtomicBool,
+    /// Every event outcome write fails.
+    pub fail_event_outcomes: std::sync::atomic::AtomicBool,
+    /// Every unban replay lookup and live-by-victim read fails.
+    pub fail_unban_reads: std::sync::atomic::AtomicBool,
+    /// Recording withdrawal intent for this mitigation fails, as a storage
+    /// error does.
+    pub fail_withdrawal_begin: Mutex<Option<Uuid>>,
     #[cfg(test)]
     mitigation_reads: std::sync::atomic::AtomicUsize,
     #[cfg(test)]
@@ -157,6 +168,11 @@ impl MockRepository {
         Self {
             speaker_bindings: Mutex::new(MockSpeakerBindings::default()),
             events: Mutex::new(Vec::new()),
+            unban_replays: Mutex::new(HashMap::new()),
+            fail_unban_records: Default::default(),
+            fail_event_outcomes: Default::default(),
+            fail_unban_reads: Default::default(),
+            fail_withdrawal_begin: Mutex::new(None),
             #[cfg(test)]
             mitigation_reads: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
@@ -595,11 +611,80 @@ impl RepositoryTrait for MockRepository {
         Ok(())
     }
 
+    async fn insert_unban_event(
+        &self,
+        event: &AttackEvent,
+        pop: &str,
+        targets: &[Uuid],
+    ) -> Result<()> {
+        if self
+            .fail_unban_records
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(PrefixdError::Internal("seeded unban record failure".into()));
+        }
+        let mut events = self.events.lock().unwrap();
+        self.unban_replays
+            .lock()
+            .unwrap()
+            .insert(event.event_id, (pop.to_string(), targets.to_vec()));
+        events.push(event.clone());
+        Ok(())
+    }
+
+    async fn set_unban_targets(&self, event_id: Uuid, targets: &[Uuid]) -> Result<()> {
+        if self
+            .fail_unban_records
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(PrefixdError::Internal("seeded unban record failure".into()));
+        }
+        if let Some((_, stored)) = self.unban_replays.lock().unwrap().get_mut(&event_id) {
+            *stored = targets.to_vec();
+        }
+        Ok(())
+    }
+
+    async fn find_unban_replay(
+        &self,
+        pop: &str,
+        source: &str,
+        external_id: &str,
+    ) -> Result<Option<super::UnbanReplay>> {
+        if self
+            .fail_unban_reads
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(PrefixdError::Internal("seeded unban read failure".into()));
+        }
+        let events = self.events.lock().unwrap();
+        let replays = self.unban_replays.lock().unwrap();
+        Ok(events.iter().find_map(|e| {
+            let (stored_pop, targets) = replays.get(&e.event_id)?;
+            (e.source == source
+                && e.external_event_id.as_deref() == Some(external_id)
+                && e.action == "unban"
+                && stored_pop == pop)
+                .then(|| super::UnbanReplay {
+                    event_id: e.event_id,
+                    external_event_id: e.external_event_id.clone(),
+                    victim_ip: e.victim_ip.clone(),
+                    target_ids: targets.clone(),
+                })
+        }))
+    }
+
     async fn record_event_outcome(
         &self,
         event_id: Uuid,
         record: &crate::domain::EventOutcomeRecord,
     ) -> Result<()> {
+        if self
+            .fail_event_outcomes
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(PrefixdError::Internal("seeded outcome failure".into()));
+        }
         let mut events = self.events.lock().unwrap();
         if let Some(event) = events.iter_mut().find(|e| e.event_id == event_id)
             && event.outcome.outcome == crate::domain::EventOutcome::NotRecorded
@@ -742,6 +827,9 @@ impl RepositoryTrait for MockRepository {
     }
 
     async fn begin_withdrawal(&self, request: &WithdrawalRequest) -> Result<WithdrawalRequest> {
+        if *self.fail_withdrawal_begin.lock().unwrap() == Some(request.mitigation_id) {
+            return Err(PrefixdError::Internal("seeded intent write failure".into()));
+        }
         let bindings = self.speaker_bindings.lock().unwrap();
         if bindings.pops.get(&request.pop).copied() != request.target_id {
             return Err(crate::domain::binding_mismatch());
@@ -991,7 +1079,7 @@ impl RepositoryTrait for MockRepository {
                     quotas.max_active_per_customer,
                 )?;
                 // The detector prefix budget never caps manual CIDRs.
-                if matches!(actor, crate::observability::CreationActor::Detector(_))
+                if matches!(actor, crate::observability::CreationActor::Detector { .. })
                     && crate::domain::is_prefix_destination(&m.match_criteria.dst_prefix)
                 {
                     let prefix_count = mitigations
@@ -1234,13 +1322,40 @@ impl RepositoryTrait for MockRepository {
             .cloned())
     }
 
-    async fn list_active_by_triggering_event(&self, event_id: Uuid) -> Result<Vec<Mitigation>> {
-        let mitigations = self.mitigations.lock().unwrap();
-        Ok(mitigations
+    async fn list_live_by_victim_and_source(
+        &self,
+        victim_ip: &str,
+        pop: &str,
+        source: &str,
+    ) -> Result<Vec<Mitigation>> {
+        if self
+            .fail_unban_reads
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(PrefixdError::Internal("seeded unban read failure".into()));
+        }
+        // One lock at a time, so no lock order can deadlock another method.
+        let from_source: std::collections::HashSet<Uuid> = self
+            .events
+            .lock()
+            .unwrap()
             .iter()
-            .filter(|m| m.triggering_event_id == event_id && m.is_active())
+            .filter(|e| e.source == source)
+            .map(|e| e.event_id)
+            .collect();
+        let mitigations = self.mitigations.lock().unwrap();
+        let mut found: Vec<_> = mitigations
+            .iter()
+            .filter(|m| {
+                crate::domain::same_victim(&m.victim_ip, victim_ip)
+                    && m.pop == pop
+                    && m.is_active()
+                    && from_source.contains(&m.triggering_event_id)
+            })
             .cloned()
-            .collect())
+            .collect();
+        found.sort_by_key(|m| (m.created_at, m.mitigation_id));
+        Ok(found)
     }
 
     async fn list_mitigations(

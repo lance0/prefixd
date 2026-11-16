@@ -165,6 +165,9 @@ async fn test_ambiguous_withdrawals_retry_without_reannouncement_or_consuming_ne
                 .unwrap();
             let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
             assert_eq!(json["failed"], 1);
+        } else if path_kind == "detector" {
+            // The detector retries a 503; its intent is pending.
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         } else {
             assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
         }
@@ -179,7 +182,8 @@ async fn test_ambiguous_withdrawals_retry_without_reannouncement_or_consuming_ne
         assert_eq!(
             pending[0].actor,
             if path_kind == "detector" {
-                "test"
+                // Auth mode none: the anonymous Admin claimed the source.
+                "anonymous"
             } else if path_kind == "expiry" {
                 "scheduler"
             } else {
@@ -763,18 +767,22 @@ async fn test_foreign_pop_cannot_delete_local_rule_or_receive_local_repair() {
     let app = create_test_router(state.clone());
     let mut unban = event_json;
     unban["action"] = "unban".into();
-    for (path, payload, bulk) in [
+    // A detector unban looks only at this POP's mitigations, so the foreign
+    // rule is not even a candidate: nothing to withdraw, not a conflict.
+    for (path, payload, bulk, expected) in [
         (
             format!("/v1/mitigations/{}/withdraw", foreign.mitigation_id),
             serde_json::json!({"reason":"wrong controller"}),
             false,
+            StatusCode::CONFLICT,
         ),
         (
             "/v1/mitigations/withdraw".into(),
             serde_json::json!({"mitigation_ids":[foreign.mitigation_id], "reason":"wrong controller"}),
             true,
+            StatusCode::OK,
         ),
-        ("/v1/events".into(), unban, false),
+        ("/v1/events".into(), unban, false, StatusCode::ACCEPTED),
     ] {
         let response = app
             .clone()
@@ -788,14 +796,7 @@ async fn test_foreign_pop_cannot_delete_local_rule_or_receive_local_repair() {
             )
             .await
             .unwrap();
-        assert_eq!(
-            response.status(),
-            if bulk {
-                StatusCode::OK
-            } else {
-                StatusCode::CONFLICT
-            }
-        );
+        assert_eq!(response.status(), expected);
         if bulk {
             let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
                 .await
@@ -7624,8 +7625,11 @@ async fn test_detector_adapters_audit_mitigation_creation() {
         assert_eq!(entries.len(), 1, "{source}: {entries:?}");
         let entry = &entries[0];
         assert_eq!(entry["action"], "create");
-        assert_eq!(entry["actor_type"], "detector");
-        assert_eq!(entry["actor_id"], source);
+        // Auth mode none is the anonymous Admin, audited as itself; the
+        // bound source is in the details (ADR 034 §6).
+        assert_eq!(entry["actor_type"], "operator");
+        assert_eq!(entry["actor_id"], "anonymous");
+        assert_eq!(entry["details"]["source"], source);
         assert_eq!(entry["target_id"], result["mitigation_id"]);
         assert_eq!(entry["details"]["event_id"], result["event_id"]);
         assert_eq!(entry["details"]["origin_mode"], "dry-run");
@@ -8456,7 +8460,10 @@ async fn test_primary_event_rejects_corroborating_source_before_write() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 
     let stored = repo
-        .list_events(&prefixd::db::ListParams::default())
+        .list_events(&prefixd::db::ListParams {
+            limit: 1000,
+            ..Default::default()
+        })
         .await
         .unwrap();
     assert!(stored.is_empty(), "rejected event should not be persisted");
@@ -8548,22 +8555,27 @@ async fn test_batch_rejects_corroborating_ban_per_item() {
         .await
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(json["accepted"], 2, "{json}");
-    assert_eq!(json["rejected"], 1, "{json}");
+    assert_eq!(json["accepted"], 1, "{json}");
+    assert_eq!(json["rejected"], 2, "{json}");
     let results = json["results"].as_array().unwrap();
     assert_eq!(results[0]["status"], "rejected");
     assert_eq!(results[0]["error"], corroborating_rejection("router-cpu"));
     assert!(results[1]["mitigation_id"].is_string(), "{json}");
-    // Unban stays on the withdrawal path; nothing to withdraw here.
-    assert_eq!(results[2]["status"], "not_found");
+    // A corroborating source posts no events, unbans included (ADR 021).
+    assert_eq!(results[2]["status"], "rejected");
+    assert_eq!(results[2]["error"], corroborating_rejection("router-cpu"));
 
     let events = repo
-        .list_events(&prefixd::db::ListParams::default())
+        .list_events(&prefixd::db::ListParams {
+            limit: 1000,
+            ..Default::default()
+        })
         .await
         .unwrap();
+    assert_eq!(events.len(), 1, "{events:?}");
     assert!(
         events.iter().all(|e| e.source != "router-cpu"),
-        "corroborating ban must not be persisted"
+        "corroborating ban and unban must not be persisted"
     );
     assert_eq!(mitigation_count(&repo).await, 1);
     assert_eq!(announcer.announced_count().await, 1);
@@ -8582,18 +8594,28 @@ async fn test_alertmanager_rejects_corroborating_source_ban() {
         corroborating_rejection("alertmanager")
     );
 
-    // Resolution still routes to withdrawal rather than the ban guard.
+    // A corroborating source posts no events, resolutions included (ADR 021).
     let resolved = make_alert("resolved", "203.0.113.30", "udp_flood", "critical", "am-1");
     let (status, json) = post_alertmanager(&app, &make_alertmanager_payload(&[resolved])).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(json["failed"], 0, "{json}");
-    assert_eq!(json["results"][0]["status"], "withdrawn");
+    assert_eq!(json["failed"], 1, "{json}");
+    assert_eq!(json["results"][0]["status"], "error");
+    assert_eq!(
+        json["results"][0]["error"],
+        corroborating_rejection("alertmanager")
+    );
 
     let events = repo
-        .list_events(&prefixd::db::ListParams::default())
+        .list_events(&prefixd::db::ListParams {
+            limit: 1000,
+            ..Default::default()
+        })
         .await
         .unwrap();
-    assert!(events.is_empty(), "corroborating ban must not be persisted");
+    assert!(
+        events.is_empty(),
+        "corroborating ban and resolution must not be persisted: {events:?}"
+    );
     assert_eq!(mitigation_count(&repo).await, 0);
     assert_eq!(announcer.announced_count().await, 0);
 }
@@ -8601,10 +8623,20 @@ async fn test_alertmanager_rejects_corroborating_source_ban() {
 #[tokio::test]
 async fn test_fastnetmon_rejects_corroborating_source_ban() {
     let (app, repo, announcer) = setup_corroborating_ban_paths();
-    let payload = make_fastnetmon_payload("ban", "203.0.113.40", Some("fnm-1"));
-    let (status, json) = post_fastnetmon(&app, &payload).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(json["error"], corroborating_rejection("fastnetmon"));
+    for action in ["ban", "unban"] {
+        let payload = make_fastnetmon_payload(action, "203.0.113.40", Some("fnm-1"));
+        let (status, json) = post_fastnetmon(&app, &payload).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{action}");
+        assert_eq!(json["error"], corroborating_rejection("fastnetmon"));
+    }
+    let events = repo
+        .list_events(&prefixd::db::ListParams {
+            limit: 1000,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert!(events.is_empty(), "{events:?}");
     assert_eq!(mitigation_count(&repo).await, 0);
     assert_eq!(announcer.announced_count().await, 0);
 }

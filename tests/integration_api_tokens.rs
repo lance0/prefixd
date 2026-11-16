@@ -203,7 +203,13 @@ async fn ingest_tokens_reach_only_the_ingest_routes() {
             .is_empty()
     );
 
-    // Control: the same token reaches every ingest route past authentication.
+    // Control: a token bound to each route's source reaches every ingest route
+    // past authentication.
+    let alertmanager = bearer(&fixture.repo.mint_token_for_test(
+        "am-pop1",
+        TokenScope::Ingest,
+        Some("alertmanager"),
+    ));
     let event = json!({
         "source": "fastnetmon", "victim_ip": "203.0.113.10", "vector": "udp_flood",
         "timestamp": chrono::Utc::now(), "pps": 50000, "top_dst_ports": [53],
@@ -212,18 +218,22 @@ async fn ingest_tokens_reach_only_the_ingest_routes() {
     let corroborator = json!({"source": "fastnetmon"});
     let fnm = json!({"action": "ban", "ip": "203.0.113.11"});
     let alerts = json!({"alerts": []});
-    for (path, body) in [
-        ("/v1/events", &event),
-        ("/v1/events/batch", &json!({"events": [event.clone()]})),
-        ("/v1/signals/fastnetmon", &fnm),
-        ("/v1/signals/alertmanager", &alerts),
-        ("/v1/signals/corroborator", &corroborator),
+    for (path, body, authorization) in [
+        ("/v1/events", &event, &authorization),
+        (
+            "/v1/events/batch",
+            &json!({"events": [event.clone()]}),
+            &authorization,
+        ),
+        ("/v1/signals/fastnetmon", &fnm, &authorization),
+        ("/v1/signals/alertmanager", &alerts, &alertmanager),
+        ("/v1/signals/corroborator", &corroborator, &authorization),
     ] {
         let (status, _, response) = send(
             &fixture.app,
             "POST",
             path,
-            &[("authorization", &authorization)],
+            &[("authorization", authorization)],
             Some(body),
         )
         .await;

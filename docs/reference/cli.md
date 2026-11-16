@@ -498,7 +498,8 @@ is required. The source's configured `match_dimensions` determine which
 of these the server actually accepts. JSON output mode
 (`prefixdctl -f json send-corroborator …`) returns the raw response
 including `signal_id` and `attached_group_ids`. The command posts to an ingest
-route, so `PREFIXD_TOKEN` may be an ingest token for the source.
+route, so `PREFIXD_TOKEN` must be an ingest token bound to `--source`, or an
+Admin's; an operator token gets 403.
 
 ---
 

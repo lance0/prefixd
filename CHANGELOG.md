@@ -19,8 +19,76 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   upgrade, mint one token per detector and automation with
   `prefixdctl tokens create` and install it; detectors get 401 until then. An
   ingest token cannot read, so a custom detector script that looks up and
-  withdraws mitigations needs an operator token for that step. See
+  withdraws mitigations must unban by event instead, naming the victim, as the
+  bundled FastNetMon script does. See
   [source-bound ingest tokens](docs/how-to/upgrading.md#source-bound-ingest-tokens).
+- **Ingest is bound to the credential's source.** Every ingest route
+  (`/v1/events`, the batch route, every `/v1/signals/*` adapter and the
+  corroborator) accepts an ingest token only for the source it is bound to,
+  and an Admin for any source. Operator sessions and operator tokens get 403
+  there. A mismatched source gets 403 naming the claimed and bound sources
+  and writes nothing; one mismatched item refuses a whole batch. FastNetMon
+  hostgroup alerts on `/v1/signals/fastnetmon` need a token bound to
+  `fastnetmon-hostgroup`. Mint one ingest token per detector source.
+- **A detector unban names its victim.** It withdraws the live mitigations for
+  that victim on the controller's POP that the bound source created, and
+  answers `no_active_mitigation` when there are none; `event_id` no longer
+  selects them, and the statuses `not_found` and `ignored_no_event_id` are
+  gone. An unban with a vector other than `unknown` withdraws only that
+  vector's mitigations, with UDP floods and amplification as one family;
+  FastNetMon unbans send `unknown`. The unban is stored with its POP and
+  targets first and answers `503`, touching nothing, if that write fails. A
+  resend of an unban event ID on the same POP reuses those targets, and one
+  naming another victim gets `409`. With correlation, only the source whose
+  event met the threshold withdraws the mitigation by unban. The first failed
+  delete of any kind stops the unban with `503` and the rest of its intents
+  pending, and a storage failure on the unban path is `503`, not `500`. A
+  `mode: corroborating` source's unban is now refused on the batch route and
+  every adapter too, as on `/v1/events`, and stores nothing. An unban with nothing to withdraw records the new event outcome
+  `no_active_mitigation`; event filters that counted such unbans as
+  `withdrawn` must add it; Alertmanager and webhook adapters
+  report `withdrawn` or `no_active_mitigation` per unban and answer `503` when
+  one failed, and `withdrawn_noop` is gone.
+- **Detector audit actors name the credential.** Detector-created mitigations,
+  their refusals and detector unban withdrawals record `token:<name>` for an
+  ingest token and `webhook:<adapter>` for an HMAC adapter, with the source in
+  `details.source`; an Admin who posts an event is recorded as that Admin.
+  Audit filters that matched a source name in `actor_id` must match
+  `details.source`.
+- **Webhook adapter refusals.** At startup, on reload and through
+  `PUT /v1/config/correlation`: `auth.type: none` is refused unless
+  `http.auth.mode` is `none`; an HMAC adapter named in
+  `blackhole.detector_sources` or `guardrails.detector_prefix_sources` must map
+  `fields.source_id`; an HMAC adapter that maps `fields.action` must map
+  `fields.source_id`, so a replayed signed unban reuses its original targets;
+  and an HMAC `auth.secret_env` must name a variable in
+  the `PREFIXD_WEBHOOK_` namespace whose value is at least 32 bytes. Rename
+  existing secret variables, for example `RADWARE_WEBHOOK_SECRET` to
+  `PREFIXD_WEBHOOK_RADWARE_SECRET`. Adapter names must match
+  `^[a-z0-9][a-z0-9-]{0,63}$`, and a disabled adapter skips these refusals
+  until enabled. An adapter named in either allowlist answers `400` to a
+  payload in which any ban has no event ID, and an HMAC adapter refuses an
+  unban with no event ID as that item's `error`. `prefixd --check` reads adapter
+  secrets from its environment, so run it with the controller's.
+  `blackhole.detector_sources` and
+  `guardrails.detector_prefix_sources` entries must match
+  `^[a-z0-9][a-z0-9_-]{0,63}$`.
+- This release adds migration 024, a nullable `detector_source` column on
+  `withdrawal_requests` that keeps a detector unban's source for its
+  completion audit and metric. It rewrites no row and adds no rollback
+  constraint of its own.
+- This release adds migration 025, nullable `unban_pop` and
+  `unban_target_ids` columns on `events` that hold a detector unban's replay
+  record. It rewrites no row and adds no rollback constraint of its own.
+- **Reinstall the FastNetMon script** on every FastNetMon host. It posts ban
+  and unban events with an ingest token bound to `fastnetmon`, read from
+  `PREFIXD_TOKEN_FILE` or `PREFIXD_TOKEN` and passed to curl on stdin. It no
+  longer reads `PREFIXD_OPERATOR`, `UNBAN_QUERY_*` or `WITHDRAW_*`;
+  `BAN_POST_ATTEMPTS` and `BAN_POST_DELAY_SECONDS` are renamed
+  `EVENT_POST_ATTEMPTS` and `EVENT_POST_DELAY_SECONDS`. It refuses to run
+  without a token unless `PREFIXD_AUTH_MODE=none`, and refuses a zero
+  connect or total timeout. See
+  [FastNetMon](docs/how-to/detectors/fastnetmon.md).
 - This release adds migration 022, the `api_tokens` table and a `CHECK` on
   `operators.username` (`^[A-Za-z0-9_-]{1,64}$`). The migration refuses to apply,
   and the controller does not start, while any username falls outside the
@@ -196,6 +264,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   delete operators or set passwords, so a stolen admin token cannot mint a
   replacement or an Admin account that outlives its revocation. A token bound
   to a POP is refused on another POP's controller on a shared database.
+- A detector source is now an authenticated identity, not a label. Before
+  this release any Operator credential could post `source: fastnetmon` to
+  `/v1/events`, and the shared token could reach `/v1/signals/fastnetmon`, to
+  get a detector blackhole that a manual request needs Admin for, claim a
+  prefix-allowlisted source, satisfy `min_sources` under several labels,
+  borrow a heavier source's weight or unban another detector's mitigation. A
+  stolen detector token now acts only as its own source and cannot read or
+  withdraw anything outside it.
+- Webhook adapter secrets live in the `PREFIXD_WEBHOOK_` namespace with at
+  least 32 bytes, so a configuration change through
+  `PUT /v1/config/correlation` cannot point an adapter at a guessable
+  variable such as `PATH` and keep posting signed events after the token
+  that made the change is revoked.
 - A Bearer request has its session cookie removed before the session is
   loaded, so a bad token never falls back to a session and a stale cookie
   cannot fail a valid token during a database outage. Token secrets and hashes
@@ -241,6 +322,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   FastNetMon Advanced.
 
 ### Changed
+
+- The bundled FastNetMon script needs only bash and curl: it no longer uses
+  `jq` or `python3`, takes the victim from its argument and never from stdin,
+  keeps no state between ban and unban, and bounds each attempt with
+  `EVENT_CONNECT_TIMEOUT_SECONDS` (default 5) and `EVENT_MAX_TIME_SECONDS`
+  (default 15).
 
 - `prefixdctl operators create` refuses usernames outside
   `^[A-Za-z0-9_-]{1,64}$`, the rule the API already applied, and both refuse

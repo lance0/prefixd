@@ -5,7 +5,9 @@ use sqlx::{FromRow, PgConnection, PgPool};
 use std::time::Duration;
 use uuid::Uuid;
 
-use super::{ListParams, MitigationListParams, NotificationPreferences, RepositoryTrait};
+use super::{
+    ListParams, MitigationListParams, NotificationPreferences, RepositoryTrait, UnbanReplay,
+};
 use crate::config::{BlackholeConfig, QuotasConfig};
 use crate::correlation::engine::{
     CorroboratingSignal, EventDimensions, SignalGroup, SignalGroupEvent, SignalGroupFilter,
@@ -149,6 +151,43 @@ pub struct Repository {
 }
 
 impl Repository {
+    /// One insert, so an unban's replay record exists exactly when its event does.
+    async fn insert_event_row(
+        &self,
+        event: &AttackEvent,
+        unban: Option<(&str, &[Uuid])>,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO events (
+                event_id, external_event_id, source, event_timestamp, ingested_at,
+                victim_ip, vector, protocol, bps, pps, top_dst_ports_json, top_src_ports_json, confidence,
+                action, raw_details, unban_pop, unban_target_ids
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+            "#,
+        )
+        .bind(event.event_id)
+        .bind(&event.external_event_id)
+        .bind(&event.source)
+        .bind(event.event_timestamp)
+        .bind(event.ingested_at)
+        .bind(&event.victim_ip)
+        .bind(&event.vector)
+        .bind(event.protocol)
+        .bind(event.bps)
+        .bind(event.pps)
+        .bind(&event.top_dst_ports_json)
+        .bind(&event.top_src_ports_json)
+        .bind(event.confidence)
+        .bind(&event.action)
+        .bind(&event.raw_details)
+        .bind(unban.map(|(pop, _)| pop))
+        .bind(unban.map(|(_, targets)| targets))
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     pub fn new(pool: PgPool) -> Self {
         Self {
             pool,
@@ -521,33 +560,58 @@ impl RepositoryTrait for Repository {
     }
 
     async fn insert_event(&self, event: &AttackEvent) -> Result<()> {
+        self.insert_event_row(event, None).await
+    }
+
+    async fn insert_unban_event(
+        &self,
+        event: &AttackEvent,
+        pop: &str,
+        targets: &[Uuid],
+    ) -> Result<()> {
+        self.insert_event_row(event, Some((pop, targets))).await
+    }
+
+    async fn set_unban_targets(&self, event_id: Uuid, targets: &[Uuid]) -> Result<()> {
         sqlx::query(
-            r#"
-            INSERT INTO events (
-                event_id, external_event_id, source, event_timestamp, ingested_at,
-                victim_ip, vector, protocol, bps, pps, top_dst_ports_json, top_src_ports_json, confidence,
-                action, raw_details
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
-            "#,
+            "UPDATE events SET unban_target_ids = $2 WHERE event_id = $1 AND unban_pop IS NOT NULL",
         )
-        .bind(event.event_id)
-        .bind(&event.external_event_id)
-        .bind(&event.source)
-        .bind(event.event_timestamp)
-        .bind(event.ingested_at)
-        .bind(&event.victim_ip)
-        .bind(&event.vector)
-        .bind(event.protocol)
-        .bind(event.bps)
-        .bind(event.pps)
-        .bind(&event.top_dst_ports_json)
-        .bind(&event.top_src_ports_json)
-        .bind(event.confidence)
-        .bind(&event.action)
-        .bind(&event.raw_details)
+        .bind(event_id)
+        .bind(targets)
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    async fn find_unban_replay(
+        &self,
+        pop: &str,
+        source: &str,
+        external_id: &str,
+    ) -> Result<Option<UnbanReplay>> {
+        let row: Option<(Uuid, Option<String>, String, Vec<Uuid>)> = sqlx::query_as(
+            r#"
+            SELECT event_id, external_event_id, victim_ip, unban_target_ids
+            FROM events
+            WHERE source = $2 AND external_event_id = $3 AND action = 'unban'
+              AND unban_pop = $1 AND unban_target_ids IS NOT NULL
+            ORDER BY ingested_at, event_id
+            LIMIT 1
+            "#,
+        )
+        .bind(pop)
+        .bind(source)
+        .bind(external_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(
+            |(event_id, external_event_id, victim_ip, target_ids)| UnbanReplay {
+                event_id,
+                external_event_id,
+                victim_ip,
+                target_ids,
+            },
+        ))
     }
 
     async fn find_ban_event_by_external_id(
@@ -560,7 +624,7 @@ impl RepositoryTrait for Repository {
             SELECT event_id, external_event_id, source, event_timestamp, ingested_at,
                    victim_ip, vector, protocol, bps, pps, top_dst_ports_json, top_src_ports_json, confidence,
                    action, raw_details, outcome, outcome_reason, outcome_mitigation_ids
-            FROM events 
+            FROM events
             WHERE source = $1 AND external_event_id = $2 AND action = 'ban'
             ORDER BY ingested_at DESC
             LIMIT 1
@@ -690,8 +754,8 @@ impl RepositoryTrait for Repository {
             r#"INSERT INTO withdrawal_requests (
                 operation_id, mitigation_id, pop, nlri_hash, rule_json, mitigation_updated_at,
                 terminal_status, actor_type, actor, reason, requested_at, speaker_delete_required, target_id,
-                rule_kind
-            ) SELECT $1, mitigation_id, pop, $4, $5, updated_at, $7, $8, $9, $10, $11, $12, $13, $14
+                rule_kind, detector_source
+            ) SELECT $1, mitigation_id, pop, $4, $5, updated_at, $7, $8, $9, $10, $11, $12, $13, $14, $15
               FROM mitigations WHERE mitigation_id = $2 AND pop = $3 AND updated_at = $6
                 AND status IN ('active', 'escalated')
                 AND (($13::uuid IS NULL AND NOT EXISTS (SELECT 1 FROM speaker_pop_bindings WHERE pop = $3))
@@ -712,6 +776,7 @@ impl RepositoryTrait for Repository {
         .bind(request.speaker_delete_required)
         .bind(request.target_id)
         .bind(&request.rule_kind)
+        .bind(&request.detector_source)
         .execute(&self.pool)
         .await?;
         sqlx::query_as::<_, WithdrawalRequest>(
@@ -866,7 +931,7 @@ impl RepositoryTrait for Repository {
                         .bind(customer_id).fetch_one(&mut *tx).await?;
                     check_active_quota("customer", u32::try_from(count).unwrap_or(u32::MAX), quotas.max_active_per_customer)?;
                     // The detector prefix budget never caps manual CIDRs.
-                    if matches!(actor, CreationActor::Detector(_))
+                    if matches!(actor, CreationActor::Detector { .. })
                         && crate::domain::is_prefix_destination(&m.match_criteria.dst_prefix)
                     {
                         let prefix_count: i64 = sqlx::query_scalar(
@@ -1092,20 +1157,32 @@ impl RepositoryTrait for Repository {
         }
     }
 
-    async fn list_active_by_triggering_event(&self, event_id: Uuid) -> Result<Vec<Mitigation>> {
+    async fn list_live_by_victim_and_source(
+        &self,
+        victim_ip: &str,
+        pop: &str,
+        source: &str,
+    ) -> Result<Vec<Mitigation>> {
         let rows = sqlx::query_as::<_, MitigationRow>(
             r#"
-            SELECT mitigation_id, scope_hash, pop, customer_id, service_id, victim_ip, vector,
-                   match_json, action_type, action_params_json, status,
-                   created_at, updated_at, expires_at, withdrawn_at,
-                   triggering_event_id, last_event_id, escalated_from_id, reason, rejection_reason,
-                   acknowledged_at, acknowledged_by, signal_group_id, origin_mode
-            FROM mitigations
-            WHERE triggering_event_id = $1 AND status IN ('active', 'escalated')
-            ORDER BY created_at, mitigation_id
+            SELECT m.mitigation_id, m.scope_hash, m.pop, m.customer_id, m.service_id,
+                   m.victim_ip, m.vector, m.match_json, m.action_type, m.action_params_json,
+                   m.status, m.created_at, m.updated_at, m.expires_at, m.withdrawn_at,
+                   m.triggering_event_id, m.last_event_id, m.escalated_from_id, m.reason,
+                   m.rejection_reason, m.acknowledged_at, m.acknowledged_by, m.signal_group_id,
+                   m.origin_mode
+            FROM mitigations m
+            JOIN events e ON e.event_id = m.triggering_event_id
+            WHERE (m.victim_ip = $1 OR prefixd_victim_inet(m.victim_ip) = ANY($4::inet[]))
+              AND m.pop = $2 AND e.source = $3
+              AND m.status IN ('active', 'escalated')
+            ORDER BY m.created_at, m.mitigation_id
             "#,
         )
-        .bind(event_id)
+        .bind(victim_ip)
+        .bind(pop)
+        .bind(source)
+        .bind(crate::domain::victim_lookup_keys(victim_ip))
         .fetch_all(&self.pool)
         .await?;
         rows.into_iter().map(Mitigation::from_row).collect()
@@ -2703,7 +2780,7 @@ mod checked_timestamp_rows {
         );
         check_row!(
             WithdrawalRequest,
-            "gen_random_uuid() AS operation_id, gen_random_uuid() AS mitigation_id, 'test'::text AS pop, 'hash'::text AS nlri_hash, 'flowspec'::text AS rule_kind, '{}'::text AS rule_json, 'withdrawn'::text AS terminal_status, true AS speaker_delete_required, 'system'::text AS actor_type, 'test'::text AS actor, 'test'::text AS reason, NULL::uuid AS target_id",
+            "gen_random_uuid() AS operation_id, gen_random_uuid() AS mitigation_id, 'test'::text AS pop, 'hash'::text AS nlri_hash, 'flowspec'::text AS rule_kind, '{}'::text AS rule_json, 'withdrawn'::text AS terminal_status, true AS speaker_delete_required, 'system'::text AS actor_type, 'test'::text AS actor, 'test'::text AS reason, NULL::uuid AS target_id, NULL::text AS detector_source",
             [mitigation_updated_at, requested_at],
             [completed_at]
         );

@@ -124,6 +124,10 @@ pub struct WithdrawalRequest {
     pub completed_at: Option<DateTime<Utc>>,
     /// NULL only for legacy or explicitly unbound mock/test operations.
     pub target_id: Option<Uuid>,
+    /// The bound source of a detector unban, kept for the completion audit
+    /// and metric whoever completes it; NULL for every other withdrawal and
+    /// for requests from before migration 024.
+    pub detector_source: Option<String>,
 }
 
 impl WithdrawalRequest {
@@ -167,6 +171,7 @@ impl WithdrawalRequest {
             requested_at: Utc::now(),
             completed_at: None,
             target_id: None,
+            detector_source: None,
         })
     }
 
@@ -178,6 +183,16 @@ impl WithdrawalRequest {
             "detector" => ActorType::Detector,
             _ => ActorType::System,
         };
+        let mut details = serde_json::json!({
+            "reason": self.reason,
+            "operation_id": self.operation_id,
+            // The scheduled expiry this operation cut short, and when the lifetime ended.
+            "previous_expires_at": finished.expires_at,
+            "ended_at": finished.withdrawn_at,
+        });
+        if let Some(source) = &self.detector_source {
+            details["source"] = serde_json::json!(source);
+        }
         AuditEntry::new(
             actor_type,
             Some(self.actor.clone()),
@@ -188,13 +203,7 @@ impl WithdrawalRequest {
             },
             Some("mitigation"),
             Some(self.mitigation_id.to_string()),
-            serde_json::json!({
-                "reason": self.reason,
-                "operation_id": self.operation_id,
-                // The scheduled expiry this operation cut short, and when the lifetime ended.
-                "previous_expires_at": finished.expires_at,
-                "ended_at": finished.withdrawn_at,
-            }),
+            details,
         )
     }
 
@@ -205,6 +214,11 @@ impl WithdrawalRequest {
     /// The `prefixd_mitigations_withdrawn_total` reason for completing this
     /// request, the same whether the caller or reconciliation completes it.
     pub fn withdrawn_metric_reason(&self) -> &'static str {
+        // A detector unban stays `detector_unban` whoever made the claim: an
+        // ingest token, or an Admin, mTLS client or `none` mode as operator.
+        if self.detector_source.is_some() {
+            return "detector_unban";
+        }
         match (self.actor_type.as_str(), self.actor.as_str()) {
             ("detector", _) => "detector_unban",
             ("system", super::SAFELIST_RECHECK_ACTOR) => "safelisted",
@@ -294,7 +308,7 @@ pub async fn request_withdrawal(
     speaker_delete_required: bool,
     binding: Option<&super::VerifiedSpeakerBinding>,
 ) -> Result<WithdrawalRequest> {
-    let mut request = WithdrawalRequest::new(
+    let request = WithdrawalRequest::new(
         mitigation,
         expired,
         actor_type,
@@ -303,6 +317,43 @@ pub async fn request_withdrawal(
         // A simulation was never sent to the speaker, so its deletion stays local in any mode.
         speaker_delete_required && !mitigation.is_dry_run_origin(),
     )?;
+    persist_withdrawal(repo, request, binding).await
+}
+
+/// [`request_withdrawal`] for a detector unban, which records the bound
+/// `source` it withdraws for. A retry finds the intent already pending and
+/// returns it unchanged, never a second request.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Persist immutable withdrawal metadata together with its verified speaker target"
+)]
+pub async fn request_detector_withdrawal(
+    repo: &dyn RepositoryTrait,
+    mitigation: &Mitigation,
+    source: &str,
+    actor_type: &str,
+    actor: &str,
+    reason: String,
+    speaker_delete_required: bool,
+    binding: Option<&super::VerifiedSpeakerBinding>,
+) -> Result<WithdrawalRequest> {
+    let mut request = WithdrawalRequest::new(
+        mitigation,
+        false,
+        actor_type,
+        actor,
+        reason,
+        speaker_delete_required && !mitigation.is_dry_run_origin(),
+    )?;
+    request.detector_source = Some(source.into());
+    persist_withdrawal(repo, request, binding).await
+}
+
+async fn persist_withdrawal(
+    repo: &dyn RepositoryTrait,
+    mut request: WithdrawalRequest,
+    binding: Option<&super::VerifiedSpeakerBinding>,
+) -> Result<WithdrawalRequest> {
     request.target_id = binding.map(super::VerifiedSpeakerBinding::target_id);
     if let Some(binding) = binding {
         binding.validate_request(&request.pop, request.target_id)?;

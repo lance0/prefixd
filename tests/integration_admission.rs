@@ -386,7 +386,7 @@ async fn exercise_atomic_detector_prefix_quota(repo: Arc<dyn RepositoryTrait>) {
     let settings = common::test_settings();
     let mut quotas = settings.quotas;
     quotas.max_active_prefix_per_customer = 1;
-    let detector = CreationActor::Detector("fastnetmon".into());
+    let detector = CreationActor::detector("fastnetmon");
     let operator = CreationActor::Operator("quota-test".into());
     let is_prefix_quota = |error: &prefixd::error::PrefixdError| matches!(error, prefixd::error::PrefixdError::GuardrailViolation(prefixd::error::GuardrailError::QuotaExceeded { quota_type, .. }) if quota_type == "prefix_customer");
 
