@@ -48,7 +48,9 @@ credential, and it replaces the session:
 
 - The `Cookie` header of a Bearer request is removed before the session is
   loaded, so an invalid token gets 401 even beside a valid session cookie, and
-  a stale cookie during a database outage does not fail a valid token.
+  a stale cookie cannot replace the token lookup with a session-store failure.
+  Token authentication still needs a current database read; a database outage
+  returns 503 with or without the cookie.
 - Other schemes, such as `Basic` added by a proxy in front of the dashboard,
   are not token credentials; the session applies.
 - More than one `Authorization` header with a Bearer among them is refused
@@ -269,6 +271,15 @@ Automatic detector mitigation otherwise uses a canonical host destination:
 `/32` for IPv4 and `/128` for IPv6. `icmp_flood` selects protocol 1 for IPv4 and 58 for IPv6 in
 both event metadata and mitigation intent. TCP and UDP remain 6 and 17. Normal
 prefix, port, TTL, quota and safelist checks still apply.
+
+For UDP/TCP events without destination ports, a police playbook produces a
+protocol-only match. Service `allowed_ports` never supplies missing attack
+ports. A UDP/TCP detector discard without destination ports is refused with
+`422` and guardrail reason `DestinationPortsRequired`, including a detector
+request that would extend an existing protocol-only discard. Explicit
+multi-rule matches retain their own selectors. See
+[allowed ports](configuration.md#allowed-ports) for collateral effects and
+the explicit-port intersection.
 
 **Response (202 Accepted):**
 
@@ -2777,6 +2788,13 @@ Full operational health using the configured authentication mode. The request
 and response below illustrate an API token in credentials mode, which a session
 cookie can replace; native mTLS requires a client certificate. `none` requires
 no credentials. An ingest token gets 403.
+
+In credentials mode, an unreadable token store returns `503` with
+`credential store unavailable; retry`, without operational details. A token
+can authenticate during an isolated session-store failure only if the token
+store remains readable. A failed cookie-only session load stays unauthenticated
+and returns `500`. Public liveness at `/v1/health` remains available; unknown
+paths return `404` without loading a session.
 
 **Illustrative response with rustbgpd:**
 
