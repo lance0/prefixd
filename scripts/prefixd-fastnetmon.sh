@@ -29,7 +29,9 @@ if [[ -r "$PREFIXD_DEFAULTS_FILE" ]]; then
     . "$PREFIXD_DEFAULTS_FILE"
 fi
 
-PREFIXD_API="${PREFIXD_API:-http://localhost:8080}"
+# No default: the controller's ingress (such as https://prefixd.example.net)
+# differs per deployment, and a guessed one only fails at the first ban.
+PREFIXD_API="${PREFIXD_API:-}"
 PREFIXD_TOKEN_FILE="${PREFIXD_TOKEN_FILE:-}"
 PREFIXD_TOKEN="${PREFIXD_TOKEN:-}"
 # "none" only for a controller with http.auth.mode none, which needs no token.
@@ -52,6 +54,11 @@ log() {
 
 if ! command -v curl &> /dev/null; then
     log "ERROR: curl is required"
+    exit 1
+fi
+
+if [[ -z "$PREFIXD_API" ]]; then
+    log "ERROR: PREFIXD_API is not set: set it to the controller's ingress, such as https://prefixd.example.net"
     exit 1
 fi
 

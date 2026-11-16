@@ -270,6 +270,10 @@ dashboard:
     - PREFIXD_API=http://prefixd:8080  # Docker service name (internal)
 ```
 
+The controller services set `PREFIXD_API=http://127.0.0.1:8080` too, so
+`prefixdctl` run with `docker compose exec` reaches the controller's own
+listener without `--api`.
+
 ### Remote Deployment
 
 When deploying to a remote server, ensure:
@@ -370,9 +374,14 @@ Install the bundled notify script, `scripts/prefixd-fastnetmon.sh`, with an
 ingest token bound to `fastnetmon` in a 0400 token file; see
 [FastNetMon](detectors/fastnetmon.md). The script posts each ban and unban to
 `/v1/events` and passes the token to curl on stdin, so it never appears on a
-command line. A sender that posts to `/v1/signals/fastnetmon` directly needs an
-ingest token bound to `fastnetmon` (`fastnetmon-hostgroup` for hostgroup
-alerts) in `Authorization: Bearer`.
+command line. An unban names the victim, so the ingest token needs no read or
+withdraw access. Never put a token in `notify_script_args`, where any local
+user can read it from the process list. A sender that posts to
+`/v1/signals/fastnetmon` directly needs an ingest token bound to `fastnetmon`
+(`fastnetmon-hostgroup` for hostgroup alerts) in `Authorization: Bearer`.
+FastNetMon Advanced's native web callback cannot send one, so it needs a
+localhost relay that adds the token; see
+[credential delivery per detector](../adr/034-source-bound-api-tokens.md#13-credential-delivery-per-detector).
 
 The adapter classifies the attack vector from the traffic breakdown (UDP/SYN/ICMP/TCP) and maps `action` to confidence:
 
@@ -559,10 +568,16 @@ postgres:
   environment:
     POSTGRES_DB: prefixd
     POSTGRES_USER: prefixd
-    POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-prefixd_secret}
+    POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env; scripts/compose-bootstrap.sh env generates one}
   volumes:
     - postgres-data:/var/lib/postgresql/data
 ```
+
+There is no default password: Compose refuses to start until `.env` sets
+`POSTGRES_PASSWORD`. `scripts/compose-bootstrap.sh env` writes a random one,
+mode 0600, on a fresh checkout. PostgreSQL keeps the password its data volume
+was created with, so changing the variable later locks the controller out
+until you also change it in the database.
 
 ### External PostgreSQL
 

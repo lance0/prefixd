@@ -24,6 +24,11 @@ struct Cli {
     #[arg(short, long, env = "PREFIXD_TOKEN", hide_env_values = true)]
     token: Option<String>,
 
+    /// File holding the API token on one line, such as /dev/stdin; keeps the
+    /// token out of the environment, shell history and process listings
+    #[arg(long, env = "PREFIXD_TOKEN_FILE", hide_env_values = true)]
+    token_file: Option<std::path::PathBuf>,
+
     /// Cookie header from an authenticated administrator session
     #[arg(long, env = "PREFIXD_SESSION_COOKIE", hide_env_values = true)]
     session_cookie: Option<String>,
@@ -213,6 +218,15 @@ enum TokenCommands {
     Revoke {
         /// Token name
         name: String,
+    },
+
+    /// Look up a token secret in this database and print its record, never
+    /// the secret; exits 1 unless the token is active
+    Verify {
+        /// File holding the secret on one line; stdin when omitted. The
+        /// secret is never taken from the command line.
+        #[arg(long)]
+        token_file: Option<std::path::PathBuf>,
     },
 }
 
@@ -458,6 +472,9 @@ struct HealthResponse {
     gobgp: ComponentHealth,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     speaker: Option<SpeakerHealth>,
+    /// Operation mode, from `/v1/config/settings`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mode: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -689,7 +706,7 @@ fn format_http_error(status: reqwest::StatusCode, message: Option<String>) -> St
         match status {
             reqwest::StatusCode::UNAUTHORIZED => {
                 "authentication failed: missing, invalid, revoked or expired credentials \
-                 (set PREFIXD_TOKEN to an API token, or --session-cookie)"
+                 (set PREFIXD_TOKEN or PREFIXD_TOKEN_FILE to an API token, or --session-cookie)"
             }
             reqwest::StatusCode::FORBIDDEN => {
                 "permission denied: the authenticated identity's role does not allow this request"
@@ -793,23 +810,66 @@ impl Client {
     }
 }
 
+/// A token is 51 bytes; anything past this is not a token file.
+const MAX_TOKEN_FILE_BYTES: u64 = 1024;
+
+/// Reads a token file: one line, a trailing newline allowed, at most
+/// [`MAX_TOKEN_FILE_BYTES`]. Errors name the file, never its contents.
+fn read_token_file(path: &std::path::Path) -> Result<String, String> {
+    let file = std::fs::File::open(path)
+        .map_err(|e| format!("cannot read the token file {}: {e}", path.display()))?;
+    read_token(file, &path.display().to_string())
+}
+
+/// Reads one token line from `reader`, named `label` in errors.
+fn read_token(reader: impl std::io::Read, label: &str) -> Result<String, String> {
+    use std::io::Read as _;
+    let mut raw = String::new();
+    reader
+        .take(MAX_TOKEN_FILE_BYTES + 1)
+        .read_to_string(&mut raw)
+        .map_err(|e| format!("cannot read the token file {label}: {e}"))?;
+    if raw.len() as u64 > MAX_TOKEN_FILE_BYTES {
+        return Err(format!(
+            "the token file {label} is larger than {MAX_TOKEN_FILE_BYTES} bytes"
+        ));
+    }
+    let token = raw.strip_suffix('\n').unwrap_or(&raw);
+    let token = token.strip_suffix('\r').unwrap_or(token);
+    if token.is_empty() || token.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err(format!(
+            "the token file {label} must hold one token on one line"
+        ));
+    }
+    Ok(token.to_owned())
+}
+
 /// The client variable the controller's shared token used to live in.
 const REMOVED_TOKEN_ENV: &str = "PREFIXD_API_TOKEN";
 
 #[tokio::main]
 async fn main() -> ExitCode {
     let cli = Cli::parse();
-    // Never send both credentials: the controller would use only the token.
-    if cli.token.is_some() && cli.session_cookie.is_some() {
+    // One token source: neither silently wins over the other.
+    if cli.token.is_some() && cli.token_file.is_some() {
         eprintln!(
-            "error: pass an API token (--token or PREFIXD_TOKEN) or --session-cookie \
-             (PREFIXD_SESSION_COOKIE), not both"
+            "error: pass an API token (--token or PREFIXD_TOKEN) or a token file \
+             (--token-file or PREFIXD_TOKEN_FILE), not both"
+        );
+        return ExitCode::from(2);
+    }
+    let has_token = cli.token.is_some() || cli.token_file.is_some();
+    // Never send both credentials: the controller would use only the token.
+    if has_token && cli.session_cookie.is_some() {
+        eprintln!(
+            "error: pass an API token (--token, PREFIXD_TOKEN, --token-file or \
+             PREFIXD_TOKEN_FILE) or --session-cookie (PREFIXD_SESSION_COOKIE), not both"
         );
         return ExitCode::from(2);
     }
     // reqwest sends URL userinfo as `Authorization: Basic`, and the controller
     // refuses a request with two Authorization headers.
-    if cli.token.is_some()
+    if has_token
         && reqwest::Url::parse(&cli.api)
             .is_ok_and(|url| !url.username().is_empty() || url.password().is_some())
     {
@@ -819,13 +879,33 @@ async fn main() -> ExitCode {
         );
         return ExitCode::from(2);
     }
-    if std::env::var_os(REMOVED_TOKEN_ENV).is_some() && std::env::var_os("PREFIXD_TOKEN").is_none()
+    if std::env::var_os(REMOVED_TOKEN_ENV).is_some()
+        && std::env::var_os("PREFIXD_TOKEN").is_none()
+        && std::env::var_os("PREFIXD_TOKEN_FILE").is_none()
     {
         eprintln!(
             "warning: {REMOVED_TOKEN_ENV} is set but no longer read; set PREFIXD_TOKEN to an API token"
         );
     }
-    let mut client = Client::new(cli.api, cli.token);
+    // Local database commands send no request: reading the API token file for
+    // them would consume a `tokens verify` secret on stdin, and an unreadable
+    // file would block them.
+    let local = matches!(
+        cli.command,
+        Commands::Operators(_) | Commands::Tokens(_) | Commands::Migrations
+    );
+    let token = match &cli.token_file {
+        Some(_) if local => None,
+        Some(path) => match read_token_file(path) {
+            Ok(token) => Some(token),
+            Err(error) => {
+                eprintln!("error: {error}");
+                return ExitCode::from(2);
+            }
+        },
+        None => cli.token,
+    };
+    let mut client = Client::new(cli.api, token);
     client.session_cookie = cli.session_cookie;
 
     let result = match cli.command {
@@ -1040,8 +1120,33 @@ async fn cmd_diversions(client: &Client, command: DiversionCommands) -> Result<(
     Ok(())
 }
 
+/// How long `status` waits for the operation mode, response body included.
+const SETTINGS_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
 async fn cmd_status(client: &Client, format: OutputFormat) -> Result<(), String> {
-    let health: HealthResponse = client.get("/v1/health/detail").await?;
+    let mut health: HealthResponse = client.get("/v1/health/detail").await?;
+    // The mode is extra context: an unreadable one never hides the health
+    // that did load, nor changes the exit code.
+    // Bounded, body included, so a stalled settings route cannot hold back
+    // the health that already loaded.
+    let settings = tokio::time::timeout(
+        SETTINGS_READ_TIMEOUT,
+        client.get::<serde_json::Value>("/v1/config/settings"),
+    )
+    .await
+    .unwrap_or_else(|_| {
+        Err(format!(
+            "no answer within {} s",
+            SETTINGS_READ_TIMEOUT.as_secs()
+        ))
+    });
+    health.mode = match settings {
+        Ok(settings) => settings["settings"]["mode"].as_str().map(str::to_owned),
+        Err(error) => {
+            eprintln!("warning: cannot read the operation mode: {error}");
+            None
+        }
+    };
 
     match format {
         OutputFormat::Json => {
@@ -1049,6 +1154,7 @@ async fn cmd_status(client: &Client, format: OutputFormat) -> Result<(), String>
         }
         OutputFormat::Table => {
             println!("Status: {}", health.status);
+            println!("Mode: {}", health.mode.as_deref().unwrap_or("unavailable"));
             println!("Active Mitigations: {}", health.active_mitigations);
             if let Some(speaker) = &health.speaker {
                 println!("Speaker: {}", speaker.backend);
@@ -1916,6 +2022,47 @@ async fn cmd_tokens(cmd: TokenCommands, format: OutputFormat) -> Result<(), Stri
                         token.revoked_by.as_deref().unwrap_or("-"),
                     );
                 }
+            }
+        }
+        TokenCommands::Verify { token_file } => {
+            let secret = match &token_file {
+                Some(path) => read_token_file(path)?,
+                None => read_token(std::io::stdin().lock(), "on stdin")?,
+            };
+            // Only the hash reaches the query; no message carries the secret.
+            let hash = prefixd::auth::token::parse(secret.as_bytes())
+                .ok_or("malformed token: not prefixd_ and 43 canonical base64url characters")?;
+            let token = repo
+                .get_api_token_by_hash(&hash)
+                .await
+                .map_err(|e| format!("database error: {}", e))?
+                .ok_or("unknown token: this database has no token with that secret")?;
+            let status = if token.revoked_at.is_some() {
+                "revoked"
+            } else if token.is_expired(now) {
+                "expired"
+            } else {
+                "active"
+            };
+            match format {
+                OutputFormat::Json => {
+                    let mut value = serde_json::to_value(&token).map_err(|e| e.to_string())?;
+                    value["status"] = status.into();
+                    println!("{}", serde_json::to_string_pretty(&value).unwrap());
+                }
+                OutputFormat::Table => {
+                    println!(
+                        "Token '{}': scope {}, source {}, pop {}, {}",
+                        token.name,
+                        token.scope,
+                        token.source.as_deref().unwrap_or("-"),
+                        token.pop.as_deref().unwrap_or("any"),
+                        status,
+                    );
+                }
+            }
+            if status != "active" {
+                return Err(format!("token '{}' is {status}", token.name));
             }
         }
     }

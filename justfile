@@ -29,8 +29,10 @@ gate:
 fmt:
     cargo fmt --all -- --check
 
-# Lint and format-check every Python file against ruff.toml; uvx fetches the pinned ruff.
+# Test the Compose bootstrap, then lint and format-check every Python file against
+# ruff.toml; uvx fetches the pinned ruff.
 python:
+    python3 scripts/test-compose-bootstrap.py
     uvx ruff@{{ruff_version}} check .
     uvx ruff@{{ruff_version}} format --check .
 

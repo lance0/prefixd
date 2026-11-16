@@ -101,6 +101,7 @@ Inspect the receipts behind a claim, with their dates and limits.
 |------|-------|
 | [Speaker profile qualification](reference/qualification/speaker-profiles-2026-10-18.md) | Dated shared-image rustbgpd/GoBGP runtime, security, persistence and local-rule evidence. |
 | [FastNetMon Community interop](reference/qualification/fastnetmon-community-2026-11-16.md) | Dated FastNetMon Community notify path through prefixd and rustbgpd to FRR, the Community lab checks, and what is unqualified for Advanced. |
+| [Compose onboarding](reference/qualification/compose-onboarding-2026-11-16.md) | Dated fresh-stack quickstart for both profiles: bootstrap, scoped tokens, a dry-run event and its withdrawal, secret file modes, and missing-token failures. |
 | [Benchmark snapshot](perf/benchmarks.md) | Historical v0.15.0 measurements and instructions; not a current performance qualification. |
 | [Router lab](../lab/README.md) | Lab setup and topology-specific checks. |
 | [Pinned controller images](../tests/fixtures/rustbgpd/releases.json) | Immutable released images used by the controller test suite. |

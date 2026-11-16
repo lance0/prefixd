@@ -181,7 +181,7 @@ rm fnm-pop1.token
 3. Configure the script in `/etc/default/prefixd`:
 
 ```bash
-# prefixd API endpoint
+# prefixd API endpoint, required: the HTTPS ingress in front of the controller
 PREFIXD_API="https://prefixd-host:8443"
 
 # The ingest token file (preferred), or PREFIXD_TOKEN with the token itself
@@ -201,6 +201,16 @@ EVENT_POST_DELAY_SECONDS="1"
 EVENT_CONNECT_TIMEOUT_SECONDS="5"
 EVENT_MAX_TIME_SECONDS="15"
 ```
+
+`PREFIXD_API` has no default: the script logs an error and posts nothing
+until it is set. Point it at the HTTPS ingress in front of the controller. On
+the Compose stack, which does not publish the controller's port 8080, that is
+nginx; use its plain `http://<compose-host>` on port 80 only across a trusted
+management segment, because the token travels in the clear. On that stack,
+`scripts/compose-bootstrap.sh` has already minted an ingest token bound to
+`fastnetmon` into `.prefixd/fastnetmon.token`; install that file as the token
+file above. That token has no POP binding, so every controller sharing the
+database accepts it; mint one with `--pop` for a multi-POP deployment.
 
 The script sources `/etc/default/prefixd` when it exists; variables set there
 override the process environment. `PREFIXD_TOKEN_FILE` wins over

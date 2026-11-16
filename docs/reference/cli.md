@@ -46,6 +46,17 @@ captures it; the token is shown once and cannot be retrieved later. Use
 `prefixd-gobgp` with the `gobgp` profile. For automation, store the token in
 the client's own secret store rather than a shell profile.
 
+On the Compose stack, `scripts/compose-bootstrap.sh rustbgpd` (or `gobgp`)
+mints an operator token into `.prefixd/cli.token`, mode 0600; see the
+[quickstart](../tutorials/quickstart.md#start-and-log-in). Compose sets
+`PREFIXD_API=http://127.0.0.1:8080` in both controller services, so the CLI
+inside the controller needs only the token. Pass it on stdin, so it never
+enters the container's environment or the Docker API:
+
+```bash
+docker compose exec -T -e PREFIXD_TOKEN_FILE=/dev/stdin prefixd-rustbgpd prefixdctl status < .prefixd/cli.token
+```
+
 ### Command-Line Options
 
 ```bash
@@ -55,20 +66,30 @@ prefixdctl -a http://localhost <command>
 prefixdctl -a http://127.0.0.1:8080 <command>
 ```
 
-Pass the token through `PREFIXD_TOKEN` rather than `--token`: other local
-users can read command-line arguments through `ps` and `/proc`, and a flag
-lands in shell history.
+Pass the token through `PREFIXD_TOKEN_FILE` or `PREFIXD_TOKEN` rather than
+`--token`: other local users can read command-line arguments through `ps` and
+`/proc`, and a flag lands in shell history. A token file keeps the token out of
+the environment as well.
 
 | Option | Env Var | Description |
 |--------|---------|-------------|
 | `-a, --api` | `PREFIXD_API` | API endpoint URL |
 | `-t, --token` | `PREFIXD_TOKEN` | API token (`prefixd_...`), sent as `Authorization: Bearer` |
+| `--token-file` | `PREFIXD_TOKEN_FILE` | File holding the API token on one line, such as `/dev/stdin`; a trailing newline is allowed |
 | `--session-cookie` | `PREFIXD_SESSION_COOKIE` | Cookie header from an authenticated Admin session |
 | `-f, --format` | - | Output format: `table` (default) or `json` |
 
+A token file holds one token on one line, at most 1 KiB. `/dev/stdin` on a
+terminal echoes what you type, so redirect a file or pipe into it rather than
+typing the token. Only commands that call the API read it; the local database
+commands (`operators`, `tokens` and `migrations`) ignore it, so it neither
+consumes the stdin of `tokens verify` nor blocks them when unreadable.
+
 Help output names these variables but never prints their values. prefixdctl
 never sends both credentials: a token and a session cookie together, from flags
-or the environment, is a usage error (exit 2) before any request. The
+or the environment, is a usage error (exit 2) before any request. So is a token
+together with a token file, and a token file that cannot be read or holds more
+than one line; those errors name the file, never its contents. The
 controller would use only the token. A token together with `user:password` in
 `--api` (`PREFIXD_API`) is a usage error too: the userinfo would become an
 `Authorization: Basic` header beside the token, which the controller refuses.
@@ -125,6 +146,7 @@ prefixdctl status
 
 # Illustrative output with rustbgpd:
 # Status: healthy
+# Mode: enforced
 # Active Mitigations: 12
 # Speaker: rustbgpd
 #   Daemon version: <rustbgpd-version>
@@ -140,6 +162,13 @@ prefixdctl status
 #   ● 192.0.2.1 - established
 #   ● 192.0.2.2 - established
 ```
+
+`Mode` is the running operation mode, `enforced` or `dry-run`, read from
+`GET /v1/config/settings`; `--format json` adds it as `mode`. Status therefore
+makes two requests, both readable by any role. When the mode cannot be read,
+or takes more than 3 seconds, body included, status prints `Mode: unavailable`, leaves `mode` out of the JSON, warns on
+stderr, and still reports the health it read; the exit code follows the
+health request alone.
 
 ### Peers
 
@@ -398,6 +427,25 @@ the API, or `prefixdctl`.
 Deleting or demoting an operator does not revoke the tokens they created. To
 offboard someone, list their tokens with `--created-by` and revoke or rotate
 each one.
+
+### Verify Token
+
+```bash
+# On the Compose stack, in the controller service, with the secret on stdin
+docker compose exec -T prefixd-rustbgpd prefixdctl tokens verify < .prefixd/fastnetmon.token
+# Token 'fastnetmon-20261116-110148': scope ingest, source fastnetmon, pop any, active
+docker compose exec -T prefixd-rustbgpd prefixdctl --format json tokens verify < .prefixd/cli.token
+```
+
+Like the other `tokens` commands it needs database access (`DATABASE_URL`), so
+run it where the controller runs, not on a detector host; use `prefixd-gobgp`
+with the `gobgp` profile. It reads a secret from `--token-file` or stdin, never
+from the command line, and looks its hash up in this database and prints the token's name, scope, source, POP and
+status (`active`, `revoked` or `expired`); `-f json` prints the record with a
+`status` field. It never prints the secret or its hash. It exits 1 for an
+unknown, revoked or expired token and for malformed input, and writes nothing,
+`last_used_at` included. `scripts/compose-bootstrap.sh` uses it to check the
+token files it keeps.
 
 ### Revoke Token
 

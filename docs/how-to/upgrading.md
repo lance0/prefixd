@@ -2,7 +2,9 @@
 
 Upgrading from 0.27.0? Read [source-bound ingest tokens](#source-bound-ingest-tokens)
 first: the next release removes the shared bearer token, and every detector and
-automation needs a new credential.
+automation needs a new credential. On the Compose stack, also set the
+[database password](#compose-database-password) before pulling the new
+`docker-compose.yml`.
 
 Upgrading a v0.26.0 deployment? Follow
 [v0.26.0 → 0.27.0](#v0260--0270); it gives the order of the steps from the
@@ -68,6 +70,34 @@ release, so a deployment that starts today has none there. See
 [unknown keys](../reference/configuration.md#unknown-keys) for the exact list,
 and [configuration validation](../reference/configuration.md#validation) for the
 Compose one-liner and what the check skips.
+
+## Compose database password
+
+`docker-compose.yml` no longer falls back to the published password
+`prefixd_secret`. Every Compose command, `up` and `config` included, refuses
+to run until `POSTGRES_PASSWORD` is set, naming the variable.
+
+PostgreSQL keeps the password its data volume was created with. If `.env`
+already sets `POSTGRES_PASSWORD`, there is nothing to do; do not add a second
+line. Otherwise, before upgrading an existing Compose deployment, add that
+password to `.env` in the repository root, readable only by you:
+
+```bash
+touch .env && chmod 0600 .env
+# The old default, if POSTGRES_PASSWORD was never set; otherwise your value.
+printf 'POSTGRES_PASSWORD=%s\n' prefixd_secret >> .env
+docker compose --profile rustbgpd config --quiet
+```
+
+A `POSTGRES_PASSWORD` exported in your shell overrides `.env` for every
+Compose command; keep it unset, or set to the same value. Do not run
+`scripts/compose-bootstrap.sh env` on an existing stack: it refuses when a
+PostgreSQL volume exists, or when it cannot list volumes, because a new random password would lock the
+controller out of its database. A controller that cannot authenticate to
+PostgreSQL cannot start, and with leased FlowSpec its rules lapse within one
+lease while it is down.
+To retire `prefixd_secret`, change it in the database with `ALTER ROLE prefixd
+PASSWORD ...`, then in `.env`, then recreate the controller.
 
 ## Source-bound ingest tokens
 
@@ -196,8 +226,10 @@ What changes:
   stored before it have no record, so a resend of one selects afresh. It adds
   no rollback constraint of its own.
 - **The bundled FastNetMon script** is an ingest client. Reinstall it on every
-  FastNetMon host; see [FastNetMon](detectors/fastnetmon.md). It reads its
-  token from `PREFIXD_TOKEN_FILE` (or `PREFIXD_TOKEN`), passes it to curl on
+  FastNetMon host; see [FastNetMon](detectors/fastnetmon.md). It requires
+  `PREFIXD_API`, which no longer defaults to `http://localhost:8080`: set it in
+  `/etc/default/prefixd` to the controller's ingress, or the script logs an
+  error and posts nothing. It reads its token from `PREFIXD_TOKEN_FILE` (or `PREFIXD_TOKEN`), passes it to curl on
   stdin, and unbans by victim. `PREFIXD_OPERATOR`, `UNBAN_QUERY_RETRIES`,
   `UNBAN_QUERY_DELAY_SECONDS`, `WITHDRAW_ATTEMPTS` and
   `WITHDRAW_DELAY_SECONDS` are no longer read, and `BAN_POST_ATTEMPTS` and

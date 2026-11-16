@@ -945,3 +945,17 @@ fn a_zero_timeout_is_refused_but_a_zero_delay_is_not() {
     assert!(run.ok, "{}", run.log);
     assert_eq!(run.calls.len(), 2);
 }
+
+/// The script has no default endpoint: without `PREFIXD_API` it stops before
+/// any request and says what to set, rather than posting to a guessed one.
+#[test]
+fn a_missing_endpoint_sends_nothing() {
+    let run = run_script("ban", "203.0.113.10", "", &["202"], &[("PREFIXD_API", "")]);
+    assert!(!run.ok);
+    assert!(run.calls.is_empty(), "sent a request without an endpoint");
+    assert!(
+        run.log.contains("ERROR: PREFIXD_API is not set"),
+        "{}",
+        run.log
+    );
+}

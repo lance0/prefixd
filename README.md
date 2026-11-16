@@ -79,21 +79,26 @@ forwarding; see [vendor compatibility](docs/reference/vendors.md) for their scop
 ## Try it locally
 
 With Git and Docker Compose installed, start the controller, dashboard,
-PostgreSQL and rustbgpd from published images. Nothing compiles locally.
+PostgreSQL and rustbgpd from published images. Nothing compiles locally. The
+first command writes a random database password into `.env` (mode 0600);
+Compose refuses to start without one.
 
 ```bash
 git clone https://github.com/lance0/prefixd.git
 cd prefixd
+scripts/compose-bootstrap.sh env
 docker compose --profile rustbgpd up -d --pull always --no-build
 ```
 
-Create the first administrator at the hidden password prompt, then check
-liveness:
+Check liveness, then bootstrap credentials. The script creates the first
+administrator at a hidden password prompt and mints two API tokens into
+`.prefixd/` (mode 0600): an ingest token for FastNetMon and an operator token
+for `prefixdctl`, which reads it on stdin:
 
 ```bash
-docker compose exec prefixd-rustbgpd prefixdctl operators create \
-  --username admin --role admin
 curl http://localhost/v1/health
+scripts/compose-bootstrap.sh rustbgpd
+docker compose exec -T -e PREFIXD_TOKEN_FILE=/dev/stdin prefixd-rustbgpd prefixdctl status < .prefixd/cli.token
 ```
 
 Open `http://localhost` and sign in. nginx serves the dashboard and API on port
@@ -118,9 +123,10 @@ and browser-memory limits.
 
 *Synthetic data; router installation is unobserved.*
 
-For GoBGP, start a fresh deployment with
-`docker compose --profile gobgp up -d --pull always --no-build` and run
-controller commands in `prefixd-gobgp`. Run one profile at a time: switching
+For GoBGP, start a fresh deployment with `scripts/compose-bootstrap.sh env`
+and `docker compose --profile gobgp up -d --pull always --no-build`, run
+`scripts/compose-bootstrap.sh gobgp`, and run controller commands in
+`prefixd-gobgp`. Run one profile at a time: switching
 doesn't move active rules or the database's speaker binding. The
 [quickstart](docs/tutorials/quickstart.md) covers configuration storage,
 building from source and troubleshooting.
