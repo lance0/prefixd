@@ -6281,19 +6281,29 @@ async fn test_creation_audit_manual_event_and_batch_paths() {
         .await;
         let batched = creation_json(app.clone().oneshot(batch).await.unwrap()).await;
         let batched = &batched["results"][0];
+        // Auth mode none is the anonymous Admin: it claims the detector
+        // source and is the actor; the source is in the details (ADR 034 §6).
         let expected = [
-            (&manual["mitigation_id"], "operator", "anonymous", None),
+            (
+                &manual["mitigation_id"],
+                "operator",
+                "anonymous",
+                None,
+                None,
+            ),
             (
                 &event["mitigation_id"],
-                "detector",
-                "creation-test",
+                "operator",
+                "anonymous",
                 Some(&event["event_id"]),
+                Some("creation-test"),
             ),
             (
                 &batched["mitigation_id"],
-                "detector",
-                "batch-test",
+                "operator",
+                "anonymous",
                 Some(&batched["event_id"]),
+                Some("batch-test"),
             ),
         ];
         // Repeat events extend TTL and rejected admissions are not creations.
@@ -6312,7 +6322,7 @@ async fn test_creation_audit_manual_event_and_batch_paths() {
 
         let entries = audit_entries(&app).await;
         assert_eq!(entries.len(), 3, "{mode:?}: {entries:?}");
-        for (mitigation_id, actor_type, actor_id, event_id) in expected {
+        for (mitigation_id, actor_type, actor_id, event_id, source) in expected {
             let entry = entries
                 .iter()
                 .find(|entry| &entry["target_id"] == mitigation_id)
@@ -6323,6 +6333,11 @@ async fn test_creation_audit_manual_event_and_batch_paths() {
             assert_eq!(entry["actor_id"], actor_id);
             let details = &entry["details"];
             assert_eq!(details.get("event_id"), event_id, "{details}");
+            assert_eq!(
+                details.get("source").and_then(|s| s.as_str()),
+                source,
+                "{details}"
+            );
             assert_eq!(details["pop"], "audit-a");
             assert_eq!(
                 details["scope"]["dst_prefix"],

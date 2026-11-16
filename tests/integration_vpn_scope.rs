@@ -140,18 +140,26 @@ async fn automatic_family_defaults_snapshot_and_unban_original_scope_after_resta
     .await
     .unwrap();
     let app = create_test_router(restarted);
+    // The unban names the victim and withdraws each detector rule under the
+    // scope it was announced with, not the new default; the manual global
+    // rules are not the detector's and stay.
+    for (index, victim) in victims.iter().enumerate() {
+        post(
+            &app,
+            "/v1/events",
+            event(&format!("original-{index}"), victim, "unban"),
+            StatusCode::ACCEPTED,
+        )
+        .await;
+    }
+    let remaining = speaker.list_active().await.unwrap();
+    assert_eq!(remaining.len(), 2, "{remaining:?}");
+    assert!(remaining.iter().all(|rule| rule.nlri.scope.is_none()));
     for (index, victim) in victims.iter().enumerate() {
         post(
             &app,
             "/v1/events",
             event(&format!("next-{index}"), victim, "ban"),
-            StatusCode::ACCEPTED,
-        )
-        .await;
-        post(
-            &app,
-            "/v1/events",
-            event(&format!("original-{index}"), victim, "unban"),
             StatusCode::ACCEPTED,
         )
         .await;
