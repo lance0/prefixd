@@ -69,6 +69,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A request with `Authorization: Bearer` is authenticated by its token alone:
   its session cookie is ignored, and an invalid token gets 401 even beside a
   valid session. Clients that sent both now act as the token.
+- Victim addresses are stored in canonical form on every ingest route and in
+  manual mitigations: IPv6 lowercase and zero-compressed. A detector event's
+  IPv4-mapped IPv6 host is its IPv4 address, so such an event now mitigates as
+  an IPv4 victim where it was skipped as unowned before; a mapped detector
+  prefix is refused with 400. Manual input names the family it means:
+  `POST /v1/mitigations`, its preview and a manual blackhole refuse an
+  IPv4-mapped destination with 400 naming the IPv4 form to use, and so does
+  the safelist API. A mapped entry in `safelist.prefixes` or in inventory
+  prefixes and assets, which never protected or owned the IPv4 host, is
+  refused at startup, on reload and by `prefixd --check`; replace it with the
+  IPv4 form before upgrading. Alert payloads,
+  WebSocket messages, audit details and API responses now carry the canonical
+  victim, so SIEM rules, alert routing and scripts that matched a detector's
+  raw spelling must match the canonical form. Migration 023 rewrites the IPv6
+  victim of live mitigations and open signal groups the same way; events,
+  audit rows and ended mitigations keep the spelling the detector sent, and
+  the `victim_ip` filter, IP history and incident reports compare addresses,
+  so they find every spelling. The migration also adds a function and two
+  indexes for those lookups and drops `idx_events_victim_ingested`. Building
+  the events index takes roughly 2 seconds per million events on a warm cache
+  while no controller runs, which counts against leased rules; on a large
+  history, build it concurrently before the window as
+  [event index build time](docs/how-to/upgrading.md#event-index-build-time)
+  describes. 023 adds no
+  rollback constraint of its own; the release is one-way because of
+  migration 022. See
+  [canonical victims](docs/how-to/upgrading.md#canonical-victims).
 - Unknown configuration keys in `prefixd.yaml`, `correlation.yaml` and
   `alerting.yaml` are ignored in this release with a warning, and the next
   release refuses them at startup and on reload. Run `prefixd --check` against
@@ -311,6 +338,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- One victim sent in different spellings is now one victim. FastNetMon sends
+  IPv6 zero-padded (`2001:0db8:0113::0010`) while other detectors send the
+  canonical form, so the two never correlated toward `min_sources`, the
+  `victim_ip` filter missed the mitigation, and the bundled FastNetMon unban
+  could not find a mitigation created in canonical form. Every ingest route,
+  the batch route and every signal adapter now parse the victim and store its
+  canonical form, and the filters canonicalize their input.
 - Opsgenie withdrawn and expired alerts close the mitigation's alert by alias
   through Opsgenie's close API instead of creating a second alert. Lifecycle
   creates and closes trust Opsgenie's HTTP 202, so closing an alert already

@@ -562,8 +562,14 @@ fn validate_ip(ip: &str) -> Result<IpAddr, PrefixdError> {
 }
 
 fn validate_event_destination(value: &str) -> Result<ipnet::IpNet, PrefixdError> {
-    crate::domain::parse_flowspec_destination(value)
-        .map_err(|error| PrefixdError::InvalidPrefix(format!("{value}: {error}")))
+    let destination = crate::domain::parse_flowspec_destination(value)
+        .map_err(|error| PrefixdError::InvalidPrefix(format!("{value}: {error}")))?;
+    // A detector's mapped host is its IPv4 address; a mapped prefix would be
+    // an IPv6 rule that matches no IPv4 traffic, so it is refused.
+    if destination.prefix_len() != destination.max_prefix_len() {
+        crate::domain::refuse_ipv4_mapped(&destination).map_err(PrefixdError::InvalidPrefix)?;
+    }
+    Ok(destination)
 }
 
 /// Detector metadata cannot select a routing scope; other legacy metadata remains accepted.
@@ -1030,6 +1036,7 @@ async fn handle_unban(
     state: Arc<AppState>,
     input: AttackEventInput,
 ) -> Result<(StatusCode, Json<EventResponse>), AppError> {
+    validate_event_destination(&input.victim_ip).map_err(AppError)?;
     validate_confidence(input.confidence).map_err(AppError)?;
     validate_top_src_ports(input.top_src_ports.as_deref()).map_err(AppError)?;
     let ext_id = match &input.event_id {
@@ -2303,7 +2310,7 @@ pub async fn list_events(
         ("status" = Option<String>, Query, description = "Comma-separated exact statuses: active, expired or withdrawn, the statuses this version stores. Legacy pending, escalated and rejected are accepted and match stored rows, but this version produces none of them; rejected is no longer produced since 0.20.0, and rows stored by 0.19 and earlier remain. Every token must be valid and nonempty"),
         ("customer_id" = Option<String>, Query, description = "Filter by customer ID"),
         ("q" = Option<String>, Query, description = "Literal case-insensitive substring of target, vector, customer ID or mitigation UUID; maximum 256 UTF-8 bytes, no NUL. Empty matches every row."),
-        ("victim_ip" = Option<String>, Query, description = "Filter by exact stored host IP or canonical manual CIDR; no containment matching"),
+        ("victim_ip" = Option<String>, Query, description = "Filter by host IP or exact CIDR, compared in canonical form (any IPv6 spelling, IPv4-mapped hosts as IPv4); no containment matching. A value that is not an address is compared as sent"),
         ("pop" = Option<String>, Query, description = "Exact case-sensitive POP; omitted or literal 'all' lists every POP. Empty/NUL identifiers are invalid."),
         ("acknowledged" = Option<bool>, Query, description = "Filter by acknowledged status"),
         ("limit" = Option<u32>, Query, description = "Max results (default 100)"),
@@ -2373,6 +2380,11 @@ pub async fn list_mitigations(
         ))
         .into_response());
     }
+    // Stored victims are canonical. A value that is not an address, such as
+    // `any` for source-only rules, is compared as sent.
+    let victim_filter = query
+        .victim_ip
+        .map(|victim| crate::domain::canonical_destination(&victim).unwrap_or(victim));
     let params = MitigationListParams {
         pop,
         query: query.q,
@@ -2387,7 +2399,7 @@ pub async fn list_mitigations(
         .list_mitigations(
             status_filter.as_deref(),
             query.customer_id.as_deref(),
-            query.victim_ip.as_deref(),
+            victim_filter.as_deref(),
             query.acknowledged,
             &params,
         )
@@ -2728,7 +2740,10 @@ async fn create_blackhole(
     operator_id: String,
     req: CreateMitigationRequest,
 ) -> axum::response::Response {
-    let victim_ip = match validate_ip(&req.victim_ip) {
+    let victim_ip = match validate_ip(&req.victim_ip).and_then(|ip| {
+        crate::domain::refuse_ipv4_mapped(&ip.into()).map_err(PrefixdError::InvalidRequest)?;
+        Ok(ip)
+    }) {
         Ok(ip) => ip,
         Err(error) => return AppError(error).into_response(),
     };

@@ -16,6 +16,84 @@ pub fn is_prefix_destination(value: &str) -> bool {
         .is_ok_and(|destination| destination.prefix_len() != destination.max_prefix_len())
 }
 
+/// The one stored and compared spelling of an event destination (RFC 5952
+/// text): IPv6 lowercase and zero-compressed, an IPv4-mapped IPv6 host as its
+/// IPv4 address, a full-length prefix as its bare address and any other prefix
+/// as its canonical CIDR. Every key on the victim string depends on it.
+pub fn canonical_destination(value: &str) -> Result<String, DestinationError> {
+    let destination = parse_flowspec_destination(value)?;
+    Ok(
+        if destination.prefix_len() == destination.max_prefix_len() {
+            destination.addr().to_canonical().to_string()
+        } else {
+            destination.to_string()
+        },
+    )
+}
+
+/// Manual input names the family it means. An IPv4-mapped IPv6 destination
+/// would be an IPv6 rule that never matches IPv4 traffic, or, converted, an
+/// IPv4 rule the operator did not type, so it is refused with the IPv4 form to
+/// use instead. Detector events are converted ([`canonical_destination`]).
+pub fn refuse_ipv4_mapped(destination: &IpNet) -> Result<(), String> {
+    let IpNet::V6(network) = destination else {
+        return Ok(());
+    };
+    let Some(ipv4) = network.addr().to_ipv4_mapped() else {
+        return Ok(());
+    };
+    let (shown, suggestion) = match network.prefix_len() {
+        128 => (network.addr().to_string(), format!("; use {ipv4}")),
+        len if len >= 96 => (network.to_string(), format!("; use {ipv4}/{}", len - 96)),
+        _ => (network.to_string(), String::new()),
+    };
+    Err(format!(
+        "destination {shown} is an IPv4-mapped IPv6 address{suggestion}"
+    ))
+}
+
+/// The inet values a stored victim of this destination may hold: the
+/// destination itself, and for an IPv4 host its IPv4-mapped spelling, which
+/// earlier releases stored as sent. History lookups compare stored text in
+/// PostgreSQL's inet form against these, so every spelling of one address
+/// matches without rewriting history. A value that is not an address has none.
+pub fn victim_lookup_keys(value: &str) -> Vec<String> {
+    let Ok(destination) = parse_flowspec_destination(value) else {
+        return Vec::new();
+    };
+    let mut keys = Vec::with_capacity(2);
+    match destination {
+        IpNet::V4(network) if network.prefix_len() == 32 => {
+            keys.push(network.addr().to_string());
+            keys.push(network.addr().to_ipv6_mapped().to_string());
+        }
+        IpNet::V6(network) if network.prefix_len() == 128 => {
+            let address = network.addr();
+            keys.push(address.to_canonical().to_string());
+            if let Some(ipv4) = address.to_ipv4_mapped() {
+                keys.push(ipv4.to_ipv6_mapped().to_string());
+            }
+        }
+        other => keys.push(other.to_string()),
+    }
+    keys
+}
+
+/// Whether a stored victim is one of the spellings [`victim_lookup_keys`]
+/// matches for `query`: the in-memory form of the history lookups.
+pub fn same_victim(stored: &str, query: &str) -> bool {
+    if stored == query {
+        return true;
+    }
+    let Ok(stored) = parse_flowspec_destination(stored) else {
+        return false;
+    };
+    victim_lookup_keys(query)
+        .iter()
+        .filter_map(|key| parse_flowspec_destination(key).ok())
+        .any(|key| key == stored)
+}
+
 /// Parse a literal address or an exact network, rejecting implicit widening.
 /// Admission still needs prefix-length, whole-prefix ownership and safelist checks.
 pub fn parse_flowspec_destination(value: &str) -> Result<IpNet, DestinationError> {
@@ -41,6 +119,75 @@ pub fn parse_flowspec_destination(value: &str) -> Result<IpNet, DestinationError
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn canonical_destination_has_one_spelling_per_destination() {
+        for (input, expected) in [
+            ("2001:0db8:0113::0010", "2001:db8:113::10"),
+            (
+                "2001:0DB8:0113:0000:0000:0000:0000:0010",
+                "2001:db8:113::10",
+            ),
+            ("2001:DB8:113::10/128", "2001:db8:113::10"),
+            ("::ffff:203.0.113.10", "203.0.113.10"),
+            ("::FFFF:CB00:710A", "203.0.113.10"),
+            ("203.0.113.10/32", "203.0.113.10"),
+            ("203.0.113.10", "203.0.113.10"),
+            ("2001:0DB8:0001::/48", "2001:db8:1::/48"),
+            ("203.0.112.0/22", "203.0.112.0/22"),
+        ] {
+            assert_eq!(canonical_destination(input).unwrap(), expected, "{input}");
+        }
+        for invalid in ["", "203.0.113.010", "203.0.113.1/24", "example.com"] {
+            assert!(canonical_destination(invalid).is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn every_spelling_of_one_victim_is_the_same_victim() {
+        for (stored, query) in [
+            ("2001:0db8:0113::0010", "2001:db8:113::10"),
+            ("2001:DB8:113::10", "2001:0db8:0113::0010"),
+            ("::ffff:203.0.113.10", "203.0.113.10"),
+            ("203.0.113.10", "::ffff:203.0.113.10"),
+            ("2001:0db8:0001::/48", "2001:db8:1::/48"),
+            ("any", "any"),
+        ] {
+            assert!(same_victim(stored, query), "{stored} {query}");
+        }
+        for (stored, query) in [
+            ("203.0.113.10", "203.0.113.11"),
+            ("203.0.113.0/24", "203.0.113.0"),
+            ("any", "203.0.113.10"),
+        ] {
+            assert!(!same_victim(stored, query), "{stored} {query}");
+        }
+        assert_eq!(
+            victim_lookup_keys("203.0.113.10"),
+            ["203.0.113.10", "::ffff:203.0.113.10"]
+        );
+        assert!(victim_lookup_keys("any").is_empty());
+    }
+
+    #[test]
+    fn manual_input_refuses_ipv4_mapped_destinations_with_the_ipv4_form() {
+        for (input, suggestion) in [
+            ("::ffff:203.0.113.10", "; use 203.0.113.10"),
+            ("::ffff:203.0.113.10/128", "; use 203.0.113.10"),
+            ("::ffff:203.0.113.0/120", "; use 203.0.113.0/24"),
+        ] {
+            let error =
+                refuse_ipv4_mapped(&parse_flowspec_destination(input).unwrap()).unwrap_err();
+            assert!(error.contains("IPv4-mapped"), "{error}");
+            assert!(error.ends_with(suggestion), "{input}: {error}");
+        }
+        for allowed in ["203.0.113.10", "2001:db8::10", "::1", "::c000:201", "::/0"] {
+            assert_eq!(
+                refuse_ipv4_mapped(&parse_flowspec_destination(allowed).unwrap()),
+                Ok(())
+            );
+        }
+    }
 
     #[test]
     fn destination_is_exact_and_canonical_in_both_families() {

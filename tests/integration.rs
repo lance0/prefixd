@@ -10872,7 +10872,6 @@ mod manual_protocol {
         let cases: &[(&str, &str, Option<u8>, &[u16])] = &[
             ("203.0.113.10", "icmp", Some(1), &[]),
             ("2001:db8::10", "icmpv6", Some(58), &[]),
-            ("::ffff:203.0.113.10", "icmpv6", Some(58), &[]),
             (
                 "203.0.113.10",
                 "udp",
@@ -10959,7 +10958,16 @@ mod manual_protocol {
         for (ip, protocol, error) in [
             ("2001:db8::10", "icmp", "address family"),
             ("203.0.113.10", "icmpv6", "address family"),
-            ("::ffff:203.0.113.10", "icmp", "address family"),
+            (
+                "::ffff:203.0.113.10",
+                "icmp",
+                "IPv4-mapped IPv6 address; use 203.0.113.10",
+            ),
+            (
+                "::ffff:203.0.113.10",
+                "icmpv6",
+                "IPv4-mapped IPv6 address; use 203.0.113.10",
+            ),
             ("2001:db8::10", "icmp6", "invalid protocol"),
             ("2001:db8::10", "ICMPv6", "invalid protocol"),
             ("203.0.113.10", "gre", "invalid protocol"),
@@ -16462,12 +16470,12 @@ mod manual_destination_cidr {
     }
 
     #[tokio::test]
-    async fn bare_host_text_retains_legacy_history_and_scope_representation() {
+    async fn bare_host_text_is_stored_in_canonical_form() {
         let (state, repo, _) = state(OperationMode::Enforced, false, Inventory::new(vec![]));
         let (status, body) = post(state.clone(), payload("2001:0DB8:0:0:0:0:0:1")).await;
         assert_eq!(status, StatusCode::CREATED, "{body}");
-        assert_eq!(body["victim_ip"], "2001:0DB8:0:0:0:0:0:1");
-        assert_eq!(body["dst_prefix"], "2001:0DB8:0:0:0:0:0:1/128");
+        assert_eq!(body["victim_ip"], "2001:db8::1");
+        assert_eq!(body["dst_prefix"], "2001:db8::1/128");
         assert_eq!(
             post(state, payload("2001:db8::1/128")).await.0,
             StatusCode::CONFLICT

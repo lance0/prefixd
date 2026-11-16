@@ -179,11 +179,16 @@ pub(super) async fn prepare_manual_flowspec(
                 .map_err(|error| PrefixdError::InvalidRequest(error.to_string()))?
                 .parse::<ipnet::IpNet>()
                 .map_err(|_| PrefixdError::InvalidRequest("invalid source prefix".into()))?
-        } else if req.victim_ip.contains('/') {
-            crate::domain::parse_flowspec_destination(&req.victim_ip)
-                .map_err(|error| PrefixdError::InvalidRequest(error.to_string()))?
         } else {
-            validate_ip(&req.victim_ip).map(ipnet::IpNet::from)?
+            let destination = if req.victim_ip.contains('/') {
+                crate::domain::parse_flowspec_destination(&req.victim_ip)
+                    .map_err(|error| PrefixdError::InvalidRequest(error.to_string()))?
+            } else {
+                validate_ip(&req.victim_ip).map(ipnet::IpNet::from)?
+            };
+            crate::domain::refuse_ipv4_mapped(&destination)
+                .map_err(PrefixdError::InvalidRequest)?;
+            destination
         };
         validate_string_len(&req.reason, "reason", MAX_STRING_LEN)?;
         if req.source_only && req.reason.trim().is_empty() {
@@ -243,8 +248,6 @@ pub(super) async fn prepare_manual_flowspec(
     let is_subnet = destination.prefix_len() != destination.max_prefix_len();
     let target = if req.source_only {
         "any".into()
-    } else if !req.victim_ip.contains('/') {
-        req.victim_ip.clone()
     } else if is_subnet {
         destination.to_string()
     } else {
@@ -292,10 +295,8 @@ pub(super) async fn prepare_manual_flowspec(
                 scope: routing_scope,
                 dst_prefix: if req.source_only {
                     String::new()
-                } else if req.victim_ip.contains('/') {
-                    destination.to_string()
                 } else {
-                    format!("{}/{}", req.victim_ip, destination.prefix_len())
+                    destination.to_string()
                 },
                 src_prefix,
                 protocol,

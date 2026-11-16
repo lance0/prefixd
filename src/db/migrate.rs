@@ -131,6 +131,11 @@ pub const MIGRATIONS: &[(i32, &str, &str)] = &[
         "api_tokens",
         include_str!("../../migrations/022_api_tokens.sql"),
     ),
+    (
+        23,
+        "canonical_live_victims",
+        include_str!("../../migrations/023_canonical_live_victims.sql"),
+    ),
 ];
 
 /// The highest version this binary knows. A database recording a higher

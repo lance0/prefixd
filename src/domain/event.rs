@@ -315,21 +315,10 @@ impl EventOutcomeRecord {
 
 impl AttackEvent {
     pub fn from_input(input: AttackEventInput) -> Self {
-        // A host keeps its historical spelling; an accepted prefix is stored
-        // canonical so identity, read-back and withdrawal agree.
-        let victim_ip = if input.victim_ip.contains('/') {
-            crate::domain::parse_flowspec_destination(&input.victim_ip)
-                .map(|destination| {
-                    if destination.prefix_len() == destination.max_prefix_len() {
-                        destination.addr().to_string()
-                    } else {
-                        destination.to_string()
-                    }
-                })
-                .unwrap_or_else(|_| input.victim_ip.clone())
-        } else {
-            input.victim_ip.clone()
-        };
+        // Every route builds its event here, so every stored victim has one
+        // spelling. An invalid value is kept for the caller's validation to refuse.
+        let victim_ip = crate::domain::canonical_destination(&input.victim_ip)
+            .unwrap_or_else(|_| input.victim_ip.clone());
         let protocol = crate::domain::parse_flowspec_destination(&victim_ip)
             .ok()
             .and_then(|destination| input.vector.to_protocol_for(destination.addr()))

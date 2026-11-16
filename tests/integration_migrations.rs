@@ -647,13 +647,13 @@ fn guide_queries(heading: &str) -> Vec<String> {
 }
 
 /// Put a migrated database back at 021: no token table, no username check and
-/// no row for 022.
+/// no row for 022 or later.
 async fn put_at_021(pool: &PgPool) {
     sqlx::raw_sql(
         "DROP TABLE api_tokens;
          ALTER TABLE operators DROP CONSTRAINT operators_username_format;
          ALTER TABLE operators DROP CONSTRAINT operators_role_known;
-         DELETE FROM schema_migrations WHERE version = 22;",
+         DELETE FROM schema_migrations WHERE version >= 22;",
     )
     .execute(pool)
     .await
@@ -685,12 +685,11 @@ async fn api_token_migration_applies_fresh_and_at_021_and_replays_cleanly() {
         .await
         .expect("migrate a database at 021");
     assert_eq!(token_schema(&setup).await, (true, true));
-    assert_eq!(
+    assert!(
         recorded(&setup)
             .await
-            .last()
-            .map(|(version, name, _)| (*version, name.clone())),
-        Some((22, "api_tokens".to_string()))
+            .iter()
+            .any(|(version, name, _)| (*version, name.as_str()) == (22, "api_tokens"))
     );
     let kept: (i64, i64) = sqlx::query_as(
         "SELECT (SELECT count(*) FROM operators WHERE username = 'ops_admin-1'),
@@ -918,4 +917,271 @@ async fn api_token_migration_refuses_reserved_usernames_and_unknown_roles() {
         .await;
         assert!(inserted.is_err(), "{username} {role}");
     }
+}
+
+const VICTIM_MIGRATION: &str = include_str!("../migrations/023_canonical_live_victims.sql");
+
+async fn victims_with_status(pool: &PgPool, status: &str) -> Vec<String> {
+    sqlx::query_scalar("SELECT victim_ip FROM mitigations WHERE status = $1 ORDER BY victim_ip")
+        .bind(status)
+        .fetch_all(pool)
+        .await
+        .unwrap()
+}
+
+async fn group_victims(pool: &PgPool) -> Vec<(String, String)> {
+    let mut groups: Vec<(String, String)> =
+        sqlx::query_as("SELECT victim_ip, status FROM signal_groups")
+            .fetch_all(pool)
+            .await
+            .unwrap();
+    groups.sort();
+    groups
+}
+
+/// Migration 023 gives live mitigations and open signal groups the IPv6 victim
+/// spelling ingestion now stores, the same text Rust's canonical form produces,
+/// and leaves history, prefixes, embedded-IPv4 hosts and non-addresses alone. It never trips the
+/// open-group unique index, and replaying it changes nothing.
+#[tokio::test]
+async fn canonical_victim_migration_rewrites_only_live_rows_to_the_rust_spelling() {
+    let fixture = start_postgres().await;
+    let setup = connect(&fixture).await;
+    prefixd::db::init_postgres_pool(&fixture.url)
+        .await
+        .expect("migrate a fresh database");
+    sqlx::raw_sql("DELETE FROM schema_migrations WHERE version = 23;")
+        .execute(&setup)
+        .await
+        .unwrap();
+
+    let addresses = [
+        "2001:0db8:0113::0010",
+        "2001:0DB8:0113:0000:0000:0000:0000:0011",
+        "2001:db8:0:1:1:1:1:1",
+        "2001:0:0:1:0:0:0:1",
+        "FE80::",
+        "::1",
+        "2001:0:0:1:0:0:1:1",
+        "::",
+        "2001:db8::192.0.2.1",
+        // IPv4-compatible: PostgreSQL prints `::192.0.2.1`, so it is skipped.
+        "::C000:201",
+        "::ffff:203.0.113.10",
+        "::FFFF:CB00:710B",
+    ];
+    let untouched = ["2001:0db8::/32", "any", ""];
+    for (victim, status) in addresses
+        .iter()
+        .flat_map(|victim| [(*victim, "active"), (*victim, "withdrawn")])
+        .chain(untouched.iter().map(|victim| (*victim, "active")))
+    {
+        sqlx::query(
+            "INSERT INTO mitigations (mitigation_id, scope_hash, pop, victim_ip, vector,
+                 match_json, action_type, status, created_at, updated_at, expires_at,
+                 triggering_event_id, last_event_id)
+             VALUES (gen_random_uuid(), gen_random_uuid()::text, 'pop1', $1, 'udp_flood', '{}',
+                 'discard', $2, now(), now(), now() + interval '1 hour',
+                 gen_random_uuid(), gen_random_uuid())",
+        )
+        .bind(victim)
+        .bind(status)
+        .execute(&setup)
+        .await
+        .unwrap();
+    }
+    // The second pair is one victim in two spellings, one canonical already.
+    for (victim, status) in [
+        ("2001:0db8:0113::0020", "open"),
+        ("2001:0db8:0113::0020", "resolved"),
+        ("2001:db8:113::30", "open"),
+        ("2001:0db8:0113::0030", "open"),
+    ] {
+        sqlx::query(
+            "INSERT INTO signal_groups (group_id, victim_ip, vector, window_expires_at, status)
+             VALUES (gen_random_uuid(), $1, 'udp_flood', now() + interval '5 minutes', $2)",
+        )
+        .bind(victim)
+        .bind(status)
+        .execute(&setup)
+        .await
+        .unwrap();
+    }
+
+    prefixd::db::init_postgres_pool(&fixture.url)
+        .await
+        .expect("apply migration 023");
+
+    // An IPv4-mapped victim keeps the IPv6 rule it was created with, so its
+    // text is left alone rather than split from that rule; an IPv4-compatible
+    // one is left alone because PostgreSQL spells it differently.
+    let mut expected: Vec<String> = addresses
+        .iter()
+        .map(|victim| {
+            match victim.to_ascii_lowercase().starts_with("::ffff:") || *victim == "::C000:201" {
+                true => victim.to_string(),
+                false => prefixd::domain::canonical_destination(victim).unwrap(),
+            }
+        })
+        .chain(untouched.map(String::from))
+        .collect();
+    expected.sort();
+    let mut active = victims_with_status(&setup, "active").await;
+    active.sort();
+    assert_eq!(active, expected);
+    let mut history = victims_with_status(&setup, "withdrawn").await;
+    history.sort();
+    let mut sent = addresses.map(String::from).to_vec();
+    sent.sort();
+    assert_eq!(
+        history, sent,
+        "history keeps the spelling the detector sent"
+    );
+
+    let migrated = group_victims(&setup).await;
+    assert_eq!(
+        migrated,
+        [
+            ("2001:0db8:0113::0020", "resolved"),
+            ("2001:0db8:0113::0030", "open"),
+            ("2001:db8:113::20", "open"),
+            ("2001:db8:113::30", "open"),
+        ]
+        .map(|(victim, status)| (victim.to_string(), status.to_string()))
+    );
+
+    sqlx::raw_sql(VICTIM_MIGRATION)
+        .execute(&setup)
+        .await
+        .expect("replay migration 023");
+    assert_eq!(group_victims(&setup).await, migrated);
+    let mut replayed = victims_with_status(&setup, "active").await;
+    replayed.sort();
+    assert_eq!(replayed, expected);
+}
+
+/// Force every eligible query onto a parallel worker, on whichever setting the
+/// server has: `debug_parallel_query` from PostgreSQL 16, `force_parallel_mode`
+/// before it.
+async fn force_parallel(connection: &mut sqlx::PgConnection) {
+    let version: i32 = sqlx::query_scalar("SELECT current_setting('server_version_num')::int")
+        .fetch_one(&mut *connection)
+        .await
+        .unwrap();
+    let setting = if version >= 160000 {
+        "debug_parallel_query"
+    } else {
+        "force_parallel_mode"
+    };
+    sqlx::raw_sql(&format!(
+        "SET {setting} = on; SET parallel_setup_cost = 0; SET parallel_tuple_cost = 0;"
+    ))
+    .execute(&mut *connection)
+    .await
+    .unwrap();
+}
+
+/// `prefixd_victim_inet` starts a subtransaction for its EXCEPTION block, which
+/// a parallel worker cannot. Marked PARALLEL SAFE, a query the planner runs in
+/// a worker fails with "cannot start subtransactions during a parallel
+/// operation", as a parallel build of the events index on a large history did
+/// and the migration rolled back. PARALLEL RESTRICTED keeps it in the leader.
+/// Negative control: the same query with the function redeclared PARALLEL
+/// SAFE fails.
+#[tokio::test]
+async fn victim_inet_function_runs_under_forced_parallelism() {
+    let fixture = start_postgres().await;
+    let setup = connect(&fixture).await;
+    prefixd::db::init_postgres_pool(&fixture.url)
+        .await
+        .expect("migrate a fresh database");
+    sqlx::raw_sql(
+        "INSERT INTO events (event_id, source, event_timestamp, ingested_at, victim_ip, vector,
+             top_dst_ports_json, action)
+         SELECT gen_random_uuid(), 'parallel', now(), now(), v, 'udp_flood', '[]', 'ban'
+         FROM unnest(ARRAY['2001:0db8::10', '203.0.113.10', 'any']) AS v;",
+    )
+    .execute(&setup)
+    .await
+    .expect("seed events");
+    let query = "SELECT count(*) FROM events
+                 WHERE prefixd_victim_inet(victim_ip) = ANY('{2001:db8::10,203.0.113.10}'::inet[])";
+
+    let mut connection = setup.acquire().await.unwrap();
+    force_parallel(&mut connection).await;
+    let found: i64 = sqlx::query_scalar(query)
+        .fetch_one(&mut *connection)
+        .await
+        .expect("the shipped function runs under forced parallelism");
+    assert_eq!(found, 2);
+    // A parallel build of the same expression index succeeds too.
+    sqlx::raw_sql(
+        "SET max_parallel_maintenance_workers = 4; SET min_parallel_table_scan_size = 0;
+         DROP INDEX idx_events_victim_inet;
+         CREATE INDEX idx_events_victim_inet ON events (prefixd_victim_inet(victim_ip), ingested_at);",
+    )
+    .execute(&mut *connection)
+    .await
+    .expect("rebuild the index with parallel workers allowed");
+
+    // Control: declared PARALLEL SAFE, the same query fails in a worker.
+    sqlx::raw_sql("ALTER FUNCTION prefixd_victim_inet(text) PARALLEL SAFE")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    let error = sqlx::query_scalar::<_, i64>(query)
+        .fetch_one(&mut *connection)
+        .await
+        .expect_err("a PARALLEL SAFE function with an EXCEPTION block fails in a worker");
+    assert!(
+        error.to_string().contains("cannot start subtransactions"),
+        "{error}"
+    );
+}
+
+/// The upgrade guide's pre-window build is the migration's own function and
+/// index, so running it first makes migration 023 a no-op for both, and the
+/// concurrent build can run while the old controller does.
+#[tokio::test]
+async fn the_guides_concurrent_index_build_matches_migration_023() {
+    let [function, index] = &guide_queries("### Event index build time")[1..] else {
+        panic!("the size query, the function and the index");
+    };
+    assert!(VICTIM_MIGRATION.contains(function.as_str()), "{function}");
+    assert!(
+        VICTIM_MIGRATION.contains(&index.replace("CONCURRENTLY ", "")),
+        "{index}"
+    );
+
+    let fixture = start_postgres().await;
+    let setup = connect(&fixture).await;
+    prefixd::db::init_postgres_pool(&fixture.url)
+        .await
+        .expect("migrate a fresh database");
+    // Back at 022, as before the window.
+    sqlx::raw_sql(
+        "DROP INDEX idx_events_victim_inet; DROP INDEX idx_mitigations_victim_inet;
+         DROP FUNCTION prefixd_victim_inet(text);
+         DELETE FROM schema_migrations WHERE version = 23;",
+    )
+    .execute(&setup)
+    .await
+    .unwrap();
+    for (statement, label) in [(function, "function"), (index, "index")] {
+        sqlx::raw_sql(statement)
+            .execute(&setup)
+            .await
+            .unwrap_or_else(|error| panic!("the guide's {label}: {error}"));
+    }
+    let oid = || async {
+        sqlx::query_scalar::<_, i64>("SELECT 'idx_events_victim_inet'::regclass::oid::bigint")
+            .fetch_one(&setup)
+            .await
+            .unwrap()
+    };
+    let before = oid().await;
+    prefixd::db::init_postgres_pool(&fixture.url)
+        .await
+        .expect("apply migration 023 after the guide's build");
+    assert_eq!(oid().await, before, "023 kept the prebuilt index");
 }

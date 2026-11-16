@@ -332,16 +332,14 @@ class FastNetMonLab(Lab):
         )
 
         # FastNetMon hands IPv6 victims to the script with zero-padded groups
-        # ("2001:0db8:0113::0010"). prefixd canonicalizes the rule's
-        # destination but stores victim_ip as sent; the step records that
-        # spelling rather than pinning it.
+        # ("2001:0db8:0113::0010"); prefixd stores the canonical victim.
         ipv6_arg = "2001:0db8:0113::0010"
         ipv6_rule = police(ipv6, 1_000_000)
 
         def ipv6_ban():
             m = self.banned(lambda: self.api_client("ban", ipv6), ipv6_arg, "07-ipv6-api-ban")
             assert m["dst_prefix"] == f"{ipv6}/128", m
-            self.steps[-1]["victim_ip_stored"] = m["victim_ip"]
+            assert m["victim_ip"] == ipv6, m
             state["ipv6"] = m
 
         self.step("ipv6-api-ban", ipv6_ban, [ipv6_rule])

@@ -331,9 +331,11 @@ pub async fn get_ip_history(
 ) -> Result<Json<IpHistoryResponse>, StatusCode> {
     require_auth(&principal)?;
 
-    if ip.parse::<IpAddr>().is_err() {
+    // Stored victims are canonical, so look up every spelling of the address.
+    let Ok(address) = ip.parse::<IpAddr>().map(|address| address.to_canonical()) else {
         return Err(StatusCode::BAD_REQUEST);
-    }
+    };
+    let ip = address.to_string();
 
     let limit = query.limit.unwrap_or(100).min(1000);
 
@@ -349,11 +351,9 @@ pub async fn get_ip_history(
     let mut service_json = None;
     'customer_search: for customer in &inventory.customers {
         for service in &customer.services {
-            if service
-                .assets
-                .iter()
-                .any(|asset| asset.ip.as_str() == ip.as_str())
-            {
+            if service.assets.iter().any(|asset| {
+                asset.ip.parse::<IpAddr>().ok().map(|ip| ip.to_canonical()) == Some(address)
+            }) {
                 customer_json = Some(serde_json::json!({
                     "customer_id": customer.customer_id,
                     "name": customer.name,
@@ -448,10 +448,11 @@ pub async fn generate_incident_report(
             )
         }
         (None, Some(ip_str)) => {
-            if validate_ip(ip_str).is_err() {
-                return StatusCode::BAD_REQUEST.into_response();
+            // History lookups match every spelling; report the canonical one.
+            match validate_ip(ip_str) {
+                Ok(address) => (address.to_canonical().to_string(), None),
+                Err(_) => return StatusCode::BAD_REQUEST.into_response(),
             }
-            (ip_str.clone(), None)
         }
         _ => return StatusCode::BAD_REQUEST.into_response(),
     };

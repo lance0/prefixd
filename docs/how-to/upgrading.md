@@ -255,6 +255,108 @@ client, confirm its last use advances, then revoke the old token. If a token lea
 demoting an operator does not revoke the tokens they created; list them with
 `prefixdctl tokens list --created-by <username>` and revoke or rotate each one.
 
+## Canonical victims
+
+This release stores every victim address in one spelling: IPv6 lowercase and
+zero-compressed (RFC 5952), and, for a detector event, an IPv4-mapped IPv6 host
+as its IPv4 address. Every ingest route and every signal adapter apply it, and
+manual mitigations store the same spelling. Earlier releases stored a host as
+the detector sent it, so FastNetMon's zero-padded IPv6
+(`2001:0db8:0113::0010`) never correlated with, or was found by a search for,
+the canonical `2001:db8:113::10`.
+
+Alert payloads, WebSocket messages, audit details and API responses now carry
+the canonical victim. Update SIEM rules, alert routing and scripts that match
+a detector's raw spelling to match the canonical form.
+
+An IPv4-mapped address names IPv4 traffic in IPv6 form. A detector event's
+mapped host is converted; anything else that would act on the mapped form is
+refused with 400, naming the IPv4 form to use:
+
+- manual FlowSpec creation and preview, and manual blackholes;
+- a detector prefix event, which would be an IPv6 rule matching no IPv4
+  traffic;
+- the safelist API and `safelist.prefixes`, where a mapped entry never
+  protected the IPv4 host, and inventory prefixes and assets, where it never
+  owned one.
+
+Fix any mapped entry in `prefixd.yaml` or `inventory.yaml` before upgrading:
+startup and `prefixd --check` refuse it. A safelist entry already in the
+database keeps working as before; replace it with the IPv4 form.
+
+Migration 023 rewrites the IPv6 victim of live state to the canonical
+spelling: pending, active and escalated mitigations and open signal groups,
+which correlation and the detector unban key on. It changes no rule, scope or
+withdrawal intent and implies no speaker or router change. It adds no rollback
+constraint of its own; the release is one-way because of migration 022.
+
+History keeps the spelling the detector sent: events, audit rows and ended
+mitigations are evidence and are not rewritten. Lookups by address compare
+addresses instead of text, so the `victim_ip` filter, IP history and incident
+reports find every spelling of one address, including an IPv4-mapped one for
+its IPv4 address. Migration 023 adds a `prefixd_victim_inet` function, indexes
+`events` and `mitigations` by it, and drops `idx_events_victim_ingested`,
+which nothing reads any more.
+
+### Event index build time
+
+Migration 023 builds the events index while no controller runs, and that time
+counts against the leases: with `leased_flowspec: true` and the default
+`lease_seconds: 60`, rustbgpd withdraws every leased rule and blackhole once a
+lease lapses. The build takes roughly 2 seconds per million events on a warm
+cache, and several times that on cold or slow storage. Check the size of the
+event history first:
+
+```sql
+SELECT pg_size_pretty(pg_relation_size('events')), count(*) FROM events;
+```
+
+On a large history, build the index before the window while the old
+controller runs. The build does not block ingest. Create the function first,
+exactly as migration 023 does:
+
+```sql
+CREATE OR REPLACE FUNCTION prefixd_victim_inet(victim TEXT) RETURNS inet
+LANGUAGE plpgsql IMMUTABLE STRICT PARALLEL RESTRICTED
+SET search_path = pg_catalog AS $$
+BEGIN
+    RETURN victim::inet;
+EXCEPTION WHEN invalid_text_representation THEN
+    RETURN NULL;
+END
+$$;
+```
+
+Then build the index without blocking writes. `CREATE INDEX CONCURRENTLY`
+cannot run inside a transaction block, so run it on its own:
+
+```sql
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_events_victim_inet
+    ON events (prefixd_victim_inet(victim_ip), ingested_at);
+```
+
+If a concurrent build fails it leaves an invalid index; drop it with
+`DROP INDEX CONCURRENTLY idx_events_victim_inet` and run it again. Migration
+023's `CREATE OR REPLACE FUNCTION` and `CREATE INDEX IF NOT EXISTS` then find
+both in place and do nothing, and the window covers only the live-row rewrite
+and the small mitigations index. An older controller is unaffected by the
+function and index.
+
+### Live rows the migration leaves
+
+Migration 023 leaves three kinds of live row as stored:
+
+- An open signal group whose canonical key already has an open group keeps
+  its old spelling until its window closes, because only one open group may
+  exist per victim and vector.
+- A live mitigation for an IPv4-mapped victim keeps its victim text and the
+  IPv6 rule it was created with, which matches no IPv4 traffic, until it
+  expires or is withdrawn. Lookups by address find it; new detector events for
+  that address create an IPv4 rule.
+- A victim with a deprecated IPv4-compatible address (`::c000:201`) keeps its
+  text, because PostgreSQL prints it `::192.0.2.1` where prefixd prints
+  `::c000:201`.
+
 ## rustbgpd v0.83
 
 prefixd requires rustbgpd v0.83.0 or later, for global and VPN FlowSpec
@@ -1278,7 +1380,9 @@ after 0.27.0 adds migration 021, which only narrows the unique scope index
 `idx_mitigations_active_scope` to `active` and `escalated` rows. It cannot fail
 on existing data, and 0.27.0 runs unchanged against it. The same release adds
 migration 022, the API token table, which rules out a rolling replacement and
-starting 0.27.0 again: see [one-way release](#one-way-release).
+starting 0.27.0 again: see [one-way release](#one-way-release). Migration 023
+rewrites only the victim text of live rows
+([canonical victims](#canonical-victims)).
 For any other release that adds a migration:
 
 - The first upgraded controller to start migrates the database, even in
