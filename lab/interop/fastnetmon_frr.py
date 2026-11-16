@@ -246,8 +246,8 @@ class FastNetMonLab(Lab):
         state = {}
 
         self.wait_frr("00-baseline", [])
-        # ADR 034 section 16: neither a token bound to another source nor an
-        # operator token may ingest as fastnetmon.
+        # ADR 034 section 16: wrong-source, operator and legacy shared
+        # credentials cannot ingest as fastnetmon.
         self.step("token-negative-controls", lambda: self.token_controls(manual), [])
 
         # A manual ban: FastNetMon runs the script with "<ip> other 0 ban" and
@@ -434,8 +434,8 @@ class FastNetMonLab(Lab):
         self.step("detected-timer-unban", timer_unban, [])
 
     def token_controls(self, victim):
-        """An ingest token bound to another source and an operator token are
-        both refused on the ingest route with 403, and nothing is stored."""
+        """Wrong-source/operator tokens get 403 and a legacy bearer gets 401;
+        none may store an event or mitigation."""
         wrong = Path(self.args.wrong_token_file).read_text().strip()
         event = {
             "event_id": "lane-token-control",
@@ -445,7 +445,11 @@ class FastNetMonLab(Lab):
             "vector": "udp_flood",
             "confidence": 0.9,
         }
-        for label, token in (("wrong-source ingest token", wrong), ("operator token", self.token)):
+        for label, token, expected in (
+            ("wrong-source ingest token", wrong, 403),
+            ("operator token", self.token, 403),
+            ("legacy shared bearer", "fixture-legacy-shared-bearer", 401),
+        ):
             request = urllib.request.Request(
                 self.args.api + "/v1/events", data=json.dumps(event).encode(), method="POST"
             )
@@ -457,7 +461,7 @@ class FastNetMonLab(Lab):
             except urllib.error.HTTPError as error:
                 status, text = error.code, error.read().decode()
             self.log(f"POST /v1/events as {label} -> {status}")
-            assert status == 403, (label, status, text)
+            assert status == expected, (label, status, text)
         events = self.api("GET", "/v1/events?source=fastnetmon&limit=100")["events"]
         assert not [e for e in events if e["external_event_id"] == "lane-token-control"], events
         mitigations = self.api("GET", f"/v1/mitigations?victim_ip={victim}")["mitigations"]
@@ -472,7 +476,17 @@ class FastNetMonLab(Lab):
     def versions(self):
         found = super().versions()
         found["fastnetmon_packages"] = subprocess.run(
-            ["docker", "exec", self.args.fastnetmon, "dpkg-query", "-W", "fastnetmon", "curl"],
+            [
+                "docker",
+                "exec",
+                self.args.fastnetmon,
+                "dpkg-query",
+                "-W",
+                "fastnetmon",
+                "curl",
+                "jq",
+            ],
+            check=True,
             text=True,
             capture_output=True,
             timeout=30,

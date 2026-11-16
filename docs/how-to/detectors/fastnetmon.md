@@ -567,6 +567,11 @@ lists what it covers. Two of its findings matter for an install:
   sends vector `unknown`. It creates a mitigation only if a playbook matches
   `unknown`, as the shipped `unknown_conservative` does.
 
+The current lane requires a wrong-source ingest token and an operator token to
+receive `403`, and a legacy shared bearer to receive `401`. All three must leave
+no event, mitigation or FRR rule behind. Each run records the installed
+FastNetMon, `curl` and `jq` package versions.
+
 FastNetMon Advanced is not qualified; the receipt lists the open items and
 the manual procedure.
 
