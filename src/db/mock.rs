@@ -27,6 +27,12 @@ struct MockSpeakerBindings {
 pub struct MockRepository {
     speaker_bindings: Mutex<MockSpeakerBindings>,
     events: Mutex<Vec<AttackEvent>>,
+    /// Each stored unban's replay record: its POP and targets, by event ID.
+    unban_replays: Mutex<HashMap<Uuid, (String, Vec<Uuid>)>>,
+    /// Every unban replay write fails, as an unavailable database does.
+    pub fail_unban_records: std::sync::atomic::AtomicBool,
+    /// Every event outcome write fails.
+    pub fail_event_outcomes: std::sync::atomic::AtomicBool,
     #[cfg(test)]
     mitigation_reads: std::sync::atomic::AtomicUsize,
     #[cfg(test)]
@@ -157,6 +163,9 @@ impl MockRepository {
         Self {
             speaker_bindings: Mutex::new(MockSpeakerBindings::default()),
             events: Mutex::new(Vec::new()),
+            unban_replays: Mutex::new(HashMap::new()),
+            fail_unban_records: Default::default(),
+            fail_event_outcomes: Default::default(),
             #[cfg(test)]
             mitigation_reads: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
@@ -595,11 +604,74 @@ impl RepositoryTrait for MockRepository {
         Ok(())
     }
 
+    async fn insert_unban_event(
+        &self,
+        event: &AttackEvent,
+        pop: &str,
+        targets: &[Uuid],
+    ) -> Result<()> {
+        if self
+            .fail_unban_records
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(PrefixdError::Internal("seeded unban record failure".into()));
+        }
+        let mut events = self.events.lock().unwrap();
+        self.unban_replays
+            .lock()
+            .unwrap()
+            .insert(event.event_id, (pop.to_string(), targets.to_vec()));
+        events.push(event.clone());
+        Ok(())
+    }
+
+    async fn set_unban_targets(&self, event_id: Uuid, targets: &[Uuid]) -> Result<()> {
+        if self
+            .fail_unban_records
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(PrefixdError::Internal("seeded unban record failure".into()));
+        }
+        if let Some((_, stored)) = self.unban_replays.lock().unwrap().get_mut(&event_id) {
+            *stored = targets.to_vec();
+        }
+        Ok(())
+    }
+
+    async fn find_unban_replay(
+        &self,
+        pop: &str,
+        source: &str,
+        external_id: &str,
+    ) -> Result<Option<super::UnbanReplay>> {
+        let events = self.events.lock().unwrap();
+        let replays = self.unban_replays.lock().unwrap();
+        Ok(events.iter().find_map(|e| {
+            let (stored_pop, targets) = replays.get(&e.event_id)?;
+            (e.source == source
+                && e.external_event_id.as_deref() == Some(external_id)
+                && e.action == "unban"
+                && stored_pop == pop)
+                .then(|| super::UnbanReplay {
+                    event_id: e.event_id,
+                    external_event_id: e.external_event_id.clone(),
+                    victim_ip: e.victim_ip.clone(),
+                    target_ids: targets.clone(),
+                })
+        }))
+    }
+
     async fn record_event_outcome(
         &self,
         event_id: Uuid,
         record: &crate::domain::EventOutcomeRecord,
     ) -> Result<()> {
+        if self
+            .fail_event_outcomes
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(PrefixdError::Internal("seeded outcome failure".into()));
+        }
         let mut events = self.events.lock().unwrap();
         if let Some(event) = events.iter_mut().find(|e| e.event_id == event_id)
             && event.outcome.outcome == crate::domain::EventOutcome::NotRecorded
@@ -623,24 +695,6 @@ impl RepositoryTrait for MockRepository {
                 e.source == source
                     && e.external_event_id.as_deref() == Some(external_id)
                     && e.action == "ban"
-            })
-            .cloned())
-    }
-
-    async fn find_unban_event_by_external_id(
-        &self,
-        source: &str,
-        external_id: &str,
-    ) -> Result<Option<AttackEvent>> {
-        Ok(self
-            .events
-            .lock()
-            .unwrap()
-            .iter()
-            .find(|e| {
-                e.source == source
-                    && e.external_event_id.as_deref() == Some(external_id)
-                    && e.action == "unban"
             })
             .cloned())
     }

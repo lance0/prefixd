@@ -8460,7 +8460,10 @@ async fn test_primary_event_rejects_corroborating_source_before_write() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 
     let stored = repo
-        .list_events(&prefixd::db::ListParams::default())
+        .list_events(&prefixd::db::ListParams {
+            limit: 1000,
+            ..Default::default()
+        })
         .await
         .unwrap();
     assert!(stored.is_empty(), "rejected event should not be persisted");
@@ -8561,12 +8564,19 @@ async fn test_batch_rejects_corroborating_ban_per_item() {
     // Unban stays on the withdrawal path; nothing to withdraw here.
     assert_eq!(results[2]["status"], "no_active_mitigation");
 
+    // The unban is stored as its replay record; the ban is not.
     let events = repo
-        .list_events(&prefixd::db::ListParams::default())
+        .list_events(&prefixd::db::ListParams {
+            limit: 1000,
+            ..Default::default()
+        })
         .await
         .unwrap();
+    assert_eq!(events.len(), 2, "{events:?}");
     assert!(
-        events.iter().all(|e| e.source != "router-cpu"),
+        events
+            .iter()
+            .all(|e| e.source != "router-cpu" || e.action == "unban"),
         "corroborating ban must not be persisted"
     );
     assert_eq!(mitigation_count(&repo).await, 1);
@@ -8594,11 +8604,19 @@ async fn test_alertmanager_rejects_corroborating_source_ban() {
     assert_eq!(json["failed"], 0, "{json}");
     assert_eq!(json["results"][0]["status"], "no_active_mitigation");
 
+    // The resolution is stored as its replay record; the ban is not.
     let events = repo
-        .list_events(&prefixd::db::ListParams::default())
+        .list_events(&prefixd::db::ListParams {
+            limit: 1000,
+            ..Default::default()
+        })
         .await
         .unwrap();
-    assert!(events.is_empty(), "corroborating ban must not be persisted");
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(
+        events[0].action, "unban",
+        "corroborating ban must not be persisted"
+    );
     assert_eq!(mitigation_count(&repo).await, 0);
     assert_eq!(announcer.announced_count().await, 0);
 }

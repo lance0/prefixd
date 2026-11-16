@@ -188,13 +188,16 @@ pub enum EventOutcome {
     Failed,
     /// A detector unban withdrew the ban's mitigations.
     Withdrawn,
+    /// A detector unban found no live mitigation of its source for the
+    /// victim, so it withdrew nothing.
+    NoActiveMitigation,
     /// Stored before outcomes were recorded, or processing never finished.
     #[default]
     NotRecorded,
 }
 
 impl EventOutcome {
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::Mitigated,
         Self::Extended,
         Self::DryRun,
@@ -206,6 +209,7 @@ impl EventOutcome {
         Self::Conflict,
         Self::Failed,
         Self::Withdrawn,
+        Self::NoActiveMitigation,
         Self::NotRecorded,
     ];
 
@@ -222,6 +226,7 @@ impl EventOutcome {
             Self::Conflict => "conflict",
             Self::Failed => "failed",
             Self::Withdrawn => "withdrawn",
+            Self::NoActiveMitigation => "no_active_mitigation",
             Self::NotRecorded => "not_recorded",
         }
     }

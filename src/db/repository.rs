@@ -5,7 +5,9 @@ use sqlx::{FromRow, PgConnection, PgPool};
 use std::time::Duration;
 use uuid::Uuid;
 
-use super::{ListParams, MitigationListParams, NotificationPreferences, RepositoryTrait};
+use super::{
+    ListParams, MitigationListParams, NotificationPreferences, RepositoryTrait, UnbanReplay,
+};
 use crate::config::{BlackholeConfig, QuotasConfig};
 use crate::correlation::engine::{
     CorroboratingSignal, EventDimensions, SignalGroup, SignalGroupEvent, SignalGroupFilter,
@@ -149,6 +151,43 @@ pub struct Repository {
 }
 
 impl Repository {
+    /// One insert, so an unban's replay record exists exactly when its event does.
+    async fn insert_event_row(
+        &self,
+        event: &AttackEvent,
+        unban: Option<(&str, &[Uuid])>,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO events (
+                event_id, external_event_id, source, event_timestamp, ingested_at,
+                victim_ip, vector, protocol, bps, pps, top_dst_ports_json, top_src_ports_json, confidence,
+                action, raw_details, unban_pop, unban_target_ids
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+            "#,
+        )
+        .bind(event.event_id)
+        .bind(&event.external_event_id)
+        .bind(&event.source)
+        .bind(event.event_timestamp)
+        .bind(event.ingested_at)
+        .bind(&event.victim_ip)
+        .bind(&event.vector)
+        .bind(event.protocol)
+        .bind(event.bps)
+        .bind(event.pps)
+        .bind(&event.top_dst_ports_json)
+        .bind(&event.top_src_ports_json)
+        .bind(event.confidence)
+        .bind(&event.action)
+        .bind(&event.raw_details)
+        .bind(unban.map(|(pop, _)| pop))
+        .bind(unban.map(|(_, targets)| targets))
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     pub fn new(pool: PgPool) -> Self {
         Self {
             pool,
@@ -521,33 +560,58 @@ impl RepositoryTrait for Repository {
     }
 
     async fn insert_event(&self, event: &AttackEvent) -> Result<()> {
+        self.insert_event_row(event, None).await
+    }
+
+    async fn insert_unban_event(
+        &self,
+        event: &AttackEvent,
+        pop: &str,
+        targets: &[Uuid],
+    ) -> Result<()> {
+        self.insert_event_row(event, Some((pop, targets))).await
+    }
+
+    async fn set_unban_targets(&self, event_id: Uuid, targets: &[Uuid]) -> Result<()> {
         sqlx::query(
-            r#"
-            INSERT INTO events (
-                event_id, external_event_id, source, event_timestamp, ingested_at,
-                victim_ip, vector, protocol, bps, pps, top_dst_ports_json, top_src_ports_json, confidence,
-                action, raw_details
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
-            "#,
+            "UPDATE events SET unban_target_ids = $2 WHERE event_id = $1 AND unban_pop IS NOT NULL",
         )
-        .bind(event.event_id)
-        .bind(&event.external_event_id)
-        .bind(&event.source)
-        .bind(event.event_timestamp)
-        .bind(event.ingested_at)
-        .bind(&event.victim_ip)
-        .bind(&event.vector)
-        .bind(event.protocol)
-        .bind(event.bps)
-        .bind(event.pps)
-        .bind(&event.top_dst_ports_json)
-        .bind(&event.top_src_ports_json)
-        .bind(event.confidence)
-        .bind(&event.action)
-        .bind(&event.raw_details)
+        .bind(event_id)
+        .bind(targets)
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    async fn find_unban_replay(
+        &self,
+        pop: &str,
+        source: &str,
+        external_id: &str,
+    ) -> Result<Option<UnbanReplay>> {
+        let row: Option<(Uuid, Option<String>, String, Vec<Uuid>)> = sqlx::query_as(
+            r#"
+            SELECT event_id, external_event_id, victim_ip, unban_target_ids
+            FROM events
+            WHERE source = $2 AND external_event_id = $3 AND action = 'unban'
+              AND unban_pop = $1 AND unban_target_ids IS NOT NULL
+            ORDER BY ingested_at, event_id
+            LIMIT 1
+            "#,
+        )
+        .bind(pop)
+        .bind(source)
+        .bind(external_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(
+            |(event_id, external_event_id, victim_ip, target_ids)| UnbanReplay {
+                event_id,
+                external_event_id,
+                victim_ip,
+                target_ids,
+            },
+        ))
     }
 
     async fn find_ban_event_by_external_id(
@@ -560,7 +624,7 @@ impl RepositoryTrait for Repository {
             SELECT event_id, external_event_id, source, event_timestamp, ingested_at,
                    victim_ip, vector, protocol, bps, pps, top_dst_ports_json, top_src_ports_json, confidence,
                    action, raw_details, outcome, outcome_reason, outcome_mitigation_ids
-            FROM events 
+            FROM events
             WHERE source = $1 AND external_event_id = $2 AND action = 'ban'
             ORDER BY ingested_at DESC
             LIMIT 1
@@ -571,28 +635,6 @@ impl RepositoryTrait for Repository {
         .fetch_optional(&self.pool)
         .await?;
         Ok(event)
-    }
-
-    async fn find_unban_event_by_external_id(
-        &self,
-        source: &str,
-        external_id: &str,
-    ) -> Result<Option<AttackEvent>> {
-        Ok(sqlx::query_as::<_, AttackEvent>(
-            r#"
-            SELECT event_id, external_event_id, source, event_timestamp, ingested_at,
-                   victim_ip, vector, protocol, bps, pps, top_dst_ports_json, top_src_ports_json, confidence,
-                   action, raw_details, outcome, outcome_reason, outcome_mitigation_ids
-            FROM events
-            WHERE source = $1 AND external_event_id = $2 AND action = 'unban'
-            ORDER BY ingested_at, event_id
-            LIMIT 1
-            "#,
-        )
-        .bind(source)
-        .bind(external_id)
-        .fetch_optional(&self.pool)
-        .await?)
     }
 
     async fn list_events_filtered(

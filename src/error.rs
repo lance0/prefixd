@@ -85,6 +85,11 @@ pub enum PrefixdError {
     #[error("withdrawal incomplete; the pending intent is retained and reconciled: {0}")]
     WithdrawalIncomplete(String),
 
+    /// A detector unban's replay record could not be written, so the unban
+    /// deleted nothing; any intent it recorded stays pending. A resend is safe.
+    #[error("detector unban could not be stored; resend it")]
+    UnbanNotStored,
+
     /// The API token store could not be read. Distinct from 401 so a storage
     /// outage does not look like a credential problem.
     #[error("credential store unavailable; retry")]
@@ -268,7 +273,8 @@ impl PrefixdError {
             Self::ShuttingDown
             | Self::Standby
             | Self::CredentialStoreUnavailable
-            | Self::WithdrawalIncomplete(_) => StatusCode::SERVICE_UNAVAILABLE,
+            | Self::WithdrawalIncomplete(_)
+            | Self::UnbanNotStored => StatusCode::SERVICE_UNAVAILABLE,
             Self::DuplicateEvent { .. }
             | Self::Conflict(_)
             | Self::InjectionOwnerMismatch { .. } => StatusCode::CONFLICT,

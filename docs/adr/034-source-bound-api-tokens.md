@@ -1229,13 +1229,15 @@ unban bullet in section 4 and the state file and lock in section 12.
   FastNetMon adapter and the bundled script send `unknown`, because FastNetMon
   bans and unbans a host and an unban's counters can name another vector.
 - The unban's `event_id` does not select mitigations. It does identify the
-  unban: a resend or replay of an event ID the source already sent reuses
-  that unban's targets and never selects again, so a resend after a 503
-  completes the original set and a replayed signed unban cannot withdraw a
-  later ban's mitigation. Every HMAC adapter's unban needs an event ID.
-- The unban is stored as an event even when nothing matched, and the
-  withdrawal is audited as the credential with the reason
-  `Detector unban: <source>`.
+  unban on its POP: a resend or replay of an event ID the source already sent
+  there reuses that unban's targets and never selects again, so a resend
+  after a 503 or a dropped request completes the original set and a replayed
+  signed unban cannot withdraw a later ban's mitigation. A resend that names
+  another victim is a 409. An HMAC adapter that maps `fields.action` must map
+  `fields.source_id`, and an unban without an ID is refused as its item.
+- The unban is stored as an event even when nothing matched, with the
+  outcome `no_active_mitigation`, and the withdrawal is audited as the
+  credential with the reason `Detector unban: <source>`.
 - A POP-bound token cannot unban another POP's mitigation: it is refused on
   that POP's controller, and a controller's unban considers only its own POP.
 
@@ -1267,11 +1269,14 @@ host-only token never reaches hostgroup ingestion.
   the FastNetMon script needs because its unban carries no attack details.
 - With correlation, the triggering event is whichever event met the group's
   threshold, so only that event's source withdraws the mitigation by unban.
-- Withdrawal intent is recorded for every selected mitigation before any
-  delete, and a failed or ambiguous delete answers 503 with the intent
-  pending, so one failure cannot strand the rest and a resend is idempotent.
-  The request keeps the bound source (migration 024) for the completion audit
-  and the `detector_unban` metric, whoever completes it.
+- The unban is stored with its POP and selected targets (migration 025)
+  before any withdrawal intent, and a failed write answers 503 having touched
+  nothing. Intent is then recorded for every target before any delete, the
+  stored set keeps only the targets whose intent was recorded, and the first
+  failed delete of any kind stops the unban with a 503 and the rest pending,
+  so one failure cannot strand the rest and a resend is idempotent. The
+  request keeps the bound source (migration 024) for the completion audit and
+  the `detector_unban` metric, whoever completes it.
 - An adapter named in an allowlist refuses a ban that has no event ID, since
   only the ID makes a replayed signed ban a duplicate.
 - Bans sent before the upgrade pair with the new unban, because the mitigation

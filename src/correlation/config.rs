@@ -400,6 +400,11 @@ impl CorrelationConfig {
                             "webhook_adapter '{name}': an HMAC adapter named in blackhole.detector_sources or guardrails.detector_prefix_sources must map fields.source_id, so a replayed signed ban is a duplicate"
                         ));
                     }
+                    if adapter.fields.action.is_some() && adapter.fields.source_id.is_none() {
+                        errors.push(format!(
+                            "webhook_adapter '{name}': an HMAC adapter that maps fields.action must map fields.source_id, so a replayed signed unban reuses its original targets"
+                        ));
+                    }
                     if !secret_env.starts_with(WEBHOOK_SECRET_ENV_PREFIX) {
                         errors.push(format!(
                             "webhook_adapter '{name}': auth.secret_env must name a variable starting with {WEBHOOK_SECRET_ENV_PREFIX}"

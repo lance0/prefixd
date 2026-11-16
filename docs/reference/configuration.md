@@ -841,8 +841,10 @@ auth mode and both allowlists from `prefixd.yaml`: `auth.type: none` outside
 `none` mode; an HMAC adapter named in `blackhole.detector_sources` or
 `guardrails.detector_prefix_sources` without `fields.source_id`, since HMAC
 carries no nonce and the event ID is what makes a replayed signed ban a
-duplicate; and a `secret_env` outside the namespace, unset or shorter than 32
-bytes. The error names the variable, never its value.
+duplicate; an HMAC adapter that maps `fields.action` without
+`fields.source_id`, since the event ID is what makes a replayed signed unban
+reuse its original targets; and a `secret_env` outside the namespace, unset or
+shorter than 32 bytes. The error names the variable, never its value.
 
 **JSONPath quick reference** (RFC 9535 via `serde_json_path`):
 

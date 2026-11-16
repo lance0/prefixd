@@ -36,10 +36,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   selects them, and the statuses `not_found` and `ignored_no_event_id` are
   gone. An unban with a vector other than `unknown` withdraws only that
   vector's mitigations, with UDP floods and amplification as one family;
-  FastNetMon unbans send `unknown`. A resend of an unban event ID reuses that
-  unban's targets, and every HMAC adapter's unban needs an event ID. With correlation, only the source whose event met the
-  threshold withdraws the mitigation by unban. A failed or ambiguous delete
-  answers `503` with every intent pending; Alertmanager and webhook adapters
+  FastNetMon unbans send `unknown`. The unban is stored with its POP and
+  targets first and answers `503`, touching nothing, if that write fails. A
+  resend of an unban event ID on the same POP reuses those targets, and one
+  naming another victim gets `409`. With correlation, only the source whose
+  event met the threshold withdraws the mitigation by unban. The first failed
+  delete of any kind stops the unban with `503` and the rest of its intents
+  pending. An unban with nothing to withdraw records the new event outcome
+  `no_active_mitigation`; event filters that counted such unbans as
+  `withdrawn` must add it; Alertmanager and webhook adapters
   report `withdrawn` or `no_active_mitigation` per unban and answer `503` when
   one failed, and `withdrawn_noop` is gone.
 - **Detector audit actors name the credential.** Detector-created mitigations,
@@ -52,13 +57,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `PUT /v1/config/correlation`: `auth.type: none` is refused unless
   `http.auth.mode` is `none`; an HMAC adapter named in
   `blackhole.detector_sources` or `guardrails.detector_prefix_sources` must map
-  `fields.source_id`; and an HMAC `auth.secret_env` must name a variable in
+  `fields.source_id`; an HMAC adapter that maps `fields.action` must map
+  `fields.source_id`, so a replayed signed unban reuses its original targets;
+  and an HMAC `auth.secret_env` must name a variable in
   the `PREFIXD_WEBHOOK_` namespace whose value is at least 32 bytes. Rename
   existing secret variables, for example `RADWARE_WEBHOOK_SECRET` to
   `PREFIXD_WEBHOOK_RADWARE_SECRET`. Adapter names must match
   `^[a-z0-9][a-z0-9-]{0,63}$`, and a disabled adapter skips these refusals
   until enabled. An adapter named in either allowlist answers `400` to a
-  payload in which any ban has no event ID. `prefixd --check` reads adapter
+  payload in which any ban has no event ID, and an HMAC adapter refuses an
+  unban with no event ID as that item's `error`. `prefixd --check` reads adapter
   secrets from its environment, so run it with the controller's.
   `blackhole.detector_sources` and
   `guardrails.detector_prefix_sources` entries must match
@@ -67,6 +75,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `withdrawal_requests` that keeps a detector unban's source for its
   completion audit and metric. It rewrites no row and adds no rollback
   constraint of its own.
+- This release adds migration 025, nullable `unban_pop` and
+  `unban_target_ids` columns on `events` that hold a detector unban's replay
+  record. It rewrites no row and adds no rollback constraint of its own.
 - **Reinstall the FastNetMon script** on every FastNetMon host. It posts ban
   and unban events with an ingest token bound to `fastnetmon`, read from
   `PREFIXD_TOKEN_FILE` or `PREFIXD_TOKEN` and passed to curl on stdin. It no

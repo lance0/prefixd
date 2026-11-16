@@ -742,6 +742,23 @@ async fn detector_unban_never_crosses_pops() {
         repo.get_mitigation(on_b).await.unwrap().unwrap().status,
         MitigationStatus::Active
     );
+
+    // Replay identity includes the POP: the same event ID on POP B is its own
+    // unban there, not a resend of POP A's empty one. Negative control: a
+    // lookup without the POP answers POP A's `no_active_mitigation`.
+    let (status, body) = send(
+        &pop_b.app,
+        "/v1/events",
+        Some(("authorization", &bearer(&b_secret))),
+        &unban("fastnetmon", victim, "a-unban"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    assert_eq!(body["status"], "withdrawn", "{body}");
+    assert_eq!(
+        repo.get_mitigation(on_b).await.unwrap().unwrap().status,
+        MitigationStatus::Withdrawn
+    );
     let _ = (&pop_a.state, &pop_b.state);
 }
 
@@ -972,6 +989,13 @@ fn refused_shapes() -> Vec<(&'static str, String, AuthMode, Vec<String>, &'stati
             "name must match",
         ),
         (
+            "hmac mapping action without source_id",
+            adapter_yaml(&hmac("PREFIXD_WEBHOOK_GOOD")) + "      action: \"$.action\"\n",
+            AuthMode::Credentials,
+            vec![],
+            "maps fields.action must map fields.source_id",
+        ),
+        (
             "unset secret",
             adapter_yaml(&hmac("PREFIXD_WEBHOOK_UNSET")),
             AuthMode::Credentials,
@@ -1082,6 +1106,11 @@ async fn correlation_refusals_hold_at_startup_reload_and_the_editor() {
         ),
         (adapter_yaml(ok_hmac), AuthMode::Credentials, vec![]),
         (
+            adapter_yaml(ok_hmac) + "      action: \"$.action\"\n      source_id: \"$.id\"\n",
+            AuthMode::Credentials,
+            vec![],
+        ),
+        (
             adapter_yaml("    auth:\n      type: bearer\n"),
             AuthMode::Credentials,
             vec!["radware".to_string()],
@@ -1184,11 +1213,34 @@ async fn the_prefix_allowlist_admits_only_its_bound_source_and_an_admin() {
     }
 }
 
-/// A speaker that refuses deletes of TCP rules while `failing` is set: a
-/// definite failure, so the unban carries on with the other deletes.
+/// A speaker whose TCP deletes fail with `failure` while it is set.
 struct FailingTcpWithdrawals {
     inner: MockAnnouncer,
-    failing: std::sync::atomic::AtomicBool,
+    failure: std::sync::Mutex<Option<fn() -> prefixd::error::PrefixdError>>,
+    deletes: std::sync::atomic::AtomicUsize,
+}
+
+/// A definite refusal: nothing changed.
+fn refused_delete() -> prefixd::error::PrefixdError {
+    prefixd::error::PrefixdError::InjectionOwnerMismatch {
+        reason: prefixd::error::InjectionRefusalReason::OwnerMismatch,
+        message: "seeded delete refusal".into(),
+    }
+}
+
+/// What the rustbgpd adapter reports for a delete that timed out.
+fn rustbgpd_timeout() -> prefixd::error::PrefixdError {
+    prefixd::error::PrefixdError::Internal(
+        "rustbgpd: DeleteFlowSpec RPC failed: DeadlineExceeded".into(),
+    )
+}
+
+/// What the GoBGP adapter reports for a delete that timed out.
+fn gobgp_timeout() -> prefixd::error::PrefixdError {
+    prefixd::error::PrefixdError::BgpSessionError {
+        peer: "gobgp".into(),
+        error: "DeletePath RPC deadline exceeded".into(),
+    }
 }
 
 impl prefixd::bgp::FlowSpecAnnouncer for FailingTcpWithdrawals {
@@ -1209,11 +1261,13 @@ impl prefixd::bgp::FlowSpecWriter for FailingTcpWithdrawals {
         self.inner.announce(rule).await
     }
     async fn withdraw(&self, rule: &prefixd::domain::FlowSpecRule) -> prefixd::error::Result<()> {
-        if rule.nlri.protocol == Some(6) && self.failing.load(std::sync::atomic::Ordering::SeqCst) {
-            return Err(prefixd::error::PrefixdError::InjectionOwnerMismatch {
-                reason: prefixd::error::InjectionRefusalReason::OwnerMismatch,
-                message: "seeded delete refusal".into(),
-            });
+        self.deletes
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let failure = *self.failure.lock().unwrap();
+        if rule.nlri.protocol == Some(6)
+            && let Some(failure) = failure
+        {
+            return Err(failure());
         }
         self.inner.withdraw(rule).await
     }
@@ -1234,14 +1288,15 @@ impl prefixd::bgp::PeerObserver for FailingTcpWithdrawals {
 }
 
 /// An enforced controller in credentials mode on the failing speaker.
-async fn failing_fixture() -> (Fixture, Arc<FailingTcpWithdrawals>) {
+async fn failing_fixture(pop: &str) -> (Fixture, Arc<FailingTcpWithdrawals>) {
     let repo = Arc::new(MockRepository::new());
     let speaker = Arc::new(FailingTcpWithdrawals {
         inner: MockAnnouncer::new(),
-        failing: std::sync::atomic::AtomicBool::new(true),
+        failure: std::sync::Mutex::new(Some(refused_delete)),
+        deletes: Default::default(),
     });
     // Its own POP keeps its metric labels apart from concurrent tests.
-    let mut settings = settings(AuthMode::Credentials, "failing-pop", 1);
+    let mut settings = settings(AuthMode::Credentials, pop, 1);
     settings.mode = prefixd::config::OperationMode::Enforced;
     let inventory = Inventory::new(vec![Customer {
         customer_id: "bound".into(),
@@ -1347,100 +1402,131 @@ async fn an_unban_vector_narrows_it_and_unknown_keeps_the_victim() {
     assert_eq!(withdrawn, wanted, "{body}");
 }
 
-/// One failed delete does not stop the others. Every selected mitigation's
-/// withdrawal intent is recorded first, each delete is attempted, and a
-/// failed or ambiguous one answers 503 with its intent pending. A retry
-/// reuses that intent and never creates a second request. Reconciliation
-/// completes it, and both the immediate and the reconciled withdrawal are
-/// audited with the bound source and counted as `detector_unban`.
-/// Negative control: stopping at the first failure leaves the second rule
-/// unwithdrawn.
+/// A failed delete of any kind stops the unban: a definite refusal, a
+/// rustbgpd timeout and a GoBGP timeout, as the adapters report them. Every
+/// intent is recorded first, so the rule after the failure stays pending
+/// rather than unrecorded, and reconciliation completes both with the
+/// unban's source and actor. Negative control: carrying on after anything but
+/// `BgpWithdrawalFailed` withdraws the UDP rule after each failure.
 #[tokio::test]
-async fn a_failed_delete_leaves_its_intent_pending_and_the_rest_withdrawn() {
-    let (f, speaker) = failing_fixture().await;
+async fn a_failed_delete_of_any_kind_stops_the_unban_and_leaves_the_rest_pending() {
+    let (f, speaker) = failing_fixture("failing-pop").await;
     let fnm = bearer(
         &f.repo
             .mint_token_for_test("fnm", TokenScope::Ingest, Some("fastnetmon")),
     );
     let auth = Some(("authorization", fnm.as_str()));
-    let victim = "203.0.113.71";
-    let mut ids = Vec::new();
-    // The TCP rule first, so a loop that stopped at a failure would never
-    // reach the UDP rule.
-    for (id, vector) in [("s1", "syn_flood"), ("u1", "udp_flood")] {
-        let (status, body) = send(
-            &f.app,
-            "/v1/events",
-            auth,
-            &with_vector(event("fastnetmon", victim, id), vector),
-        )
-        .await;
-        assert_eq!(status, StatusCode::ACCEPTED, "{body}");
-        ids.push(
-            body["mitigation_id"]
-                .as_str()
-                .unwrap()
-                .parse::<uuid::Uuid>()
-                .unwrap(),
-        );
-    }
-    let (syn, udp) = (ids[0], ids[1]);
-    let withdrawn_metric = |reason: &str| {
+    let withdrawn_metric = || {
         prefixd::observability::metrics::MITIGATIONS_WITHDRAWN
-            .with_label_values(&["police", "failing-pop", reason])
+            .with_label_values(&["police", "failing-pop", "detector_unban"])
             .get()
     };
-    let before = withdrawn_metric("detector_unban");
-
-    for attempt in 0..2 {
+    let before = withdrawn_metric();
+    let mut targets = Vec::new();
+    for (shape, failure) in [
+        (
+            "refused",
+            refused_delete as fn() -> prefixd::error::PrefixdError,
+        ),
+        ("rustbgpd", rustbgpd_timeout),
+        ("gobgp", gobgp_timeout),
+    ] {
+        *speaker.failure.lock().unwrap() = Some(failure);
+        let victim = match shape {
+            "refused" => "203.0.113.71",
+            "rustbgpd" => "203.0.113.74",
+            _ => "203.0.113.75",
+        };
+        // The TCP rule first, so the UDP rule comes after the failure.
+        let mut ids = Vec::new();
+        for (id, vector) in [("s1", "syn_flood"), ("u1", "udp_flood")] {
+            let (status, body) = send(
+                &f.app,
+                "/v1/events",
+                auth,
+                &with_vector(
+                    event("fastnetmon", victim, &format!("{shape}-{id}")),
+                    vector,
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::ACCEPTED, "{shape}: {body}");
+            ids.push(
+                body["mitigation_id"]
+                    .as_str()
+                    .unwrap()
+                    .parse::<uuid::Uuid>()
+                    .unwrap(),
+            );
+        }
+        let deletes = speaker.deletes.load(std::sync::atomic::Ordering::SeqCst);
         let (status, body) = send(
             &f.app,
             "/v1/events",
             auth,
             // The script's unban: no vector, the whole victim.
             &with_vector(
-                unban("fastnetmon", victim, &format!("unban-{attempt}")),
+                unban("fastnetmon", victim, &format!("{shape}-unban")),
                 "unknown",
             ),
         )
         .await;
-        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{shape}: {body}");
         assert!(
             body["error"]
                 .as_str()
                 .unwrap()
-                .contains("withdrawal incomplete")
+                .contains("withdrawal incomplete"),
+            "{shape}: {body}"
         );
-        let pending = f.repo.pending_withdrawals(None).await.unwrap();
-        assert_eq!(pending.len(), 1, "attempt {attempt}: {pending:?}");
-        assert_eq!(pending[0].mitigation_id, syn);
-        assert_eq!(pending[0].detector_source.as_deref(), Some("fastnetmon"));
+        assert_eq!(
+            speaker.deletes.load(std::sync::atomic::Ordering::SeqCst),
+            deletes + 1,
+            "{shape}: the unban stopped at the failed delete"
+        );
+        let mut pending: Vec<_> = f
+            .repo
+            .pending_withdrawals(None)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|request| ids.contains(&request.mitigation_id))
+            .map(|request| {
+                assert_eq!(request.detector_source.as_deref(), Some("fastnetmon"));
+                request.mitigation_id
+            })
+            .collect();
+        pending.sort();
+        let mut wanted = ids.clone();
+        wanted.sort();
+        assert_eq!(pending, wanted, "{shape}: both intents stay pending");
+        for id in &ids {
+            assert_eq!(
+                f.repo.get_mitigation(*id).await.unwrap().unwrap().status,
+                MitigationStatus::Active,
+                "{shape}"
+            );
+        }
+        targets.extend(ids);
     }
-    let status_of = |id| {
-        let repo = f.repo.clone();
-        async move { repo.get_mitigation(id).await.unwrap().unwrap().status }
-    };
-    assert_eq!(status_of(udp).await, MitigationStatus::Withdrawn);
-    assert_eq!(status_of(syn).await, MitigationStatus::Active);
-    assert_eq!(withdrawn_metric("detector_unban"), before + 1.0);
-    let immediate = audit_for(&f.repo, "withdraw", udp).await;
-    assert_eq!(immediate.len(), 1);
-    assert_eq!(immediate[0]["details"]["source"], "fastnetmon");
-    assert_eq!(immediate[0]["actor_id"], "token:fnm");
+    assert_eq!(withdrawn_metric(), before);
 
-    speaker
-        .failing
-        .store(false, std::sync::atomic::Ordering::SeqCst);
+    *speaker.failure.lock().unwrap() = None;
     let reconciler =
         prefixd::scheduler::ReconciliationLoop::new(f.repo.clone(), speaker.clone(), 30, false)
             .with_app_state(f.state.clone());
     reconciler.reconcile().await.unwrap();
-    assert_eq!(status_of(syn).await, MitigationStatus::Withdrawn);
     assert!(f.repo.pending_withdrawals(None).await.unwrap().is_empty());
-    let reconciled = audit_for(&f.repo, "withdraw", syn).await;
-    assert_eq!(reconciled.len(), 1, "{reconciled:?}");
-    assert_eq!(reconciled[0]["details"]["source"], "fastnetmon");
-    assert_eq!(reconciled[0]["actor_id"], "token:fnm");
+    for id in targets {
+        assert_eq!(
+            f.repo.get_mitigation(id).await.unwrap().unwrap().status,
+            MitigationStatus::Withdrawn
+        );
+        let reconciled = audit_for(&f.repo, "withdraw", id).await;
+        assert_eq!(reconciled.len(), 1, "{reconciled:?}");
+        assert_eq!(reconciled[0]["details"]["source"], "fastnetmon");
+        assert_eq!(reconciled[0]["actor_id"], "token:fnm");
+    }
 }
 
 /// An adapter unban reports what it did: `no_active_mitigation` is not
@@ -1449,7 +1535,7 @@ async fn a_failed_delete_leaves_its_intent_pending_and_the_rest_withdrawn() {
 /// `withdrawn` and `withdrawn_noop` reporting fails both checks.
 #[tokio::test]
 async fn adapter_unbans_report_their_outcome_and_retry_failures() {
-    let (f, _speaker) = failing_fixture().await;
+    let (f, _speaker) = failing_fixture("adapter-pop").await;
     let am = bearer(
         &f.repo
             .mint_token_for_test("am", TokenScope::Ingest, Some("alertmanager")),
@@ -2015,6 +2101,67 @@ struct HangingTcpWithdrawals {
     inner: MockAnnouncer,
     hanging: std::sync::atomic::AtomicBool,
     deletes: std::sync::atomic::AtomicUsize,
+    /// Notified when a delete starts to hang.
+    started: tokio::sync::Notify,
+}
+
+/// An enforced controller in credentials mode on the hanging speaker.
+async fn hanging_fixture() -> (Fixture, Arc<HangingTcpWithdrawals>) {
+    let repo = Arc::new(MockRepository::new());
+    let speaker = Arc::new(HangingTcpWithdrawals {
+        inner: MockAnnouncer::new(),
+        hanging: std::sync::atomic::AtomicBool::new(true),
+        deletes: std::sync::atomic::AtomicUsize::new(0),
+        started: tokio::sync::Notify::new(),
+    });
+    let mut settings = settings(AuthMode::Credentials, "test-pop", 1);
+    settings.mode = prefixd::config::OperationMode::Enforced;
+    let state = AppState::new(
+        settings,
+        Inventory::new(vec![Customer {
+            customer_id: "bound".into(),
+            name: "Source binding".into(),
+            prefixes: vec!["203.0.113.0/24".into()],
+            policy_profile: PolicyProfile::Normal,
+            services: vec![],
+        }]),
+        common::test_playbooks(),
+        repo.clone(),
+        speaker.clone(),
+        ".".into(),
+    )
+    .unwrap();
+    let app =
+        prefixd::api::create_test_router_with_session_store(state.clone(), MemoryStore::default());
+    (Fixture { app, repo, state }, speaker)
+}
+
+/// Ban `vectors` for `victim` and return their mitigations.
+async fn ban_vectors(
+    f: &Fixture,
+    auth: Option<(&str, &str)>,
+    victim: &str,
+    vectors: &[(&str, &str)],
+) -> Vec<uuid::Uuid> {
+    let mut ids = Vec::new();
+    for (id, vector) in vectors {
+        let (status, body) = send(
+            &f.app,
+            "/v1/events",
+            auth,
+            &with_vector(event("fastnetmon", victim, id), vector),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+        ids.push(
+            body["mitigation_id"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{body}"))
+                .parse::<uuid::Uuid>()
+                .unwrap(),
+        );
+    }
+    ids
 }
 
 impl prefixd::bgp::FlowSpecAnnouncer for HangingTcpWithdrawals {
@@ -2038,6 +2185,7 @@ impl prefixd::bgp::FlowSpecWriter for HangingTcpWithdrawals {
         use std::sync::atomic::Ordering::SeqCst;
         self.deletes.fetch_add(1, SeqCst);
         if rule.nlri.protocol == Some(6) && self.hanging.load(SeqCst) {
+            self.started.notify_one();
             std::future::pending::<()>().await;
         }
         self.inner.withdraw(rule).await
@@ -2068,31 +2216,8 @@ impl prefixd::bgp::PeerObserver for HangingTcpWithdrawals {
 /// later mitigation.
 #[tokio::test(start_paused = true)]
 async fn an_ambiguous_delete_stops_the_unban_and_a_resend_finishes_it() {
-    let repo = Arc::new(MockRepository::new());
-    let speaker = Arc::new(HangingTcpWithdrawals {
-        inner: MockAnnouncer::new(),
-        hanging: std::sync::atomic::AtomicBool::new(true),
-        deletes: std::sync::atomic::AtomicUsize::new(0),
-    });
-    let mut settings = settings(AuthMode::Credentials, "test-pop", 1);
-    settings.mode = prefixd::config::OperationMode::Enforced;
-    let state = AppState::new(
-        settings,
-        Inventory::new(vec![Customer {
-            customer_id: "bound".into(),
-            name: "Source binding".into(),
-            prefixes: vec!["203.0.113.0/24".into()],
-            policy_profile: PolicyProfile::Normal,
-            services: vec![],
-        }]),
-        common::test_playbooks(),
-        repo.clone(),
-        speaker.clone(),
-        ".".into(),
-    )
-    .unwrap();
-    let app =
-        prefixd::api::create_test_router_with_session_store(state.clone(), MemoryStore::default());
+    let (f, speaker) = hanging_fixture().await;
+    let Fixture { app, repo, state } = f;
     let fnm = bearer(&repo.mint_token_for_test("fnm", TokenScope::Ingest, Some("fastnetmon")));
     let auth = Some(("authorization", fnm.as_str()));
     let victim = "203.0.113.81";
@@ -2169,7 +2294,9 @@ async fn an_ambiguous_delete_stops_the_unban_and_a_resend_finishes_it() {
 }
 
 /// Every HMAC adapter's unban needs an event ID, so a replay of it reuses its
-/// targets. Negative control: without the check the ID-less unban runs.
+/// targets. Only that item is refused, with a per-item error, not the whole
+/// payload. Negative controls: without the check the ID-less unban runs, and
+/// refusing the whole payload answers 400.
 #[tokio::test]
 async fn an_hmac_unban_without_an_event_id_is_refused() {
     const SECRET: &str = "0123456789abcdef0123456789abcdef-unban";
@@ -2212,8 +2339,17 @@ async fn an_hmac_unban_without_an_event_id_is_refused() {
         .await
         .unwrap();
     let text = String::from_utf8_lossy(&bytes);
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{text}");
-    assert!(text.contains("every unban from an HMAC adapter"), "{text}");
+    assert_eq!(status, StatusCode::OK, "{text}");
+    let body: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(body["failed"], 1, "{body}");
+    assert_eq!(body["results"][0]["status"], "error", "{body}");
+    assert!(
+        body["results"][0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("an unban from an HMAC adapter needs fields.source_id"),
+        "{body}"
+    );
     assert_eq!(written(&f.repo).await, (0, 0, 0));
 }
 
@@ -2246,4 +2382,315 @@ async fn ingest_routes_refuse_the_principal_before_parsing_the_body() {
             assert_eq!(response.status(), expected, "{path} {auth:?}");
         }
     }
+}
+
+/// The replay record is written before anything else: when that write fails
+/// the unban answers 503 and records no intent, deletes nothing and stores no
+/// event; a resend then withdraws. Negative control: carrying on past the
+/// failed write records intent and withdraws.
+#[tokio::test]
+async fn an_unban_whose_record_cannot_be_stored_touches_nothing() {
+    let f = fixture(AuthMode::Credentials).await;
+    let fnm = bearer(
+        &f.repo
+            .mint_token_for_test("fnm", TokenScope::Ingest, Some("fastnetmon")),
+    );
+    let auth = Some(("authorization", fnm.as_str()));
+    let victim = "203.0.113.84";
+    let ids = ban_vectors(&f, auth, victim, &[("b-1", "udp_flood")]).await;
+    let stored = written(&f.repo).await;
+
+    f.repo
+        .fail_unban_records
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let (status, body) = send(
+        &f.app,
+        "/v1/events",
+        auth,
+        &unban("fastnetmon", victim, "u-1"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap()
+            .contains("could not be stored"),
+        "{body}"
+    );
+    assert!(f.repo.pending_withdrawals(None).await.unwrap().is_empty());
+    assert_eq!(live_for(&f.repo, victim).await.len(), 1);
+    assert_eq!(written(&f.repo).await, stored);
+
+    f.repo
+        .fail_unban_records
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    let (status, body) = send(
+        &f.app,
+        "/v1/events",
+        auth,
+        &unban("fastnetmon", victim, "u-1"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    assert_eq!(body["mitigation_ids"], json!(ids), "{body}");
+    assert!(live_for(&f.repo, victim).await.is_empty());
+}
+
+/// An unban whose outcome write fails still has its replay record, so a
+/// resend withdraws the original targets and not a mitigation banned in
+/// between, and fills the missing outcome. Negative control: storing the
+/// targets with the outcome, after the deletes, as before, leaves the resend
+/// nothing to withdraw.
+#[tokio::test]
+async fn a_resend_after_a_failed_outcome_write_withdraws_the_original_targets() {
+    let (f, speaker) = failing_fixture("outcome-pop").await;
+    let fnm = bearer(
+        &f.repo
+            .mint_token_for_test("fnm", TokenScope::Ingest, Some("fastnetmon")),
+    );
+    let auth = Some(("authorization", fnm.as_str()));
+    let victim = "203.0.113.85";
+    let ids = ban_vectors(
+        &f,
+        auth,
+        victim,
+        &[("s1", "syn_flood"), ("u1", "udp_flood")],
+    )
+    .await;
+
+    f.repo
+        .fail_event_outcomes
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let unban = with_vector(unban("fastnetmon", victim, "ow-unban"), "unknown");
+    let (status, body) = send(&f.app, "/v1/events", auth, &unban).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+
+    *f.state.playbooks.write().await =
+        prefixd::config::Playbooks::from_yaml(VECTOR_PLAYBOOKS).unwrap();
+    let later = ban_vectors(&f, auth, victim, &[("i1", "icmp_flood")]).await[0];
+
+    *speaker.failure.lock().unwrap() = None;
+    let (status, body) = send(&f.app, "/v1/events", auth, &unban).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    assert_eq!(body["mitigation_ids"], json!(ids), "{body}");
+    for id in &ids {
+        assert_eq!(
+            f.repo.get_mitigation(*id).await.unwrap().unwrap().status,
+            MitigationStatus::Withdrawn
+        );
+    }
+    assert!(
+        f.repo
+            .get_mitigation(later)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_active()
+    );
+
+    // Once outcomes can be written, a resend fills the missing one.
+    f.repo
+        .fail_event_outcomes
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    let (status, body) = send(&f.app, "/v1/events", auth, &unban).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    let event_id: uuid::Uuid = body["event_id"].as_str().unwrap().parse().unwrap();
+    let event = f
+        .repo
+        .list_events(&ListParams {
+            limit: 1000,
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|event| event.event_id == event_id)
+        .unwrap();
+    assert_eq!(
+        event.outcome.outcome,
+        prefixd::domain::EventOutcome::Withdrawn
+    );
+    assert_eq!(event.outcome.outcome_mitigation_ids, ids);
+}
+
+/// A request dropped while its delete hangs, after the replay record and the
+/// intents were written, leaves the record behind: the resend withdraws the
+/// original targets and not a mitigation banned in between. The drop happens
+/// on a handshake from the speaker, not a timer. Negative control: storing the
+/// targets only after the deletes leaves the resend nothing to withdraw.
+#[tokio::test]
+async fn a_resend_after_a_dropped_unban_withdraws_the_original_targets() {
+    let (f, speaker) = hanging_fixture().await;
+    let fnm = bearer(
+        &f.repo
+            .mint_token_for_test("fnm", TokenScope::Ingest, Some("fastnetmon")),
+    );
+    let auth = Some(("authorization", fnm.as_str()));
+    let victim = "203.0.113.86";
+    let ids = ban_vectors(
+        &f,
+        auth,
+        victim,
+        &[("s1", "syn_flood"), ("u1", "udp_flood")],
+    )
+    .await;
+
+    let unban = with_vector(unban("fastnetmon", victim, "drop-unban"), "unknown");
+    let request = {
+        let app = f.app.clone();
+        let unban = unban.clone();
+        let fnm = fnm.clone();
+        tokio::spawn(async move {
+            send(
+                &app,
+                "/v1/events",
+                Some(("authorization", fnm.as_str())),
+                &unban,
+            )
+            .await
+        })
+    };
+    speaker.started.notified().await;
+    request.abort();
+    assert!(request.await.unwrap_err().is_cancelled());
+
+    *f.state.playbooks.write().await =
+        prefixd::config::Playbooks::from_yaml(VECTOR_PLAYBOOKS).unwrap();
+    let later = ban_vectors(&f, auth, victim, &[("i1", "icmp_flood")]).await[0];
+
+    speaker
+        .hanging
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    let (status, body) = send(&f.app, "/v1/events", auth, &unban).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    assert_eq!(body["mitigation_ids"], json!(ids), "{body}");
+    for id in &ids {
+        assert_eq!(
+            f.repo.get_mitigation(*id).await.unwrap().unwrap().status,
+            MitigationStatus::Withdrawn
+        );
+    }
+    assert!(f.repo.pending_withdrawals(None).await.unwrap().is_empty());
+    assert!(
+        f.repo
+            .get_mitigation(later)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_active()
+    );
+}
+
+/// A target whose withdrawal intent is refused is not part of the unban: the
+/// replay record keeps only the targets whose intent was recorded, and the
+/// unban answers the refusal. Negative control: keeping the selected set
+/// stores the refused target.
+#[tokio::test]
+async fn a_refused_target_stays_out_of_the_replay_record() {
+    let f = fixture(AuthMode::Credentials).await;
+    let fnm = bearer(
+        &f.repo
+            .mint_token_for_test("fnm", TokenScope::Ingest, Some("fastnetmon")),
+    );
+    let auth = Some(("authorization", fnm.as_str()));
+    let victim = "203.0.113.87";
+    let ids = ban_vectors(
+        &f,
+        auth,
+        victim,
+        &[("s1", "syn_flood"), ("u1", "udp_flood")],
+    )
+    .await;
+    let (syn, udp) = (ids[0], ids[1]);
+    // A second live owner of the SYN rule refuses its withdrawal intent; with
+    // no stored event it is not the detector's, so the unban never selects it.
+    let mut twin = f.repo.get_mitigation(syn).await.unwrap().unwrap();
+    twin.mitigation_id = uuid::Uuid::new_v4();
+    twin.triggering_event_id = uuid::Uuid::new_v4();
+    f.repo.insert_mitigation(&twin).await.unwrap();
+
+    let (status, body) = send(
+        &f.app,
+        "/v1/events",
+        auth,
+        &with_vector(unban("fastnetmon", victim, "r-unban"), "unknown"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    let record = f
+        .repo
+        .find_unban_replay("test-pop", "fastnetmon", "r-unban")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(record.target_ids, vec![udp]);
+    assert_eq!(
+        f.repo.get_mitigation(udp).await.unwrap().unwrap().status,
+        MitigationStatus::Withdrawn
+    );
+    assert!(
+        f.repo
+            .get_mitigation(syn)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_active()
+    );
+    assert!(f.repo.pending_withdrawals(None).await.unwrap().is_empty());
+}
+
+/// A resend of an unban event ID must name the same victim: another victim is
+/// a 409 and withdraws nothing, while another spelling of the same victim
+/// reuses the record. Negative control: without the victim check the resend
+/// answers 202.
+#[tokio::test]
+async fn a_resent_unban_for_another_victim_is_a_conflict() {
+    let f = fixture(AuthMode::Credentials).await;
+    let fnm = bearer(
+        &f.repo
+            .mint_token_for_test("fnm", TokenScope::Ingest, Some("fastnetmon")),
+    );
+    let auth = Some(("authorization", fnm.as_str()));
+    let first = ban_vectors(&f, auth, "203.0.113.88", &[("b-1", "udp_flood")]).await;
+    let (status, body) = send(
+        &f.app,
+        "/v1/events",
+        auth,
+        &unban("fastnetmon", "203.0.113.88", "v-unban"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    let other = ban_vectors(&f, auth, "203.0.113.89", &[("b-2", "udp_flood")]).await[0];
+
+    let (status, body) = send(
+        &f.app,
+        "/v1/events",
+        auth,
+        &unban("fastnetmon", "203.0.113.89", "v-unban"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(
+        body["error"].as_str().unwrap().contains("another victim"),
+        "{body}"
+    );
+    assert!(
+        f.repo
+            .get_mitigation(other)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_active()
+    );
+
+    let (status, body) = send(
+        &f.app,
+        "/v1/events",
+        auth,
+        &unban("fastnetmon", "203.0.113.88/32", "v-unban"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    assert_eq!(body["mitigation_ids"], json!(first), "{body}");
 }

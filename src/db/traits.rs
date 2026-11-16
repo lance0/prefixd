@@ -13,6 +13,16 @@ use crate::observability::AuditEntry;
 
 use super::{GlobalStats, PopInfo, SafelistEntry, TimeseriesBucket};
 
+/// What a stored detector unban withdraws, for a resend or replay of its
+/// event ID on the same POP.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnbanReplay {
+    pub event_id: Uuid,
+    pub external_event_id: Option<String>,
+    pub victim_ip: String,
+    pub target_ids: Vec<Uuid>,
+}
+
 /// Return value for `delete_expired_corroborating_signals`.
 ///
 /// `unattached_expired` is per-source counts of signals the scheduler
@@ -209,13 +219,26 @@ pub trait RepositoryTrait: Send + Sync {
         source: &str,
         external_id: &str,
     ) -> Result<Option<AttackEvent>>;
-    /// The first unban event `source` sent with this external ID, whose
-    /// outcome names the targets a resend or replay of it reuses.
-    async fn find_unban_event_by_external_id(
+    /// Store a detector unban with its replay record, the POP and the
+    /// mitigations it withdraws, in one write before any withdrawal intent.
+    async fn insert_unban_event(
         &self,
+        event: &AttackEvent,
+        pop: &str,
+        targets: &[Uuid],
+    ) -> Result<()>;
+    /// Replace a stored unban's targets with those whose withdrawal intent
+    /// was recorded.
+    async fn set_unban_targets(&self, event_id: Uuid, targets: &[Uuid]) -> Result<()>;
+    /// The first unban `source` sent on `pop` with this external ID that has
+    /// a replay record: the targets a resend or replay of it reuses. Unbans
+    /// stored without one are not returned.
+    async fn find_unban_replay(
+        &self,
+        pop: &str,
         source: &str,
         external_id: &str,
-    ) -> Result<Option<AttackEvent>>;
+    ) -> Result<Option<UnbanReplay>>;
     async fn list_events(&self, params: &ListParams) -> Result<Vec<AttackEvent>> {
         self.list_events_filtered(&EventListParams {
             pagination: params.clone(),

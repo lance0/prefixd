@@ -130,13 +130,17 @@ What changes:
   mitigation for the same victim and manual mitigations are never touched. An
   unban with a vector other than `unknown` withdraws only that vector's
   mitigations, with UDP floods and amplification as one family; `unknown`,
-  which FastNetMon unbans send, withdraws them all. A resend of an unban event
-  ID the source already sent reuses that unban's targets, so a replay cannot
-  withdraw a later ban's mitigation, and every HMAC adapter's unban needs an
-  event ID. With correlation, only the source whose event met the threshold
-  withdraws the mitigation by unban. If any delete fails or its outcome is
-  unknown, the unban gets `503` with every intent recorded and pending; a
-  resend reuses them. Alertmanager and webhook adapters report each unban as
+  which FastNetMon unbans send, withdraws them all. The unban is stored with
+  its POP and selected targets before anything else, and gets `503`, touching
+  nothing, if that write fails. A resend of an unban event ID the source
+  already sent on that POP reuses those targets, so a replay cannot withdraw
+  a later ban's mitigation; a resend naming another victim gets `409`. With
+  correlation, only the source whose event met the threshold withdraws the
+  mitigation by unban. The first delete that fails, whatever the error, stops
+  the unban with `503` and the rest of its intents pending; a resend reuses
+  them. Unbans with nothing to withdraw record the new event outcome
+  `no_active_mitigation` rather than `withdrawn`, so event filters that
+  counted them as `withdrawn` must add it. Alertmanager and webhook adapters report each unban as
   `withdrawn` or `no_active_mitigation` and answer `503` when one failed, so
   the sender resends; `withdrawn_noop` is gone.
 - **Detector actor IDs.** Audit rows for detector-created mitigations, their
@@ -152,6 +156,9 @@ What changes:
   - an HMAC adapter named in `blackhole.detector_sources` or
     `guardrails.detector_prefix_sources` without `fields.source_id`, so a
     replayed signed ban is a duplicate;
+  - an HMAC adapter that maps `fields.action` without `fields.source_id`, so
+    a replayed signed unban reuses its original targets. Map an ID field the
+    detector sends, or stop mapping `fields.action`;
   - an HMAC `auth.secret_env` outside the `PREFIXD_WEBHOOK_` namespace, unset,
     or shorter than 32 bytes. Rename each secret variable, for example
     `RADWARE_WEBHOOK_SECRET` to `PREFIXD_WEBHOOK_RADWARE_SECRET`, in the
@@ -159,8 +166,10 @@ What changes:
 - **Adapter names and replays.** A webhook adapter's name must match
   `^[a-z0-9][a-z0-9-]{0,63}$`, since it is the adapter's source. An adapter
   named in either allowlist refuses, with `400`, a payload in which any ban
-  has no event ID, so a replayed signed ban cannot recreate a mitigation. A
-  disabled adapter skips the credential refusals until it is enabled.
+  has no event ID, so a replayed signed ban cannot recreate a mitigation. An
+  HMAC adapter refuses an unban with no event ID as that item's `error` and
+  runs the rest of the payload. A disabled adapter skips the credential
+  refusals until it is enabled.
 - **Allowlist names.** `blackhole.detector_sources` and
   `guardrails.detector_prefix_sources` entries must match the token source
   pattern `^[a-z0-9][a-z0-9_-]{0,63}$`, so every allowlisted source is one a
@@ -170,6 +179,11 @@ What changes:
   the audit and the `detector_unban` metric even when reconciliation completes
   it. It rewrites no row, and `withdrawal_requests` is small, so its lock is
   brief. Like 023, it adds no rollback constraint of its own.
+- **Migration 025** adds nullable `unban_pop` and `unban_target_ids` columns
+  to `events`: a detector unban's replay record, written with the unban. It
+  rewrites no row and holds its lock only for the catalog change. Unbans
+  stored before it have no record, so a resend of one selects afresh. It adds
+  no rollback constraint of its own.
 - **The bundled FastNetMon script** is an ingest client. Reinstall it on every
   FastNetMon host; see [FastNetMon](detectors/fastnetmon.md). It reads its
   token from `PREFIXD_TOKEN_FILE` (or `PREFIXD_TOKEN`), passes it to curl on

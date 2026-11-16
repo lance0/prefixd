@@ -141,6 +141,11 @@ pub const MIGRATIONS: &[(i32, &str, &str)] = &[
         "withdrawal_detector_source",
         include_str!("../../migrations/024_withdrawal_detector_source.sql"),
     ),
+    (
+        25,
+        "unban_replay",
+        include_str!("../../migrations/025_unban_replay.sql"),
+    ),
 ];
 
 /// The highest version this binary knows. A database recording a higher

@@ -373,7 +373,8 @@ export interface Event {
 
 export const EVENT_OUTCOMES = [
   "mitigated", "extended", "dry_run", "guardrail_rejected", "safelisted", "no_playbook",
-  "not_owned", "awaiting_corroboration", "conflict", "failed", "withdrawn", "not_recorded",
+  "not_owned", "awaiting_corroboration", "conflict", "failed", "withdrawn",
+  "no_active_mitigation", "not_recorded",
 ] as const
 
 export type EventOutcome = (typeof EVENT_OUTCOMES)[number]

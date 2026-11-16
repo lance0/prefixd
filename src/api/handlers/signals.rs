@@ -1096,11 +1096,11 @@ async fn ingest_webhook_inner(
 
     // A signed body carries no nonce: only its event ID makes a replay a
     // duplicate. An adapter on an allowlist reaches blackholes or prefix
-    // rules, so its bans need an ID; every HMAC adapter's unbans need one, so
-    // a replayed unban reuses its original targets instead of withdrawing a
-    // later ban's mitigation. Refuse the payload before admission otherwise,
-    // whatever made `fields.source_id` miss (absent, null, wrong type or
-    // ambiguous).
+    // rules, so a ban without an ID refuses the whole payload before
+    // admission, whatever made `fields.source_id` miss (absent, null, wrong
+    // type or ambiguous). An HMAC adapter's unban needs one too, so a replay
+    // reuses its original targets instead of withdrawing a later ban's
+    // mitigation; only that item is refused.
     let allowlisted = state
         .settings
         .blackhole
@@ -1112,20 +1112,17 @@ async fn ingest_webhook_inner(
             .detector_prefix_sources
             .contains(&adapter.name);
     let signed = matches!(adapter.auth, crate::correlation::WebhookAuth::Hmac { .. });
-    let unidentified = mapped.iter().enumerate().find_map(|(index, event)| {
-        let input = event.as_ref().ok()?;
-        let unban = input.action == "unban";
-        let needs_id = if unban { signed } else { allowlisted };
-        (needs_id && input.event_id.as_deref().is_none_or(str::is_empty)).then_some((index, unban))
-    });
-    if let Some((index, unban)) = unidentified {
-        let why = if unban {
-            "every unban from an HMAC adapter"
-        } else {
-            "the adapter is on a detector allowlist, so every ban"
-        };
+    let unidentified =
+        |input: &AttackEventInput| input.event_id.as_deref().is_none_or(str::is_empty);
+    if allowlisted
+        && let Some(index) = mapped.iter().position(|event| {
+            event
+                .as_ref()
+                .is_ok_and(|input| input.action != "unban" && unidentified(input))
+        })
+    {
         return Err(AppError(PrefixdError::InvalidRequest(format!(
-            "event {index}: adapter '{}': {why} needs fields.source_id to resolve to an ID",
+            "event {index}: adapter '{}': the adapter is on a detector allowlist, so every ban needs fields.source_id to resolve to an ID",
             adapter.name
         ))));
     }
@@ -1148,6 +1145,20 @@ async fn ingest_webhook_inner(
                     event_id: None,
                     mitigation_id: None,
                     error: Some(e.to_string()),
+                });
+            }
+            Ok(input) if signed && input.action == "unban" && unidentified(&input) => {
+                failed += 1;
+                results.push(WebhookEventResult {
+                    announcement_outcome: None,
+                    index,
+                    status: "error".into(),
+                    event_id: None,
+                    mitigation_id: None,
+                    error: Some(format!(
+                        "adapter '{}': an unban from an HMAC adapter needs fields.source_id to resolve to an ID",
+                        adapter.name
+                    )),
                 });
             }
             Ok(input) => match input.action.as_str() {

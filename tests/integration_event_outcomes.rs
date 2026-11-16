@@ -402,11 +402,10 @@ async fn refused_unban_records_a_conflict_and_is_audited() {
     assert_eq!(audit[0]["details"]["outcome"], "conflict");
     assert_eq!(audit[0]["details"]["guardrail"], "Conflict");
     assert_eq!(audit[0]["details"]["stored"], true);
-    // Every selected mitigation is linked, so each one's status can be checked.
-    assert_eq!(
-        row["outcome_mitigation_ids"],
-        json!([ban["mitigation_id"], owner.mitigation_id])
-    );
+    // Only mitigations whose withdrawal intent was recorded are the unban's
+    // targets; both were refused here, so none is linked or replayed.
+    assert_eq!(row["outcome_mitigation_ids"], json!([]));
+    assert!(repo.pending_withdrawals(None).await.unwrap().is_empty());
 }
 
 /// A prefix playbook whose step has rules cannot produce a narrow prefix match.

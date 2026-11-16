@@ -8998,3 +8998,90 @@ async fn a_pending_detector_withdrawal_keeps_its_source_on_postgres() {
         .unwrap_or_else(|| panic!("{audit:?}"));
     assert_eq!(withdraw.details["source"], "fastnetmon");
 }
+
+/// A detector unban's replay record is keyed by POP, source and event ID, in
+/// PostgreSQL and the mock alike: two POPs sharing a database each find only
+/// their own, an unban stored without a record (before migration 025) is not
+/// found, so a resend selects afresh, and narrowing replaces the targets.
+/// Negative control: a lookup without the POP returns POP A's record on POP B.
+#[tokio::test]
+async fn unban_replay_is_keyed_by_pop_postgres_mock_parity() {
+    use prefixd::db::{MockRepository, RepositoryTrait, UnbanReplay};
+    use prefixd::domain::AttackEvent;
+    use std::sync::Arc;
+
+    let ctx = TestContext::new().await;
+    let repositories: [Arc<dyn RepositoryTrait>; 2] =
+        [ctx.repo.clone(), Arc::new(MockRepository::new())];
+    for repo in repositories {
+        let unban = |victim: &str| {
+            AttackEvent::from_input(
+                serde_json::from_value(serde_json::json!({
+                    "event_id": "u-1", "timestamp": "2026-11-16T00:00:00Z",
+                    "source": "fastnetmon", "victim_ip": victim, "vector": "unknown",
+                    "action": "unban",
+                }))
+                .unwrap(),
+            )
+        };
+        let legacy = unban("203.0.113.90");
+        repo.insert_event(&legacy).await.unwrap();
+        assert_eq!(
+            repo.find_unban_replay("pop-a", "fastnetmon", "u-1")
+                .await
+                .unwrap(),
+            None
+        );
+
+        let (a, b) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+        let on_a = unban("203.0.113.90");
+        repo.insert_unban_event(&on_a, "pop-a", &[a, b])
+            .await
+            .unwrap();
+        let on_b = unban("203.0.113.91");
+        repo.insert_unban_event(&on_b, "pop-b", &[]).await.unwrap();
+
+        assert_eq!(
+            repo.find_unban_replay("pop-a", "fastnetmon", "u-1")
+                .await
+                .unwrap(),
+            Some(UnbanReplay {
+                event_id: on_a.event_id,
+                external_event_id: Some("u-1".into()),
+                victim_ip: "203.0.113.90".into(),
+                target_ids: vec![a, b],
+            })
+        );
+        let found_b = repo
+            .find_unban_replay("pop-b", "fastnetmon", "u-1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (found_b.event_id, found_b.target_ids),
+            (on_b.event_id, vec![])
+        );
+        assert_eq!(
+            repo.find_unban_replay("pop-c", "fastnetmon", "u-1")
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            repo.find_unban_replay("pop-a", "other", "u-1")
+                .await
+                .unwrap(),
+            None
+        );
+
+        repo.set_unban_targets(on_a.event_id, &[b]).await.unwrap();
+        assert_eq!(
+            repo.find_unban_replay("pop-a", "fastnetmon", "u-1")
+                .await
+                .unwrap()
+                .unwrap()
+                .target_ids,
+            vec![b]
+        );
+    }
+}

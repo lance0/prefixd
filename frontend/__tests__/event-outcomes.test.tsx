@@ -94,7 +94,7 @@ describe("event outcomes", () => {
   it("maps every outcome to a labeled tone and unknown values to not recorded", () => {
     expect(EVENT_OUTCOMES.map(eventOutcomeTone)).toEqual([
       "info", "info", "info", "danger", "warning", "warning",
-      "neutral", "info", "danger", "danger", "neutral", "neutral",
+      "neutral", "info", "danger", "danger", "neutral", "neutral", "neutral",
     ])
     render(<EventOutcomePill outcome="something_new" />)
     expect(screen.getByText("Outcome not recorded")).toHaveAttribute("data-tone", "neutral")
