@@ -117,6 +117,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   mitigations lapse.
 - `prefixd --check` names each unknown configuration key, with its full key
   path, for `prefixd.yaml`, `correlation.yaml` and `alerting.yaml`.
+- `just interop-fastnetmon` and a new Interop CI job run FastNetMon Community
+  1.2.9, pinned by digest, with the bundled notify script against prefixd,
+  rustbgpd 0.83.0 and FRR 10.7.1. Bans from `fastnetmon_api_client`, from the
+  script run directly and from a replayed NetFlow v5 flood must create the
+  mitigation and the exact rule at FRR, re-bans must extend it, and unbans must
+  withdraw it. The lane runs prefixd in `none` auth mode, so it covers the
+  notify contract and route lifecycle, not detector authentication. The
+  [dated receipt](docs/reference/qualification/fastnetmon-community-2026-11-16.md)
+  also records the image's missing `curl`, how manual and detected bans
+  differ on the script's stdin, and what is unqualified for FastNetMon
+  Advanced.
 
 ### Changed
 

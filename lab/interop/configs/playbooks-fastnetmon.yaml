@@ -1,0 +1,20 @@
+# FastNetMon lane playbooks, one per vector the lane produces. A manual
+# fastnetmon_api_client ban carries no traffic counters, so the script sends
+# vector `unknown`; this answers it like the shipped `unknown_conservative`
+# playbook. The NetFlow-driven ban is a UDP flood. TTLs outlast every step.
+playbooks:
+  - name: unknown_conservative
+    match:
+      vector: unknown
+    steps:
+      - action: police
+        rate_bps: 1000000
+        ttl_seconds: 600
+
+  - name: udp_flood_police
+    match:
+      vector: udp_flood
+    steps:
+      - action: police
+        rate_bps: 5000000
+        ttl_seconds: 600
