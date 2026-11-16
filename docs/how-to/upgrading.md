@@ -112,6 +112,56 @@ What changes:
 - **Bearer replaces the session.** A request with `Authorization: Bearer` is
   authenticated only by its token; its session cookie is ignored. Other schemes,
   such as proxy `Basic` auth, leave the session in charge.
+- **Ingest is bound to the credential's source.** `/v1/events`, the batch
+  route, every `/v1/signals/*` adapter and the corroborator accept an ingest
+  token only for the source it is bound to, and an Admin (session, admin token,
+  mTLS client or `none` mode) for any source. Operator sessions and operator
+  tokens get 403 on every ingest route. A mismatched source gets 403 and writes
+  no event, mitigation or audit row; one mismatched item refuses a whole batch.
+  The FastNetMon adapter binds host alerts to `fastnetmon` and hostgroup alerts
+  to `fastnetmon-hostgroup`, Alertmanager to `alertmanager`, a webhook adapter
+  to its name. The blackhole and prefix allowlists, `min_sources`, source
+  weights and corroborating mode all read the bound source.
+- **Unban by victim.** A detector `unban` names the victim. prefixd withdraws
+  the live mitigations for that victim on its POP that the bound source
+  created, compared in canonical form, and answers `no_active_mitigation` when
+  there are none. The unban's `event_id` no longer selects anything, and the
+  statuses `not_found` and `ignored_no_event_id` are gone. Another source's
+  mitigation for the same victim and manual mitigations are never touched. An
+  Alertmanager `resolved` alert therefore withdraws every live mitigation
+  `alertmanager` created for that victim, not only the one its fingerprint
+  created.
+- **Detector actor IDs.** Audit rows for detector-created mitigations, their
+  refusals and detector unban withdrawals name the credential: `token:<name>`
+  for an ingest token and `webhook:<adapter>` for an HMAC adapter, with the
+  bound source in `details.source`. An Admin who posts an event is recorded as
+  that Admin (`anonymous` in `none` mode, `mtls-client` under mTLS), not as
+  the source it claimed. Filters that matched a source name in `actor_id`
+  match `details.source` instead.
+- **Webhook adapters.** In `correlation.yaml`, refused at startup, on reload
+  and through `PUT /v1/config/correlation`:
+  - `auth.type: none` outside `http.auth.mode: none`;
+  - an HMAC adapter named in `blackhole.detector_sources` or
+    `guardrails.detector_prefix_sources` without `fields.source_id`, so a
+    replayed signed ban is a duplicate;
+  - an HMAC `auth.secret_env` outside the `PREFIXD_WEBHOOK_` namespace, unset,
+    or shorter than 32 bytes. Rename each secret variable, for example
+    `RADWARE_WEBHOOK_SECRET` to `PREFIXD_WEBHOOK_RADWARE_SECRET`, in the
+    controller environment and in `correlation.yaml` together.
+- **Allowlist names.** `blackhole.detector_sources` and
+  `guardrails.detector_prefix_sources` entries must match the token source
+  pattern `^[a-z0-9][a-z0-9_-]{0,63}$`, so every allowlisted source is one a
+  credential can carry.
+- **The bundled FastNetMon script** is an ingest client. Reinstall it on every
+  FastNetMon host; see [FastNetMon](detectors/fastnetmon.md). It reads its
+  token from `PREFIXD_TOKEN_FILE` (or `PREFIXD_TOKEN`), passes it to curl on
+  stdin, and unbans by victim. `PREFIXD_OPERATOR`, `UNBAN_QUERY_RETRIES`,
+  `UNBAN_QUERY_DELAY_SECONDS`, `WITHDRAW_ATTEMPTS` and
+  `WITHDRAW_DELAY_SECONDS` are no longer read, and `BAN_POST_ATTEMPTS` and
+  `BAN_POST_DELAY_SECONDS` are now `EVENT_POST_ATTEMPTS` and
+  `EVENT_POST_DELAY_SECONDS`, which cover ban and unban. New:
+  `EVENT_CONNECT_TIMEOUT_SECONDS` (5) and `EVENT_MAX_TIME_SECONDS` (15) bound
+  each attempt. It needs only bash and curl.
 
 ### Operator usernames
 
@@ -197,9 +247,13 @@ event, pending operation or audit row.
    - Inventory every client that holds the shared token: detector hosts and
      shims, Alertmanager and Grafana contact points, CI jobs and scripts.
    - Custom detector scripts that read `/v1/mitigations` or call `/withdraw`
-     cannot do that with an ingest token, which has no read access. Give that
-     step to an operator token, or rewrite the unban as an event `unban` with
-     the ban's `event_id`.
+     cannot do that with an ingest token, which has no read access. Rewrite
+     the unban as an event `unban` that names the victim, as the bundled
+     FastNetMon script does; prefixd withdraws what that source created for
+     the victim.
+   - List the webhook adapters with `auth.type: none`, the HMAC adapters on an
+     allowlist without `fields.source_id`, and every `secret_env` outside the
+     `PREFIXD_WEBHOOK_` namespace.
    - Test harnesses need two tokens each, one ingest and one operator. The
      bundled `scripts/chaos-test.sh` reads `PREFIXD_TOKEN` and
      `PREFIXD_INGEST_TOKEN` (bound to source `chaos-test`).
@@ -210,6 +264,10 @@ event, pending operation or audit row.
    - Set `http.auth.mode: credentials` and delete `bearer_token_env`.
    - Remove `PREFIXD_API_TOKEN` from the controller's environment. The shipped
      Compose file and `.env.example` no longer pass it.
+   - Change every webhook adapter with `auth.type: none` to `hmac` or
+     `bearer`, map `fields.source_id` on allowlisted HMAC adapters, and rename
+     each `secret_env` into the `PREFIXD_WEBHOOK_` namespace with a value of
+     at least 32 bytes.
    - Run `prefixd --check` with the new release's binary or image, for
      example `docker run --rm -v /etc/prefixd:/etc/prefixd:ro <new image>
      --check --config /etc/prefixd` (the image's entrypoint is `prefixd`). The old binary accepts a
@@ -238,16 +296,26 @@ event, pending operation or audit row.
       docker compose exec prefixd-rustbgpd prefixdctl tokens create --name ci-deploy --scope operator
       ```
 
-4. **Detectors.** Install each token. Detectors get 401 until their token is in
-   place, and FastNetMon does not repeat a ban it failed to deliver, so keep this
-   step short. Store a token file with mode 0400, owned by the client's user,
-   and keep tokens off command lines (`curl -K -` reads the header from stdin).
+      A FastNetMon host that also sends hostgroup prefix events needs a
+      second ingest token bound to `fastnetmon-hostgroup`, the source to list
+      in `guardrails.detector_prefix_sources`. Each Alertmanager receiver
+      needs an ingest token bound to `alertmanager`, and each bearer webhook
+      adapter one bound to its name.
+
+4. **Detectors.** Install each token, and the new FastNetMon script with its
+   token file. Detectors get 401 until their token is in place, and FastNetMon
+   does not repeat a ban it failed to deliver, so keep this step short. Store a
+   token file with mode 0400, owned by the client's user, and keep tokens off
+   command lines (`curl -K -` reads the header from stdin).
 5. **Verification.** Check that each token's last use advances
    (`prefixdctl tokens list`), and that the controller's startup log has no
    `PREFIXD_API_TOKEN` warning.
-6. **Bans from before the cutover.** Their unbans may not pair with the new
-   credentials. List them with `GET /v1/events?source=fastnetmon&end=<cutover time>`;
-   each event's outcome names the mitigations it created. Withdraw those still
+6. **Bans from before the cutover.** An unban names the victim, so a detector's
+   unban after the cutover withdraws the live mitigations its source created
+   before it as well; no event ID carries over. A custom script that still
+   unbans by event ID alone gets `no_active_mitigation` unless its event names
+   the victim; list its mitigations with
+   `GET /v1/events?source=<source>&end=<cutover time>` and withdraw those still
    active, or let them expire.
 
 Rotation afterward needs no window: create a token under a new name, update the

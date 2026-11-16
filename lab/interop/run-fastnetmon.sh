@@ -77,10 +77,10 @@ ingest_credential() {
         printf 'PREFIXD_LOG=/var/log/prefixd-fastnetmon.log\n'
     } >"$run/fastnetmon.defaults"
     chmod 0644 "$run/fastnetmon.defaults"
-    # FastNetMon runs the script as root in this image; 0444 lets the
-    # bind-mounted file be read whatever the container's user mapping.
+    # Written in place below once minted; 0644 lets the container read the
+    # bind mount whatever its user mapping. A real host uses 0400.
     : >"$run/fastnetmon.token"
-    chmod 0444 "$run/fastnetmon.token"
+    chmod 0644 "$run/fastnetmon.token"
     : >"$run/api.token"
     : >"$run/wrong.token"
 }
