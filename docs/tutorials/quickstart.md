@@ -113,7 +113,9 @@ shows it as `withdrawn`. An operator withdraws with
 Return to enforced operation: restore `mode: enforced` (for example with
 `git checkout configs/prefixd.yaml`) and recreate the controller with the same
 command. Enforced startup refuses to run while a rehearsal mitigation is still
-live, so withdraw it first.
+live: the controller exits, and Compose restarts it until that mitigation's
+TTL (120 seconds for the sample playbook) has passed. Withdraw it first, or
+follow [switch to enforced](../cookbook/dry-run-rollout.md#5-switch-to-enforced).
 
 ## Build from source
 
