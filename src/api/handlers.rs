@@ -4496,6 +4496,13 @@ mod tests {
             })
         }
 
+        /// The discard-based FlowSpec lease fixtures observe UDP destination port 53.
+        fn flowspec_ban(victim: &str) -> Value {
+            let mut ban = fastnetmon_ban("fastnetmon", victim);
+            ban["top_dst_ports"] = json!([53]);
+            ban
+        }
+
         #[tokio::test]
         async fn flowspec_export_evidence_in_detail_health_and_unsupported_backend() {
             use crate::bgp::{ExportDisposition, MockAnnouncer, PeerExport};
@@ -5000,31 +5007,20 @@ mod tests {
             let lease = Arc::new(crate::domain::LeaseKeeper::new(owner.into(), 60));
             let state = state.with_lease(lease.clone()).unwrap();
             let app = crate::api::create_test_router(state);
-            let (status, body) = send(
-                &app,
-                "/v1/events",
-                None,
-                fastnetmon_ban("fastnetmon", "203.0.113.10"),
-            )
-            .await;
+            let (status, body) = send(&app, "/v1/events", None, flowspec_ban("203.0.113.10")).await;
             assert_eq!(status, StatusCode::ACCEPTED, "{body}");
             assert_eq!(speaker.leased_flowspec_adds.load(SeqCst), 1);
             assert_eq!(speaker.flowspec_adds.load(SeqCst), 0);
             let id: uuid::Uuid = body["mitigation_id"].as_str().unwrap().parse().unwrap();
             let stored = repo.get_mitigation(id).await.unwrap().unwrap();
+            assert_eq!(stored.match_criteria.dst_ports, [53]);
             assert_eq!(stored.action_params.injection_owner, owner);
             assert_eq!(speaker.inner.list_active().await.unwrap()[0].owner, owner);
             assert!(lease.generation().is_some());
             // The committed row bounds renewal at once, and so does a
             // detector re-send that extends it.
             assert_eq!(lease.health().renew_until, Some(stored.expires_at));
-            let (status, body) = send(
-                &app,
-                "/v1/events",
-                None,
-                fastnetmon_ban("fastnetmon", "203.0.113.10"),
-            )
-            .await;
+            let (status, body) = send(&app, "/v1/events", None, flowspec_ban("203.0.113.10")).await;
             assert!(status.is_success(), "{body}");
             let extended = repo.get_mitigation(id).await.unwrap().unwrap();
             assert!(extended.expires_at > stored.expires_at);
@@ -5032,13 +5028,7 @@ mod tests {
             assert_eq!(speaker.leased_flowspec_adds.load(SeqCst), 1);
 
             speaker.fail_adds.store(true, SeqCst);
-            let (status, body) = send(
-                &app,
-                "/v1/events",
-                None,
-                fastnetmon_ban("fastnetmon", "203.0.113.11"),
-            )
-            .await;
+            let (status, body) = send(&app, "/v1/events", None, flowspec_ban("203.0.113.11")).await;
             assert_eq!(status, StatusCode::ACCEPTED, "{body}");
             assert_eq!(body["announcement_outcome"], "unconfirmed", "{body}");
             assert_eq!(speaker.leased_flowspec_adds.load(SeqCst), 2);
@@ -5086,11 +5076,12 @@ mod tests {
             let app = crate::api::create_test_router(
                 flowspec_state(repo.clone(), speaker.clone(), None).await,
             );
-            let ban = fastnetmon_ban("fastnetmon", "203.0.113.10");
+            let ban = flowspec_ban("203.0.113.10");
             let (status, body) = send(&app, "/v1/events", None, ban.clone()).await;
             assert_eq!(status, StatusCode::ACCEPTED, "{body}");
             let id: uuid::Uuid = body["mitigation_id"].as_str().unwrap().parse().unwrap();
             let before = repo.get_mitigation(id).await.unwrap().unwrap();
+            assert_eq!(before.match_criteria.dst_ports, [53]);
             assert_eq!(speaker.flowspec_adds.load(SeqCst), 1);
 
             let lease = Arc::new(crate::domain::LeaseKeeper::new(
@@ -5168,10 +5159,11 @@ mod tests {
             let app = crate::api::create_test_router(
                 flowspec_state(elsewhere, speaker.clone(), None).await,
             );
-            let ban = fastnetmon_ban("fastnetmon", "203.0.113.10");
+            let ban = flowspec_ban("203.0.113.10");
             let (status, _) = send(&app, "/v1/events", None, ban.clone()).await;
             assert_eq!(status, StatusCode::ACCEPTED);
             let unowned = speaker.inner.list_active().await.unwrap();
+            assert_eq!(unowned[0].nlri.dst_ports, [53]);
 
             let repo = Arc::new(MockRepository::new());
             let lease = Arc::new(crate::domain::LeaseKeeper::new(
