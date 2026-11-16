@@ -1127,3 +1127,262 @@ async fn seeded_token_secrets_never_leave_the_create_response() {
     }
     println!("\n{DONE}");
 }
+
+/// Every route that creates or changes a principal or its credentials.
+fn identity_routes(target: &str) -> Vec<(&'static str, String, Option<Value>)> {
+    vec![
+        (
+            "POST",
+            "/v1/tokens".into(),
+            Some(json!({"name": "minted", "scope": "admin"})),
+        ),
+        ("GET", "/v1/tokens".into(), None),
+        ("POST", "/v1/tokens/existing/revoke".into(), None),
+        (
+            "POST",
+            "/v1/operators".into(),
+            Some(
+                json!({"username": "minted-admin", "password": "minted-password", "role": "admin"}),
+            ),
+        ),
+        (
+            "PUT",
+            format!("/v1/operators/{target}/password"),
+            Some(json!({"new_password": "reset-password"})),
+        ),
+        ("DELETE", format!("/v1/operators/{target}"), None),
+    ]
+}
+
+/// Identity management needs a signed-in session. An admin token, an mTLS
+/// client and `none` mode each get 403 on every identity route, while the
+/// admin token keeps the other Admin routes; an Admin session succeeds on
+/// every identity route.
+#[tokio::test]
+async fn identity_routes_need_a_session() {
+    for mode in [AuthMode::Credentials, AuthMode::Mtls, AuthMode::None] {
+        let fixture = fixture(mode);
+        let target = fixture
+            .repo
+            .create_operator("target", "x", OperatorRole::Operator, None)
+            .await
+            .unwrap()
+            .operator_id
+            .to_string();
+        let admin = bearer(
+            &fixture
+                .repo
+                .mint_token_for_test("existing", TokenScope::Admin, None),
+        );
+        let headers: Vec<(&str, &str)> = if mode == AuthMode::Credentials {
+            vec![("authorization", admin.as_str())]
+        } else {
+            vec![]
+        };
+        for (method, path, body) in identity_routes(&target) {
+            let (status, _, response) =
+                send(&fixture.app, method, &path, &headers, body.as_ref()).await;
+            assert_eq!(
+                status,
+                StatusCode::FORBIDDEN,
+                "{mode:?} {method} {path}: {response}"
+            );
+        }
+        assert_eq!(fixture.repo.list_operators().await.unwrap().len(), 1);
+        assert_eq!(fixture.repo.list_api_tokens(None).await.unwrap().len(), 1);
+        assert!(
+            fixture.repo.list_api_tokens(None).await.unwrap()[0]
+                .revoked_at
+                .is_none()
+        );
+        // The same caller keeps every other Admin capability.
+        let (status, _, _) = send(&fixture.app, "GET", "/v1/operators", &headers, None).await;
+        assert_eq!(status, StatusCode::OK, "{mode:?}");
+        let (status, _, body) = send(
+            &fixture.app,
+            "POST",
+            "/v1/safelist",
+            &headers,
+            Some(&json!({"prefix": "203.0.113.201/32"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{mode:?}: {body}");
+    }
+
+    // Control: an Admin session succeeds on every identity route.
+    let fixture = fixture(AuthMode::Credentials);
+    let cookie = login(&fixture.app, &fixture.repo, "admin", OperatorRole::Admin).await;
+    let target = fixture
+        .repo
+        .create_operator("target", "x", OperatorRole::Operator, None)
+        .await
+        .unwrap()
+        .operator_id
+        .to_string();
+    fixture
+        .repo
+        .mint_token_for_test("existing", TokenScope::Admin, None);
+    for (method, path, body) in identity_routes(&target) {
+        let (status, _, response) = send(
+            &fixture.app,
+            method,
+            &path,
+            &[("cookie", &cookie)],
+            body.as_ref(),
+        )
+        .await;
+        assert!(status.is_success(), "{method} {path}: {status} {response}");
+    }
+    // An Operator session may change only its own password.
+    let operator = login(
+        &fixture.app,
+        &fixture.repo,
+        "self-service",
+        OperatorRole::Operator,
+    )
+    .await;
+    let own = fixture
+        .repo
+        .get_operator_by_username("self-service")
+        .await
+        .unwrap()
+        .unwrap()
+        .operator_id;
+    let admin_id = fixture
+        .repo
+        .get_operator_by_username("admin")
+        .await
+        .unwrap()
+        .unwrap()
+        .operator_id;
+    let (status, _, _) = send(
+        &fixture.app,
+        "PUT",
+        &format!("/v1/operators/{admin_id}/password"),
+        &[("cookie", &operator)],
+        Some(&json!({"new_password": "takeover-password"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    // Its own password, last: the change ends this session.
+    let (status, _, _) = send(
+        &fixture.app,
+        "PUT",
+        &format!("/v1/operators/{own}/password"),
+        &[("cookie", &operator)],
+        Some(&json!({"current_password": PASSWORD, "new_password": "rotated-password"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+}
+
+async fn sign_in(app: &Router, username: &str, password: &str) -> StatusCode {
+    send(
+        app,
+        "POST",
+        "/v1/auth/login",
+        &[],
+        Some(&json!({"username": username, "password": password})),
+    )
+    .await
+    .0
+}
+
+/// The attack the session rule closes: a stolen admin token tries to create an
+/// Admin operator, reset an Admin's password and mint a replacement token, so
+/// that it could sign in and survive revocation. Each step is refused, and
+/// after the token is revoked nothing it attempted persists.
+#[tokio::test]
+async fn a_stolen_admin_token_cannot_outlive_its_revocation() {
+    let fixture = fixture(AuthMode::Credentials);
+    let cookie = login(&fixture.app, &fixture.repo, "victim", OperatorRole::Admin).await;
+    let victim = fixture
+        .repo
+        .get_operator_by_username("victim")
+        .await
+        .unwrap()
+        .unwrap()
+        .operator_id;
+    let (status, _, created) = send(
+        &fixture.app,
+        "POST",
+        "/v1/tokens",
+        &[("cookie", &cookie)],
+        Some(&json!({"name": "automation", "scope": "admin"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let stolen = bearer(
+        serde_json::from_str::<Value>(&created).unwrap()["token"]
+            .as_str()
+            .unwrap(),
+    );
+    let auth = [("authorization", stolen.as_str())];
+
+    let (create, _, _) = send(
+        &fixture.app,
+        "POST",
+        "/v1/operators",
+        &auth,
+        Some(&json!({"username": "backdoor", "password": "backdoor-password", "role": "admin"})),
+    )
+    .await;
+    let (reset, _, _) = send(
+        &fixture.app,
+        "PUT",
+        &format!("/v1/operators/{victim}/password"),
+        &auth,
+        Some(&json!({"new_password": "takeover-password"})),
+    )
+    .await;
+    let (mint, _, _) = send(
+        &fixture.app,
+        "POST",
+        "/v1/tokens",
+        &auth,
+        Some(&json!({"name": "replacement", "scope": "admin"})),
+    )
+    .await;
+    assert_eq!(
+        [create, reset, mint],
+        [StatusCode::FORBIDDEN; 3],
+        "create operator, reset password, mint token"
+    );
+
+    let (status, _, _) = send(
+        &fixture.app,
+        "POST",
+        "/v1/tokens/automation/revoke",
+        &[("cookie", &cookie)],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    // Nothing the token attempted survives it.
+    let (status, _, _) = send(&fixture.app, "GET", "/v1/operators", &auth, None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "the revoked token");
+    assert_eq!(
+        sign_in(&fixture.app, "backdoor", "backdoor-password").await,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        sign_in(&fixture.app, "victim", "takeover-password").await,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        sign_in(&fixture.app, "victim", PASSWORD).await,
+        StatusCode::OK
+    );
+    let operators: Vec<_> = fixture
+        .repo
+        .list_operators()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|operator| operator.username)
+        .collect();
+    assert_eq!(operators, ["victim"]);
+    let tokens = fixture.repo.list_api_tokens(None).await.unwrap();
+    assert_eq!(tokens.len(), 1);
+    assert!(tokens[0].revoked_at.is_some());
+}

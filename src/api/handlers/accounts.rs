@@ -270,7 +270,7 @@ pub async fn list_operators(
         (status = 201, description = "Operator created", body = OperatorInfo),
         (status = 400, description = "Invalid input"),
         (status = 401, description = "Not authenticated"),
-        (status = 403, description = "Insufficient permissions"),
+        (status = 403, description = "Requires a signed-in session (Admin, or the operator itself for its own password); tokens, mTLS clients and auth mode none are refused"),
         (status = 409, description = "Username already exists")
     )
 )]
@@ -279,11 +279,12 @@ pub async fn create_operator(
     principal: AuthPrincipal,
     Json(req): Json<CreateOperatorRequest>,
 ) -> Result<(StatusCode, Json<OperatorInfo>), StatusCode> {
-    use crate::api::auth::require_role;
     use crate::domain::OperatorRole;
     use argon2::{Argon2, PasswordHasher};
 
-    let admin = require_role(&principal, OperatorRole::Admin)?;
+    // Identity management: an Admin session only, never a token.
+    let admin =
+        crate::api::auth::require_admin_session(&principal).map_err(|error| error.status_code())?;
 
     // Validate role
     let role: OperatorRole = req.role.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
@@ -355,7 +356,7 @@ pub async fn create_operator(
     responses(
         (status = 204, description = "Operator deleted"),
         (status = 401, description = "Not authenticated"),
-        (status = 403, description = "Insufficient permissions"),
+        (status = 403, description = "Requires a signed-in session (Admin, or the operator itself for its own password); tokens, mTLS clients and auth mode none are refused"),
         (status = 404, description = "Operator not found")
     )
 )]
@@ -364,10 +365,9 @@ pub async fn delete_operator(
     principal: AuthPrincipal,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, StatusCode> {
-    use crate::api::auth::require_role;
-    use crate::domain::OperatorRole;
-
-    let admin = require_role(&principal, OperatorRole::Admin)?;
+    // Identity management: an Admin session only, never a token.
+    let admin =
+        crate::api::auth::require_admin_session(&principal).map_err(|error| error.status_code())?;
 
     // Prevent self-deletion
     if admin.operator_id == id {
@@ -401,7 +401,7 @@ pub async fn delete_operator(
         (status = 204, description = "Password changed"),
         (status = 400, description = "Invalid password"),
         (status = 401, description = "Not authenticated"),
-        (status = 403, description = "Insufficient permissions"),
+        (status = 403, description = "Requires a signed-in session (Admin, or the operator itself for its own password); tokens, mTLS clients and auth mode none are refused"),
         (status = 404, description = "Operator not found")
     )
 )]
@@ -411,12 +411,13 @@ pub async fn change_password(
     Path(id): Path<Uuid>,
     Json(req): Json<ChangePasswordRequest>,
 ) -> Result<StatusCode, StatusCode> {
-    use crate::api::auth::require_role;
     use crate::domain::OperatorRole;
     use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 
-    // Allow self or admin to change password
-    let caller = require_role(&principal, OperatorRole::Viewer)?;
+    // Allow self or admin to change password, from a session only: no token,
+    // mTLS client or `none` mode sets or resets a password.
+    let caller = crate::api::auth::require_session(&principal, OperatorRole::Viewer)
+        .map_err(|error| error.status_code())?;
 
     let is_self = caller.operator_id == id;
     let is_admin = caller.role == OperatorRole::Admin;

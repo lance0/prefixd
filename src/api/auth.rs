@@ -277,21 +277,43 @@ pub fn require_ingest(principal: &AuthPrincipal) -> Result<(), PrefixdError> {
     }
 }
 
-/// Token management needs an Admin session. No token can call it, admin
-/// tokens included: a stolen admin token that could mint replacements would
-/// survive its own revocation.
-pub fn require_admin_session(principal: &AuthPrincipal) -> Result<Operator, PrefixdError> {
+/// Identity management needs a session: an operator signed in with a
+/// password. It covers API tokens, operator accounts and passwords. No token
+/// can reach it, admin tokens included, and neither can an mTLS client or
+/// `none` mode: a stolen admin token that could mint a token, create an Admin
+/// operator or reset a password could sign in and survive its own revocation.
+/// `prefixdctl` on the local database is the other path.
+pub fn require_session(
+    principal: &AuthPrincipal,
+    required_role: OperatorRole,
+) -> Result<Operator, PrefixdError> {
     match &principal.0 {
         None => Err(PrefixdError::Unauthorized("authentication required".into())),
         Some(Principal::Operator(operator, Credential::Session))
-            if operator.role == OperatorRole::Admin =>
+            if operator.role.has_permission(&required_role) =>
         {
             Ok(operator.clone())
         }
+        Some(Principal::Operator(operator, Credential::Session)) => {
+            tracing::warn!(
+                username = %operator.username,
+                role = %operator.role,
+                required = %required_role,
+                "insufficient permissions"
+            );
+            Err(PrefixdError::Forbidden(format!(
+                "identity management requires a {required_role} session"
+            )))
+        }
         Some(_) => Err(PrefixdError::Forbidden(
-            "token management requires an Admin session".into(),
+            "identity management requires a signed-in session; tokens, mTLS clients and auth mode none cannot manage tokens, operators or passwords".into(),
         )),
     }
+}
+
+/// [`require_session`] with the Admin role: tokens and operator accounts.
+pub fn require_admin_session(principal: &AuthPrincipal) -> Result<Operator, PrefixdError> {
+    require_session(principal, OperatorRole::Admin)
 }
 
 #[cfg(test)]

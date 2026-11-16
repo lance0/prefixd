@@ -888,7 +888,8 @@ pub const REMOVED_KEYS: &[(&str, &str)] = &[
     ("http.auth.bearer_token_env", TOKENS_RELEASE),
 ];
 
-/// The release that replaced the shared bearer token with API tokens.
+/// The release that replaced the shared bearer token with API tokens. It must
+/// match the version this change ships in; check it when cutting the release.
 pub const TOKENS_RELEASE: &str = "0.28.0";
 
 impl Settings {

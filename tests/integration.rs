@@ -20,7 +20,7 @@ use prefixd::config::{
     ShutdownConfig, StorageConfig, TimersConfig,
 };
 use prefixd::db::{MockRepository, RepositoryTrait};
-use prefixd::domain::{AttackVector, TokenScope};
+use prefixd::domain::{AttackVector, OperatorRole, TokenScope};
 
 struct RecoveringWithdrawal {
     inner: MockAnnouncer,
@@ -9788,9 +9788,57 @@ async fn test_list_operators() {
     assert!(json["operators"].is_array());
 }
 
+/// Credentials mode with a signed-in Admin session: operator accounts and
+/// passwords are identity management, which needs a session.
+async fn admin_session_app() -> (axum::Router, String) {
+    use argon2::{Argon2, PasswordHasher};
+    let repo = Arc::new(MockRepository::new());
+    let hash = Argon2::default()
+        .hash_password_with_salt(b"operator-admin-password", b"operator-admin-salt")
+        .unwrap()
+        .to_string();
+    repo.create_operator("session-admin", &hash, OperatorRole::Admin, None)
+        .await
+        .unwrap();
+    let mut settings = test_settings();
+    settings.http.auth.mode = AuthMode::Credentials;
+    let state = AppState::new(
+        settings,
+        test_inventory(),
+        test_playbooks(),
+        repo,
+        Arc::new(MockAnnouncer::new()),
+        ".".into(),
+    )
+    .unwrap();
+    let app = create_test_router(state);
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/auth/login")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"username": "session-admin", "password": "operator-admin-password"})
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let cookie = response.headers()["set-cookie"]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    (app, cookie)
+}
+
 #[tokio::test]
 async fn test_create_operator() {
-    let app = setup_app().await;
+    let (app, cookie) = admin_session_app().await;
 
     let body = serde_json::json!({
         "username": "newadmin",
@@ -9801,6 +9849,7 @@ async fn test_create_operator() {
     let response = app
         .oneshot(
             Request::builder()
+                .header("cookie", &cookie)
                 .method("POST")
                 .uri("/v1/operators")
                 .header("content-type", "application/json")
@@ -9821,7 +9870,7 @@ async fn test_create_operator() {
 
 #[tokio::test]
 async fn test_create_operator_duplicate() {
-    let app = setup_app().await;
+    let (app, cookie) = admin_session_app().await;
 
     let body = serde_json::json!({
         "username": "dupadmin",
@@ -9834,6 +9883,7 @@ async fn test_create_operator_duplicate() {
         .clone()
         .oneshot(
             Request::builder()
+                .header("cookie", &cookie)
                 .method("POST")
                 .uri("/v1/operators")
                 .header("content-type", "application/json")
@@ -9848,6 +9898,7 @@ async fn test_create_operator_duplicate() {
     let response = app
         .oneshot(
             Request::builder()
+                .header("cookie", &cookie)
                 .method("POST")
                 .uri("/v1/operators")
                 .header("content-type", "application/json")
@@ -9861,7 +9912,7 @@ async fn test_create_operator_duplicate() {
 
 #[tokio::test]
 async fn test_delete_operator() {
-    let app = setup_app().await;
+    let (app, cookie) = admin_session_app().await;
 
     // Create an operator to delete
     let create_body = serde_json::json!({
@@ -9873,6 +9924,7 @@ async fn test_delete_operator() {
         .clone()
         .oneshot(
             Request::builder()
+                .header("cookie", &cookie)
                 .method("POST")
                 .uri("/v1/operators")
                 .header("content-type", "application/json")
@@ -9892,6 +9944,7 @@ async fn test_delete_operator() {
     let response = app
         .oneshot(
             Request::builder()
+                .header("cookie", &cookie)
                 .method("DELETE")
                 .uri(format!("/v1/operators/{}", operator_id))
                 .body(Body::empty())
@@ -9904,11 +9957,12 @@ async fn test_delete_operator() {
 
 #[tokio::test]
 async fn test_delete_operator_not_found() {
-    let app = setup_app().await;
+    let (app, cookie) = admin_session_app().await;
 
     let response = app
         .oneshot(
             Request::builder()
+                .header("cookie", &cookie)
                 .method("DELETE")
                 .uri("/v1/operators/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
                 .body(Body::empty())
@@ -9921,7 +9975,7 @@ async fn test_delete_operator_not_found() {
 
 #[tokio::test]
 async fn test_change_password() {
-    let app = setup_app().await;
+    let (app, cookie) = admin_session_app().await;
 
     // Create an operator
     let create_body = serde_json::json!({
@@ -9933,6 +9987,7 @@ async fn test_change_password() {
         .clone()
         .oneshot(
             Request::builder()
+                .header("cookie", &cookie)
                 .method("POST")
                 .uri("/v1/operators")
                 .header("content-type", "application/json")
@@ -9956,6 +10011,7 @@ async fn test_change_password() {
     let response = app
         .oneshot(
             Request::builder()
+                .header("cookie", &cookie)
                 .method("PUT")
                 .uri(format!("/v1/operators/{}/password", operator_id))
                 .header("content-type", "application/json")
@@ -9969,7 +10025,7 @@ async fn test_change_password() {
 
 #[tokio::test]
 async fn test_change_password_admin_reset_without_current() {
-    let app = setup_app().await;
+    let (app, cookie) = admin_session_app().await;
 
     // Create an operator
     let create_body = serde_json::json!({
@@ -9981,6 +10037,7 @@ async fn test_change_password_admin_reset_without_current() {
         .clone()
         .oneshot(
             Request::builder()
+                .header("cookie", &cookie)
                 .method("POST")
                 .uri("/v1/operators")
                 .header("content-type", "application/json")
@@ -9996,13 +10053,14 @@ async fn test_change_password_admin_reset_without_current() {
     let json: serde_json::Value = serde_json::from_slice(&resp_body).unwrap();
     let operator_id = json["operator_id"].as_str().unwrap();
 
-    // Admin reset without current_password (auth_mode=none → synthetic admin)
+    // Admin reset without current_password (an Admin session)
     let pwd_body = serde_json::json!({
         "new_password": "newsupersecret"
     });
     let response = app
         .oneshot(
             Request::builder()
+                .header("cookie", &cookie)
                 .method("PUT")
                 .uri(format!("/v1/operators/{}/password", operator_id))
                 .header("content-type", "application/json")
