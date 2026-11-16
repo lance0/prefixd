@@ -544,7 +544,12 @@ impl AppConfig {
                 Ok((correlation, keys)) => {
                     check.validated.push("correlation.yaml");
                     check.unknown(&path("correlation.yaml"), keys);
-                    let errors = correlation.validate();
+                    // Without settings only this file's own checks can run;
+                    // settings that failed to load are reported above.
+                    let errors = match settings.as_ref() {
+                        Some(settings) => correlation.validate(&settings.ingest_authorization()),
+                        None => correlation.validate_fields(),
+                    };
                     if !errors.is_empty() {
                         check.fail(
                             &path("correlation.yaml"),

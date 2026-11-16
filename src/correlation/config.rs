@@ -4,6 +4,22 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::path::Path;
 
+/// Adapter secrets live in this namespace, so a configuration change cannot
+/// point an adapter at a guessable variable such as `PATH` (ADR 034 §5).
+pub const WEBHOOK_SECRET_ENV_PREFIX: &str = "PREFIXD_WEBHOOK_";
+/// Shortest adapter secret accepted: 256 bits.
+pub const MIN_WEBHOOK_SECRET_BYTES: usize = 32;
+
+/// What the correlation refusals read from `prefixd.yaml` (ADR 034 §5).
+#[derive(Debug, Clone, Copy)]
+pub struct IngestAuthorization<'a> {
+    pub auth_mode: crate::config::AuthMode,
+    /// `blackhole.detector_sources`
+    pub detector_sources: &'a [String],
+    /// `guardrails.detector_prefix_sources`
+    pub prefix_sources: &'a [String],
+}
+
 /// Configuration for the multi-signal correlation engine.
 ///
 /// When `enabled` is false (the default), the correlation engine is bypassed
@@ -265,7 +281,7 @@ impl CorrelationConfig {
     /// contains but this release ignores. Startup warns about each of them.
     pub fn load_with_unknown_keys<P: AsRef<Path>>(path: P) -> Result<(Self, Vec<String>)> {
         let (config, unknown_keys) = Self::from_yaml(&std::fs::read_to_string(path)?)?;
-        let errors = config.validate();
+        let errors = config.validate_fields();
         if !errors.is_empty() {
             return Err(anyhow::anyhow!(
                 "invalid correlation config: {}",
@@ -346,8 +362,65 @@ impl CorrelationConfig {
         Ok(())
     }
 
-    /// Validate the correlation config. Returns a list of validation errors (empty = valid).
-    pub fn validate(&self) -> Vec<String> {
+    /// Every check, including the ones that read `prefixd.yaml` (ADR 034 §5).
+    /// Startup, reload and `PUT /v1/config/correlation` all run it, so none of
+    /// them can introduce a refused shape. Returns the errors; empty is valid.
+    pub fn validate(&self, ingest: &IngestAuthorization<'_>) -> Vec<String> {
+        let mut errors = self.validate_fields();
+        errors.extend(self.ingest_errors(ingest));
+        errors
+    }
+
+    /// The refusals that bind an adapter's source to a credential. They need
+    /// the auth mode and both allowlists, which live in `prefixd.yaml`, and the
+    /// adapter secrets in the environment.
+    pub fn ingest_errors(&self, ingest: &IngestAuthorization<'_>) -> Vec<String> {
+        let mut errors = Vec::new();
+        for adapter in &self.webhook_adapters {
+            let name = &adapter.name;
+            match &adapter.auth {
+                super::webhook::WebhookAuth::None
+                    if ingest.auth_mode != crate::config::AuthMode::None =>
+                {
+                    errors.push(format!(
+                        "webhook_adapter '{name}': auth.type none lets any caller claim the adapter's source; use hmac or bearer (none is allowed only with http.auth.mode none)"
+                    ));
+                }
+                super::webhook::WebhookAuth::Hmac { secret_env, .. } => {
+                    let allowlisted = ingest.detector_sources.contains(name)
+                        || ingest.prefix_sources.contains(name);
+                    if allowlisted && adapter.fields.source_id.is_none() {
+                        errors.push(format!(
+                            "webhook_adapter '{name}': an HMAC adapter named in blackhole.detector_sources or guardrails.detector_prefix_sources must map fields.source_id, so a replayed signed ban is a duplicate"
+                        ));
+                    }
+                    if !secret_env.starts_with(WEBHOOK_SECRET_ENV_PREFIX) {
+                        errors.push(format!(
+                            "webhook_adapter '{name}': auth.secret_env must name a variable starting with {WEBHOOK_SECRET_ENV_PREFIX}"
+                        ));
+                    } else {
+                        // The value is the credential: never echo it.
+                        match std::env::var_os(secret_env) {
+                            None => errors.push(format!(
+                                "webhook_adapter '{name}': auth.secret_env {secret_env} is not set"
+                            )),
+                            Some(value) if value.len() < MIN_WEBHOOK_SECRET_BYTES => {
+                                errors.push(format!(
+                                    "webhook_adapter '{name}': auth.secret_env {secret_env} must hold at least {MIN_WEBHOOK_SECRET_BYTES} bytes"
+                                ))
+                            }
+                            Some(_) => {}
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        errors
+    }
+
+    /// The checks that need nothing outside this file.
+    pub fn validate_fields(&self) -> Vec<String> {
         let mut errors = Vec::new();
 
         if self.window_seconds == 0 {
@@ -878,7 +951,7 @@ sources:
     #[test]
     fn test_validate_valid_config() {
         let config = CorrelationConfig::default();
-        let errors = config.validate();
+        let errors = config.validate_fields();
         assert!(errors.is_empty(), "default config should be valid");
     }
 
@@ -915,7 +988,10 @@ sources:
                 "YAML must actually decode a non-finite value"
             );
             assert!(
-                config.validate().iter().any(|error| error.contains(field)),
+                config
+                    .validate_fields()
+                    .iter()
+                    .any(|error| error.contains(field)),
                 "accepted non-finite {field}: {yaml}"
             );
         }
@@ -960,7 +1036,7 @@ sources:
             let config: CorrelationConfig = crate::config::parse_yaml(&yaml).unwrap();
             assert!(
                 config
-                    .validate()
+                    .validate_fields()
                     .iter()
                     .any(|error| error.contains("confidence_mapping"))
             );
@@ -987,7 +1063,7 @@ sources:
                     },
                 );
                 assert!(
-                    config.validate().is_empty(),
+                    config.validate_fields().is_empty(),
                     "rejected finite threshold={threshold}, weight={weight}"
                 );
             }
@@ -999,7 +1075,7 @@ sources:
             };
             assert!(
                 config
-                    .validate()
+                    .validate_fields()
                     .iter()
                     .any(|error| error.contains("confidence_threshold"))
             );
@@ -1015,7 +1091,7 @@ sources:
             default_weight: -1.0,
             ..Default::default()
         };
-        let errors = config.validate();
+        let errors = config.validate_fields();
         assert!(
             errors.len() >= 4,
             "should have at least 4 errors: {:?}",
@@ -1035,7 +1111,7 @@ sources:
                 ..Default::default()
             },
         );
-        let errors = config.validate();
+        let errors = config.validate_fields();
         assert_eq!(errors.len(), 1);
         assert!(errors[0].contains("bad_source"));
     }
@@ -1054,7 +1130,7 @@ sources:
                 ..Default::default()
             },
         );
-        let errors = config.validate();
+        let errors = config.validate_fields();
         assert_eq!(errors.len(), 1);
         assert!(errors[0].contains("confidence_mapping"));
     }
@@ -1135,7 +1211,7 @@ sources:
             confidence_decay_half_life_seconds: 700,
             ..Default::default()
         };
-        let errs = cfg.validate();
+        let errs = cfg.validate_fields();
         assert!(
             errs.iter()
                 .any(|e| e.contains("confidence_decay_half_life_seconds")),
@@ -1151,7 +1227,7 @@ sources:
             confidence_decay_half_life_seconds: 600,
             ..Default::default()
         };
-        let errs = cfg.validate();
+        let errs = cfg.validate_fields();
         assert!(
             errs.is_empty(),
             "expected no errors at exact 10x bound, got: {:?}",
@@ -1235,7 +1311,7 @@ sources:
         let mut adapter = webhook_adapter_for_tests();
         adapter.confidence_scale = Some(0.0);
         config.webhook_adapters.push(adapter);
-        let errors = config.validate();
+        let errors = config.validate_fields();
         assert!(
             errors.iter().any(|e| e.contains("confidence_scale")),
             "expected confidence_scale error, got {errors:?}"
@@ -1248,7 +1324,7 @@ sources:
         let mut adapter = webhook_adapter_for_tests();
         adapter.confidence_scale = Some(f32::INFINITY);
         config.webhook_adapters.push(adapter);
-        let errors = config.validate();
+        let errors = config.validate_fields();
         assert!(
             errors.iter().any(|e| e.contains("confidence_scale")),
             "expected confidence_scale error, got {errors:?}"
@@ -1265,7 +1341,7 @@ sources:
             algorithm: "sha256".into(),
         };
         config.webhook_adapters.push(adapter);
-        let errors = config.validate();
+        let errors = config.validate_fields();
         assert!(
             errors.iter().any(|e| e.contains("secret_env")),
             "expected secret_env error, got {errors:?}"
@@ -1282,7 +1358,7 @@ sources:
             algorithm: "sha256".into(),
         };
         config.webhook_adapters.push(adapter);
-        let errors = config.validate();
+        let errors = config.validate_fields();
         assert!(
             errors.iter().any(|e| e.contains("auth.header")),
             "expected auth.header error, got {errors:?}"
@@ -1299,7 +1375,7 @@ sources:
             algorithm: "sha512".into(),
         };
         config.webhook_adapters.push(adapter);
-        let errors = config.validate();
+        let errors = config.validate_fields();
         assert!(
             errors.iter().any(|e| e.contains("auth.algorithm")),
             "expected auth.algorithm error, got {errors:?}"
@@ -1312,7 +1388,7 @@ sources:
         let mut adapter = webhook_adapter_for_tests();
         adapter.confidence_scale = Some(100.0);
         config.webhook_adapters.push(adapter);
-        let errors = config.validate();
+        let errors = config.validate_fields();
         assert!(errors.is_empty(), "unexpected errors: {errors:?}");
     }
 
@@ -1354,7 +1430,7 @@ match_dimensions: [customer_id, pop]
                 match_dimensions: vec![],
             },
         );
-        let errors = config.validate();
+        let errors = config.validate_fields();
         assert!(
             errors
                 .iter()
@@ -1376,7 +1452,7 @@ match_dimensions: [customer_id, pop]
                 match_dimensions: vec![MatchDimension::Pop],
             },
         );
-        let errors = config.validate();
+        let errors = config.validate_fields();
         assert!(
             errors
                 .iter()
@@ -1398,7 +1474,7 @@ match_dimensions: [customer_id, pop]
                 match_dimensions: vec![MatchDimension::Pop, MatchDimension::CustomerId],
             },
         );
-        let errors = config.validate();
+        let errors = config.validate_fields();
         assert!(errors.is_empty(), "unexpected errors: {errors:?}");
     }
 

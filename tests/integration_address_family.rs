@@ -654,12 +654,12 @@ async fn detector_prefix_unban_by_event_id_withdraws_the_prefix_rule() {
     assert!(!repo.get_mitigation(id).await.unwrap().unwrap().is_active());
     assert!(speaker.list_active().await.unwrap().is_empty());
 
-    // An unknown prefix event ID is answered like a host one.
-    let mut unknown = prefix_event("never-sent", "203.0.113.0/24", &[53]);
-    unknown["action"] = json!("unban");
-    let (status, body) = post(state, "/v1/events", unknown).await;
+    // Nothing live is left for the prefix: the definitive answer.
+    let mut again = prefix_event("never-sent", "203.0.113.0/24", &[53]);
+    again["action"] = json!("unban");
+    let (status, body) = post(state, "/v1/events", again).await;
     assert_eq!(status, StatusCode::ACCEPTED, "{body}");
-    assert_eq!(body["status"], "not_found");
+    assert_eq!(body["status"], "no_active_mitigation");
 }
 
 #[tokio::test]

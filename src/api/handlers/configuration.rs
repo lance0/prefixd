@@ -568,7 +568,7 @@ pub async fn update_correlation_config(
     };
 
     // Validate config
-    let errors = new_config.validate();
+    let errors = new_config.validate(&state.settings.ingest_authorization());
     if !errors.is_empty() {
         return Ok((
             StatusCode::BAD_REQUEST,
