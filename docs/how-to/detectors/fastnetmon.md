@@ -31,11 +31,52 @@ qualified for prefix rules.
 Multiple networks in one hostgroup need separate events with distinct event
 IDs. See [ADR 033](../../adr/033-detector-prefix-mitigations.md).
 
-A shim posts one event per attacked network:
+A prefix shim cannot use the shared bearer token for this allowlisted source:
+it gets `403`. The native FastNetMon, Alertmanager and generic webhook routes
+currently require host IP addresses, so none is a CIDR migration path. Native
+hostgroup support (LAN-3288) and scoped tokens (LAN-3000) remain future work.
+
+An Admin session is an **interim bridge with broad Admin privileges**, not a
+source-scoped detector credential. Use it only if that trust is acceptable for
+the shim host; otherwise defer prefix ingestion. Keep authentication enabled.
+
+The following one-event example requires Bash, curl and jq, an existing Admin
+account, and `http.auth.mode: bearer` or `credentials`. Set `PREFIXD_API` to the
+controller's HTTPS origin (including any port). Provision `PREFIXD_LOGIN_JSON`
+as the path to a secret-managed JSON file containing `username` and `password`,
+readable only by the shim account (mode `0600`). Do not put the password in
+command arguments, shell history, logs or the repository. Keep the cookie jar
+private too, and do not enable shell tracing or curl verbose output.
+
+Log in, verify the returned role, then post one event per attacked network:
 
 ```bash
-curl -X POST "${PREFIXD_API}/v1/events" \
-  -H "Authorization: Bearer ${PREFIXD_TOKEN}" \
+set -euo pipefail
+umask 077
+: "${PREFIXD_API:?Set the HTTPS controller origin}"
+: "${PREFIXD_LOGIN_JSON:?Set the protected login JSON file path}"
+case "$PREFIXD_API" in
+  https://*) ;;
+  *) echo 'PREFIXD_API must use HTTPS' >&2; exit 1 ;;
+esac
+PREFIXD_COOKIE_JAR=$(mktemp)
+cleanup() {
+  curl --silent --show-error --fail --proto '=https' \
+    -b "$PREFIXD_COOKIE_JAR" -X POST "${PREFIXD_API}/v1/auth/logout" \
+    >/dev/null || true
+  rm -f "$PREFIXD_COOKIE_JAR"
+}
+trap cleanup EXIT
+
+curl --silent --show-error --fail-with-body --proto '=https' \
+  -X POST "${PREFIXD_API}/v1/auth/login" \
+  -H "Content-Type: application/json" \
+  --data-binary "@${PREFIXD_LOGIN_JSON}" -c "$PREFIXD_COOKIE_JAR" \
+  | jq -e '.role == "admin"' >/dev/null
+
+curl --silent --show-error --fail-with-body --proto '=https' \
+  -X POST "${PREFIXD_API}/v1/events" \
+  -b "$PREFIXD_COOKIE_JAR" -c "$PREFIXD_COOKIE_JAR" \
   -H "Content-Type: application/json" \
   -d '{
     "event_id": "fnm-hostgroup-customer-a-1731574800",
@@ -43,13 +84,26 @@ curl -X POST "${PREFIXD_API}/v1/events" \
     "source": "fastnetmon",
     "victim_ip": "203.0.113.0/24",
     "vector": "udp_flood",
+    "action": "ban",
     "pps": 4200000,
     "confidence": 0.9
   }'
 ```
 
+Sessions are configured with a seven-day inactivity expiry; the cookie is not
+a permanent API token. A long-running shim must protect and update its cookie
+jar (`-b` and `-c`), detect `401`, and reauthenticate through the login endpoint
+before retrying with the same event ID. Stop and investigate `403`; do not
+remove the allowlist or downgrade authentication to make the request pass.
+Use a trusted HTTPS certificate (or configure curl's CA trust), not `-k` or
+`http.secure_cookies: false`. The example attempts logout and removes its local
+cookie jar on exit; deleting a jar alone does not invalidate the server session.
+
 Treat `400` and `422` as final and never resend a refused prefix as a host
-event. Send the unban with the same `source` and `event_id`.
+event. Replace the example ID and timestamp with the attack's actual values.
+Send the unban with the same `source` and `event_id` and `action: "unban"`.
+The source gate does not apply to unban; existing Operator credentials remain
+usable for withdrawal.
 
 Portless UDP police is an owner-approved exception, not an operator-confirmed
 requirement. It is one shared rate bucket for all UDP to the whole prefix,
