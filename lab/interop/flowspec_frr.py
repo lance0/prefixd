@@ -108,7 +108,10 @@ class Lab:
         # ingestion: an ingest token cannot read, and an operator token cannot
         # be used where the ingest token is required.
         self.token = Path(args.token_file).read_text().strip()
-        self.ingest_token = Path(args.ingest_token_file).read_text().strip()
+        # Drivers that post no events themselves (FastNetMon's script does)
+        # take no ingest token.
+        ingest = getattr(args, "ingest_token_file", None)
+        self.ingest_token = Path(ingest).read_text().strip() if ingest else None
         # A subclass that logs in sets this; a Bearer header would replace the
         # session, so session requests send none.
         self.use_session = False
@@ -132,6 +135,7 @@ class Lab:
         data = json.dumps(body).encode() if body is not None else None
         request = urllib.request.Request(self.args.api + path, data=data, method=method)
         if method == "POST" and path.startswith("/v1/events"):
+            assert self.ingest_token, "this lab posts events without an ingest token"
             request.add_header("Authorization", f"Bearer {self.ingest_token}")
         elif not self.use_session:
             request.add_header("Authorization", f"Bearer {self.token}")

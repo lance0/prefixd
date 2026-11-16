@@ -1,13 +1,13 @@
 # FastNetMon interop lane controller, adapted from prefixd-rustbgpd.yaml.
-# Auth is `none` until the lane presents a source-bound ingest token; the
-# lane's credential hook (run-fastnetmon.sh) is the one place that changes.
+# API tokens authenticate the bundled script and the driver; the lane's
+# credential hook (run-fastnetmon.sh) is the one place that mints them.
 pop: lab1
 mode: enforced
 
 http:
   listen: "0.0.0.0:8080"
   auth:
-    mode: none
+    mode: credentials
 
 bgp:
   backend: rustbgpd

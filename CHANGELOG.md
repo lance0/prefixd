@@ -203,9 +203,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   mitigation and the exact rule at FRR, re-bans must extend it, and unbans,
   including FastNetMon's own timer unban of the detected ban, must withdraw it.
   The detected ban's rule polices the service's allowed UDP ports, not the
-  flood's port, because the script sends none. The lane runs prefixd in `none`
-  auth mode, so it covers the notify contract and route lifecycle, not
-  detector authentication. The
+  flood's port, because the script sends none. The lane runs prefixd in
+  `credentials` mode with API tokens minted by `prefixdctl`: the script holds
+  an operator token, because its unban still reads and withdraws mitigations,
+  so the lane covers the notify contract, the route lifecycle and token
+  authentication, not source binding. The
   [dated receipt](docs/reference/qualification/fastnetmon-community-2026-11-16.md)
   and `lab/interop/fastnetmon-probe.sh` record the image's missing `curl`,
   each notify call's arguments and stdin, and what is unqualified for
