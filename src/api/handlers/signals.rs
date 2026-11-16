@@ -14,7 +14,8 @@ use uuid::Uuid;
 
 use crate::AppState;
 use crate::api::auth::{
-    AuthPrincipal, IngestPrincipal, require_auth, require_ingest, require_role,
+    AuthPrincipal, IngestPrincipal, SourceGrant, authorize_ingest, authorize_webhook_hmac,
+    require_auth, require_ingest, require_role,
 };
 use crate::auth::AuthSession;
 use crate::db::ListParams;
@@ -374,6 +375,7 @@ fn parse_optional_i64(annotations: &HashMap<String, String>, key: &str) -> Optio
         (status = 200, description = "Alerts processed", body = AlertmanagerWebhookResponse),
         (status = 400, description = "Malformed payload"),
         (status = 401, description = "Authentication required"),
+        (status = 403, description = "The credential is not bound to `alertmanager`"),
     )
 )]
 pub async fn ingest_alertmanager(
@@ -389,7 +391,7 @@ async fn ingest_alertmanager_inner(
     principal: AuthPrincipal,
     body: axum::body::Bytes,
 ) -> Result<(StatusCode, Json<AlertmanagerWebhookResponse>), AppError> {
-    require_ingest(&principal).map_err(AppError)?;
+    let grant = authorize_ingest(&principal, "alertmanager").map_err(AppError)?;
 
     // Parse body as JSON — return 400 for malformed payloads
     let payload: AlertmanagerWebhookPayload = serde_json::from_slice(&body).map_err(|e| {
@@ -419,7 +421,7 @@ async fn ingest_alertmanager_inner(
     let mut failed = 0u32;
 
     for (index, alert) in payload.alerts.into_iter().enumerate() {
-        match process_alertmanager_alert(&state, &alert, index).await {
+        match process_alertmanager_alert(&state, &grant, &alert, index).await {
             Ok(result) => {
                 processed += 1;
                 results.push(result);
@@ -452,6 +454,7 @@ async fn ingest_alertmanager_inner(
 /// failure — both carry the per-alert result.
 async fn process_alertmanager_alert(
     state: &Arc<AppState>,
+    grant: &SourceGrant,
     alert: &AlertmanagerAlert,
     index: usize,
 ) -> Result<AlertmanagerAlertResult, AlertmanagerAlertResult> {
@@ -565,7 +568,7 @@ async fn process_alertmanager_alert(
 
     // Delegate to the existing event ingestion pipeline
     match input.action.as_str() {
-        "unban" => match handle_unban(state.clone(), input).await {
+        "unban" => match handle_unban(state.clone(), grant, input).await {
             Ok((_status, Json(resp))) => Ok(AlertmanagerAlertResult {
                 announcement_outcome: resp.announcement_outcome,
                 index,
@@ -583,7 +586,7 @@ async fn process_alertmanager_alert(
                 error: Some(e.to_string()),
             }),
         },
-        _ => match handle_ban(state.clone(), input).await {
+        _ => match handle_ban(state.clone(), grant, input).await {
             Ok((_status, Json(resp))) => Ok(AlertmanagerAlertResult {
                 announcement_outcome: resp.announcement_outcome,
                 index,
@@ -840,6 +843,13 @@ async fn ingest_fastnetmon_inner(
             e
         )))
     })?;
+    // A host alert is `fastnetmon`; any other scope is a hostgroup alert,
+    // which has its own source so prefix authority stays separate (ADR 034 §12).
+    let claimed = match payload.alert_scope.as_deref() {
+        None | Some("host") => "fastnetmon",
+        Some(_) => "fastnetmon-hostgroup",
+    };
+    let grant = authorize_ingest(&principal, claimed).map_err(AppError)?;
 
     // Validate required fields
     if payload.ip.is_empty() {
@@ -866,7 +876,7 @@ async fn ingest_fastnetmon_inner(
 
     // Compute confidence from action type via configurable mapping
     let correlation_config = state.correlation_config.read().await;
-    let confidence = correlation_config.source_action_confidence("fastnetmon", &payload.action);
+    let confidence = correlation_config.source_action_confidence(grant.source(), &payload.action);
     drop(correlation_config);
 
     // Extract traffic metrics from attack details
@@ -902,7 +912,7 @@ async fn ingest_fastnetmon_inner(
     let input = AttackEventInput {
         event_id: external_event_id,
         timestamp,
-        source: "fastnetmon".to_string(),
+        source: grant.source().to_string(),
         victim_ip: payload.ip,
         vector,
         bps,
@@ -916,14 +926,8 @@ async fn ingest_fastnetmon_inner(
 
     // Delegate to the existing event ingestion pipeline
     match input.action.as_str() {
-        "unban" => match handle_unban(state.clone(), input).await {
-            Ok(resp) => Ok(resp),
-            Err(e) => Err(e),
-        },
-        _ => match handle_ban(state.clone(), input).await {
-            Ok(resp) => Ok(resp),
-            Err(e) => Err(e),
-        },
+        "unban" => handle_unban(state.clone(), &grant, input).await,
+        _ => handle_ban(state.clone(), &grant, input).await,
     }
 }
 
@@ -969,6 +973,7 @@ pub struct WebhookResponse {
         (status = 200, description = "Events processed", body = WebhookResponse),
         (status = 400, description = "Malformed payload or no mappable events"),
         (status = 401, description = "HMAC/bearer verification failed"),
+        (status = 403, description = "A bearer credential is not bound to the adapter name"),
         (status = 404, description = "Adapter not configured or disabled"),
     )
 )]
@@ -1017,8 +1022,8 @@ async fn ingest_webhook_inner(
         (adapter, compiled)
     };
 
-    // Auth check per adapter
-    match &adapter.auth {
+    // Each adapter's credential grants its own name as the source (ADR 034 §4).
+    let grant = match &adapter.auth {
         crate::correlation::WebhookAuth::Hmac {
             secret_env,
             header,
@@ -1034,31 +1039,21 @@ async fn ingest_webhook_inner(
                     "adapter '{name}' HMAC secret env var '{secret_env}' not set"
                 ))));
             };
-            let sig = headers
-                .get(header.as_str())
-                .and_then(|v| v.to_str().ok())
-                .ok_or_else(|| {
-                    AppError(PrefixdError::Unauthorized(format!(
-                        "missing HMAC signature header '{header}'"
-                    )))
-                })?;
-            if !crate::correlation::verify_hmac_sha256(secret.as_bytes(), &body, sig) {
-                return Err(AppError(PrefixdError::Unauthorized(
-                    "HMAC signature verification failed".into(),
-                )));
-            }
+            let signature = headers.get(header.as_str()).and_then(|v| v.to_str().ok());
+            authorize_webhook_hmac(&adapter.name, secret.as_bytes(), &body, signature)
+                .map_err(AppError)?
         }
-        crate::correlation::WebhookAuth::Bearer => {
-            // Resolved only here: an HMAC adapter ignores `Authorization`.
+        // An HMAC adapter ignores `Authorization`, so the principal is
+        // resolved only here. `auth.type: none` is refused outside auth mode
+        // `none` (ADR 034 §5), where the principal is the anonymous Admin;
+        // anywhere else it gets no grant.
+        crate::correlation::WebhookAuth::Bearer | crate::correlation::WebhookAuth::None => {
             let principal = AuthPrincipal::resolve(&state, &headers, Some(&auth_session))
                 .await
                 .map_err(AppError)?;
-            require_ingest(&principal).map_err(AppError)?;
+            authorize_ingest(&principal, &adapter.name).map_err(AppError)?
         }
-        crate::correlation::WebhookAuth::None => {
-            // No-auth is caller's responsibility; logged once at startup.
-        }
-    }
+    };
 
     // Parse body
     let payload: serde_json::Value = serde_json::from_slice(&body).map_err(|e| {
@@ -1092,7 +1087,7 @@ async fn ingest_webhook_inner(
                 });
             }
             Ok(input) => match input.action.as_str() {
-                "unban" => match handle_unban(state.clone(), input).await {
+                "unban" => match handle_unban(state.clone(), &grant, input).await {
                     Ok((_status, Json(resp))) => {
                         processed += 1;
                         results.push(WebhookEventResult {
@@ -1116,7 +1111,7 @@ async fn ingest_webhook_inner(
                         });
                     }
                 },
-                _ => match handle_ban(state.clone(), input).await {
+                _ => match handle_ban(state.clone(), &grant, input).await {
                     Ok((_status, Json(resp))) => {
                         processed += 1;
                         results.push(WebhookEventResult {
@@ -1228,6 +1223,7 @@ pub struct CorroboratorResponse {
         (status = 200, description = "Signal ingested", body = CorroboratorResponse),
         (status = 400, description = "Invalid source mode, dimensions or confidence"),
         (status = 401, description = "Authentication required"),
+        (status = 403, description = "The credential is not bound to the body `source`"),
     )
 )]
 pub async fn ingest_corroborator(
@@ -1236,13 +1232,22 @@ pub async fn ingest_corroborator(
     Json(input): Json<CorroboratorInput>,
 ) -> impl IntoResponse {
     require_ingest(&principal).map_err(AppError)?;
-    ingest_corroborator_inner(state, input).await
+    if input.source.len() > super::MAX_STRING_LEN {
+        return Err(AppError(PrefixdError::InvalidRequest(
+            "source exceeds maximum length".into(),
+        )));
+    }
+    let grant = authorize_ingest(&principal, &input.source).map_err(AppError)?;
+    ingest_corroborator_inner(state, grant, input).await
 }
 
 async fn ingest_corroborator_inner(
     state: Arc<AppState>,
-    input: CorroboratorInput,
+    grant: SourceGrant,
+    mut input: CorroboratorInput,
 ) -> Result<impl IntoResponse, AppError> {
+    // The signal's source, weight and mode come from the grant.
+    input.source = grant.source().to_string();
     validate_confidence(input.confidence).map_err(AppError)?;
     use crate::correlation::{CorrelationEngine, CorroboratingSignal, EventDimensions, SourceMode};
 
@@ -1867,9 +1872,10 @@ mod tests {
             }))
             .unwrap();
             input.confidence = Some(confidence);
+            let grant = crate::api::auth::SourceGrant::for_test("typed-primary");
             for result in [
-                super::handle_ban(state.clone(), input.clone()).await,
-                super::handle_unban(state.clone(), input).await,
+                super::handle_ban(state.clone(), &grant, input.clone()).await,
+                super::handle_unban(state.clone(), &grant, input).await,
             ] {
                 let error = match result {
                     Err(error) => error,
@@ -1888,7 +1894,8 @@ mod tests {
                 confidence: Some(confidence),
                 raw_details: None,
             };
-            let error = match super::ingest_corroborator_inner(state.clone(), input).await {
+            let grant = crate::api::auth::SourceGrant::for_test("typed-corrob");
+            let error = match super::ingest_corroborator_inner(state.clone(), grant, input).await {
                 Err(error) => error,
                 Ok(_) => panic!("invalid typed corroborator confidence accepted"),
             };

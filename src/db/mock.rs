@@ -991,7 +991,7 @@ impl RepositoryTrait for MockRepository {
                     quotas.max_active_per_customer,
                 )?;
                 // The detector prefix budget never caps manual CIDRs.
-                if matches!(actor, crate::observability::CreationActor::Detector(_))
+                if matches!(actor, crate::observability::CreationActor::Detector { .. })
                     && crate::domain::is_prefix_destination(&m.match_criteria.dst_prefix)
                 {
                     let prefix_count = mitigations
@@ -1234,13 +1234,34 @@ impl RepositoryTrait for MockRepository {
             .cloned())
     }
 
-    async fn list_active_by_triggering_event(&self, event_id: Uuid) -> Result<Vec<Mitigation>> {
-        let mitigations = self.mitigations.lock().unwrap();
-        Ok(mitigations
+    async fn list_live_by_victim_and_source(
+        &self,
+        victim_ip: &str,
+        pop: &str,
+        source: &str,
+    ) -> Result<Vec<Mitigation>> {
+        // One lock at a time, so no lock order can deadlock another method.
+        let from_source: std::collections::HashSet<Uuid> = self
+            .events
+            .lock()
+            .unwrap()
             .iter()
-            .filter(|m| m.triggering_event_id == event_id && m.is_active())
+            .filter(|e| e.source == source)
+            .map(|e| e.event_id)
+            .collect();
+        let mitigations = self.mitigations.lock().unwrap();
+        let mut found: Vec<_> = mitigations
+            .iter()
+            .filter(|m| {
+                m.victim_ip == victim_ip
+                    && m.pop == pop
+                    && m.is_active()
+                    && from_source.contains(&m.triggering_event_id)
+            })
             .cloned()
-            .collect())
+            .collect();
+        found.sort_by_key(|m| (m.created_at, m.mitigation_id));
+        Ok(found)
     }
 
     async fn list_mitigations(

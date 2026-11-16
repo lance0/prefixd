@@ -866,7 +866,7 @@ impl RepositoryTrait for Repository {
                         .bind(customer_id).fetch_one(&mut *tx).await?;
                     check_active_quota("customer", u32::try_from(count).unwrap_or(u32::MAX), quotas.max_active_per_customer)?;
                     // The detector prefix budget never caps manual CIDRs.
-                    if matches!(actor, CreationActor::Detector(_))
+                    if matches!(actor, CreationActor::Detector { .. })
                         && crate::domain::is_prefix_destination(&m.match_criteria.dst_prefix)
                     {
                         let prefix_count: i64 = sqlx::query_scalar(
@@ -1092,20 +1092,30 @@ impl RepositoryTrait for Repository {
         }
     }
 
-    async fn list_active_by_triggering_event(&self, event_id: Uuid) -> Result<Vec<Mitigation>> {
+    async fn list_live_by_victim_and_source(
+        &self,
+        victim_ip: &str,
+        pop: &str,
+        source: &str,
+    ) -> Result<Vec<Mitigation>> {
         let rows = sqlx::query_as::<_, MitigationRow>(
             r#"
-            SELECT mitigation_id, scope_hash, pop, customer_id, service_id, victim_ip, vector,
-                   match_json, action_type, action_params_json, status,
-                   created_at, updated_at, expires_at, withdrawn_at,
-                   triggering_event_id, last_event_id, escalated_from_id, reason, rejection_reason,
-                   acknowledged_at, acknowledged_by, signal_group_id, origin_mode
-            FROM mitigations
-            WHERE triggering_event_id = $1 AND status IN ('active', 'escalated')
-            ORDER BY created_at, mitigation_id
+            SELECT m.mitigation_id, m.scope_hash, m.pop, m.customer_id, m.service_id,
+                   m.victim_ip, m.vector, m.match_json, m.action_type, m.action_params_json,
+                   m.status, m.created_at, m.updated_at, m.expires_at, m.withdrawn_at,
+                   m.triggering_event_id, m.last_event_id, m.escalated_from_id, m.reason,
+                   m.rejection_reason, m.acknowledged_at, m.acknowledged_by, m.signal_group_id,
+                   m.origin_mode
+            FROM mitigations m
+            JOIN events e ON e.event_id = m.triggering_event_id
+            WHERE m.victim_ip = $1 AND m.pop = $2 AND e.source = $3
+              AND m.status IN ('active', 'escalated')
+            ORDER BY m.created_at, m.mitigation_id
             "#,
         )
-        .bind(event_id)
+        .bind(victim_ip)
+        .bind(pop)
+        .bind(source)
         .fetch_all(&self.pool)
         .await?;
         rows.into_iter().map(Mitigation::from_row).collect()
