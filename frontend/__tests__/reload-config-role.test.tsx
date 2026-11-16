@@ -36,6 +36,14 @@ describe("administration page reload configuration", () => {
     expect(controller.calls("POST", "/v1/config/reload")).toHaveLength(0)
   })
 
+  it("shows the reload button when authentication is disabled", async () => {
+    signIn(controller, "none", null)
+    renderAdmin()
+
+    expect(await screen.findByRole("button", reloadButton)).toBeEnabled()
+    expect(controller.calls("POST", "/v1/config/reload")).toHaveLength(0)
+  })
+
   it("waits for authentication before showing the admin reload button", async () => {
     const session = deferred<Response>()
     signIn(controller, "credentials", operatorResponse("admin"))
