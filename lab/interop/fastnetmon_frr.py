@@ -148,7 +148,8 @@ class FastNetMonLab(Lab):
             input=stdin,
             check=True,
             text=True,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             timeout=60,
         ).stdout
 

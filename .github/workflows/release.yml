@@ -14,10 +14,11 @@ name: Release
 #   or release is created.
 #
 # Before anything is tagged or pushed, scripts/release-check.sh requires the
-# tag to equal the Cargo.toml version, the commit to be on main, and ci.yml's
-# push run to have passed on that exact commit. github-actions[bot] publishes
-# the GitHub Release with the CHANGELOG section as its body; an existing
-# release is never overwritten. See docs/project/release-checklist.md.
+# tag to equal the Cargo.toml version, the commit to be on main, and the latest
+# ci.yml and interop.yml push runs to have passed on that exact commit.
+# github-actions[bot] publishes the GitHub Release with the CHANGELOG section
+# as its body; an existing release is never overwritten. See
+# docs/project/release-checklist.md.
 on:
   workflow_run:
     workflows: [CI]
@@ -38,7 +39,7 @@ concurrency:
 
 jobs:
   verify:
-    name: Verify tag, main CI and notes
+    name: Verify tag, main CI, Interop and notes
     # workflow_run: only a successful main push run of ci.yml in this repository.
     if: >-
       github.event_name != 'workflow_run' ||
@@ -49,7 +50,7 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
-      actions: read # read ci.yml runs for the release commit
+      actions: read # read CI and Interop runs for the release commit
     outputs:
       proceed: ${{ steps.check.outputs.proceed }}
       publish: ${{ steps.check.outputs.publish }}
