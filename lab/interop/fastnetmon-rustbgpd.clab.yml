@@ -1,0 +1,95 @@
+# FastNetMon Community -> prefixd -> rustbgpd -> FRR interop lane. Run it
+# through lab/interop/run-fastnetmon.sh, which builds the FastNetMon image and
+# writes the per-run secrets under .run/.
+#
+# The prefixd, speaker and FRR nodes match frr-rustbgpd.clab.yml (speaker
+# 10.0.0.1, FRR 10.0.0.2, postgres owning the shared network namespace) without
+# its RTR cache, which this lane does not use. FastNetMon joins the same
+# namespace: its notify script reaches prefixd on 127.0.0.1:8080, and the NetFlow
+# exporter on the host sends to the postgres node's management address, UDP
+# 2055. The container prefix keeps the node names under prefixd-fnm-.
+name: prefixd-fnm
+prefix: __lab-name
+
+mgmt:
+  network: prefixd-fnm
+  ipv4-subnet: 172.31.234.0/24
+
+topology:
+  nodes:
+    postgres:
+      kind: linux
+      image: postgres:16-alpine@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
+      cmd: postgres -c listen_addresses=127.0.0.1
+      env:
+        POSTGRES_USER: prefixd
+        POSTGRES_DB: prefixd
+      env-files:
+        - .run/prefixd-fnm/postgres.env
+      exec:
+        - ip addr add 10.0.0.1/24 dev eth1
+        - ip link set eth1 up
+
+    speaker:
+      kind: linux
+      image: ghcr.io/lance0/rustbgpd:0.83.0@sha256:79a6a584b59dae0574a8f5240a4e8f68454fdfede1b7fe31ed446fcf92a30979
+      network-mode: container:postgres
+      stages:
+        create:
+          wait-for:
+            - node: postgres
+              stage: create
+      cmd: rustbgpd /etc/rustbgpd/config.toml
+      binds:
+        - configs/rustbgpd.toml:/etc/rustbgpd/config.toml:ro
+        - .run/prefixd-fnm/rustbgpd.token:/run/lab/rustbgpd.token:ro
+
+    # Started by run-fastnetmon.sh once the database is ready.
+    controller:
+      kind: linux
+      image: prefixd:interop
+      network-mode: container:postgres
+      stages:
+        create:
+          wait-for:
+            - node: postgres
+              stage: create
+      entrypoint: sleep
+      cmd: infinity
+      env-files:
+        - .run/prefixd-fnm/prefixd.env
+      binds:
+        - configs/prefixd-fastnetmon.yaml:/etc/prefixd/prefixd.yaml:ro
+        - configs/inventory.yaml:/etc/prefixd/inventory.yaml:ro
+        - configs/playbooks-fastnetmon.yaml:/etc/prefixd/playbooks.yaml:ro
+
+    # FastNetMon Community 1.2.9 plus curl (fastnetmon.Dockerfile), running the
+    # bundled notify script from this checkout. /etc/default/prefixd is the
+    # script's defaults file, written by run-fastnetmon.sh's credential hook.
+    fastnetmon:
+      kind: linux
+      image: prefixd-fastnetmon:interop
+      network-mode: container:postgres
+      stages:
+        create:
+          wait-for:
+            - node: postgres
+              stage: create
+      binds:
+        - configs/fastnetmon.conf:/etc/fastnetmon.conf:ro
+        - configs/fastnetmon-networks:/etc/networks_list:ro
+        - ../../scripts/prefixd-fastnetmon.sh:/usr/local/bin/prefixd-fastnetmon.sh:ro
+        - .run/prefixd-fnm/fastnetmon.defaults:/etc/default/prefixd:ro
+
+    frr:
+      kind: linux
+      image: quay.io/frrouting/frr:10.7.1@sha256:e995beaa50fdc9edb35eadcfefa29b7f062cc06f2b812613789b68fa541554d2
+      binds:
+        - configs/frr-daemons:/etc/frr/daemons:ro
+        - configs/frr.conf:/etc/frr/frr.conf:ro
+      exec:
+        - ip addr add 10.0.0.2/24 dev eth1
+        - ip link set eth1 up
+
+  links:
+    - endpoints: ["postgres:eth1", "frr:eth1"]

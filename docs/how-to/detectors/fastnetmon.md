@@ -494,6 +494,22 @@ curl -H "Authorization: Bearer ${PREFIXD_TOKEN}" \
 echo "" | /usr/local/bin/prefixd-fastnetmon.sh 203.0.113.10 incoming 0 unban
 ```
 
+### Interop lane
+
+`just interop-fastnetmon` runs FastNetMon Community 1.2.9 with this script
+against prefixd, rustbgpd and FRR, and CI runs it on every change to the
+script. The [dated receipt](../../reference/qualification/fastnetmon-community-2026-11-16.md)
+lists what it covers. Two of its findings matter for an install:
+
+- The official `fastnetmon-community` container image has no `curl`; add it,
+  as the lane's image does.
+- A manual `fastnetmon_api_client ban` sends all-zero counters, so the script
+  sends vector `unknown`. It creates a mitigation only if a playbook matches
+  `unknown`, as the shipped `unknown_conservative` does.
+
+FastNetMon Advanced is not qualified; the receipt lists the open items and
+the manual procedure.
+
 ## Troubleshooting
 
 ### Check logs

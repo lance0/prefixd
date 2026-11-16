@@ -2,7 +2,8 @@ name: Interop
 
 # FlowSpec, blackhole and amplification interop against a real receiving router.
 # Each leg drives prefixd's HTTP API with the speaker in containerlab, peered
-# to FRR 10.7.1. FlowSpec scenarios inspect received IPv4/IPv6 rules; blackhole
+# to FRR 10.7.1. The FastNetMon lane drives the same path from FastNetMon
+# Community through the bundled notify script. FlowSpec scenarios inspect received IPv4/IPv6 rules; blackhole
 # also checks zebra and kernel discard state, controller restart and RPKI.
 # Every run uploads a dated receipt (versions, commands, FRR JSON before and after).
 #
@@ -24,6 +25,7 @@ on:
       - "docker-compose.yml"
       - "lab/**"
       - "!lab/**/*.md"
+      - "scripts/prefixd-fastnetmon.sh"
       - ".github/workflows/interop.yml"
       - ".github/actions/install-containerlab/**"
   pull_request:
@@ -39,6 +41,7 @@ on:
       - "docker-compose.yml"
       - "lab/**"
       - "!lab/**/*.md"
+      - "scripts/prefixd-fastnetmon.sh"
       - ".github/workflows/interop.yml"
       - ".github/actions/install-containerlab/**"
   schedule:
@@ -110,5 +113,50 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.scenario }}-frr-${{ matrix.speaker }}-receipt-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/interop-receipts
+          if-no-files-found: warn
+
+  fastnetmon:
+    name: FastNetMon Community (rustbgpd/FRR)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install containerlab
+        uses: ./.github/actions/install-containerlab
+
+      - name: Check lab oracle negative controls
+        run: python3 -m unittest discover -s lab/interop -p 'test_*.py'
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build prefixd:interop from this commit
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./Dockerfile
+          load: true
+          push: false
+          tags: prefixd:interop
+          build-args: CARGO_BUILD_JOBS=4
+          cache-from: |
+            type=gha,scope=prefixd
+            type=gha,scope=prefixd-interop
+          cache-to: type=gha,scope=prefixd-interop,mode=max,ignore-error=true
+
+      # FastNetMon Community 1.2.9, pinned by digest in lab/interop/fastnetmon.Dockerfile.
+      - name: Run FastNetMon lane
+        env:
+          CLAB: sudo containerlab
+          PREFIXD_INTEROP_RECEIPTS: ${{ runner.temp }}/interop-receipts
+        run: lab/interop/run-fastnetmon.sh
+
+      - name: Retain dated receipt
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fastnetmon-rustbgpd-receipt-attempt-${{ github.run_attempt }}
           path: ${{ runner.temp }}/interop-receipts
           if-no-files-found: warn
