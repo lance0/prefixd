@@ -1755,6 +1755,16 @@ mkdir -p .prefixd/upgrade-config .prefixd/upgrade-tokens
 Save your current Compose files, environment, image references and configuration
 in private storage. Keep `.prefixd/` out of version control; the new release's
 `.gitignore` excludes it.
+Before copying configuration, freeze dashboard/API configuration edits and
+all other configuration writes (CLI, automation and direct file edits) until
+step 6 completes. Include inventory, playbooks, correlation and alerting:
+0.27.0 persists these edits to disk, and step 4 installs the staged copies.
+If any configuration changes after staging, retain the old staged directory
+separately and create a fresh empty private `.prefixd/upgrade-config` directory.
+Repeat the copy, migration edits and validation before stopping controllers;
+a fresh directory also omits files deleted from the live configuration. Do not
+overwrite newer live edits with an older staged copy. The database backup does not preserve these files.
+
 Copy the controller's actual configuration, including persisted inventory and
 playbooks, rather than assuming the checkout matches the named volume:
 
@@ -2020,14 +2030,25 @@ Now mint one token per client. Replace the example name and `iad1` with the
 planned name and configured POP. Capture the one-time secret into a private file:
 
 ```bash
-docker compose exec -T "$PREFIXD_SERVICE" prefixdctl tokens create \
+(set -C; docker compose exec -T "$PREFIXD_SERVICE" prefixdctl tokens create \
   --name fnm-pop1 --scope ingest --source fastnetmon --pop iad1 \
-  > .prefixd/upgrade-tokens/fnm-pop1.token
+  > .prefixd/upgrade-tokens/fnm-pop1.token) || exit 1
 docker compose exec -T "$PREFIXD_SERVICE" prefixdctl tokens verify \
-  < .prefixd/upgrade-tokens/fnm-pop1.token
-docker compose exec -T "$PREFIXD_SERVICE" prefixdctl tokens create \
-  --name ops-cutover --scope operator --pop iad1 > .prefixd/upgrade-tokens/ops-cutover.token
+  < .prefixd/upgrade-tokens/fnm-pop1.token || exit 1
+(set -C; docker compose exec -T "$PREFIXD_SERVICE" prefixdctl tokens create \
+  --name ops-cutover --scope operator --pop iad1 \
+  > .prefixd/upgrade-tokens/ops-cutover.token) || exit 1
+docker compose exec -T "$PREFIXD_SERVICE" prefixdctl tokens verify \
+  < .prefixd/upgrade-tokens/ops-cutover.token || exit 1
 ```
+
+The subshells refuse to overwrite existing files. On a rerun, verify each
+existing token file with `prefixdctl tokens verify`. Confirm the printed name,
+scope, source and POP match the planned client before skipping its creation
+command; a successful verification alone only establishes that the token is
+active. Do not delete a saved secret merely to rerun the block. Stop on any creation or
+verification failure. If creation committed but its secret was lost or the file
+is empty, revoke that token and create a replacement under a new name.
 
 A hostgroup shim needs a separate ingest token bound to `fastnetmon-hostgroup`;
 use that source in `guardrails.detector_prefix_sources`. Alertmanager needs
