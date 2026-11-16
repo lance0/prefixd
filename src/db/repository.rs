@@ -1142,7 +1142,8 @@ impl RepositoryTrait for Repository {
             FROM mitigations
             WHERE ($1::text[] IS NULL OR status = ANY($1))
               AND ($2::text IS NULL OR customer_id = $2)
-              AND ($3::text IS NULL OR victim_ip = $3)
+              AND ($3::text IS NULL OR victim_ip = $3
+                   OR prefixd_victim_inet(victim_ip) = ANY($12::inet[]))
               AND ($10::text IS NULL OR pop = $10)
               AND ($11::text IS NULL OR strpos(lower(victim_ip), lower($11)) > 0
                    OR strpos(lower(vector), lower($11)) > 0
@@ -1167,6 +1168,7 @@ impl RepositoryTrait for Repository {
         .bind(params.cursor.map(|cursor| cursor.mitigation_id)) // $9
         .bind(params.pop.as_deref())       // $10
         .bind(params.query.as_deref())     // $11
+        .bind(victim_ip.map(crate::domain::victim_lookup_keys).unwrap_or_default()) // $12
         .fetch_all(&self.pool)
         .await?;
 
@@ -1490,10 +1492,11 @@ impl RepositoryTrait for Repository {
             SELECT event_id, external_event_id, source, event_timestamp, ingested_at,
                    victim_ip, vector, protocol, bps, pps, top_dst_ports_json, top_src_ports_json, confidence,
                    action, raw_details, outcome, outcome_reason, outcome_mitigation_ids
-            FROM events WHERE victim_ip = $1 ORDER BY ingested_at DESC LIMIT $2
+            FROM events WHERE prefixd_victim_inet(victim_ip) = ANY($1::inet[])
+            ORDER BY ingested_at DESC LIMIT $2
             "#,
         )
-        .bind(ip)
+        .bind(crate::domain::victim_lookup_keys(ip))
         .bind(limit as i64)
         .fetch_all(&self.pool)
         .await?;
@@ -1508,11 +1511,14 @@ impl RepositoryTrait for Repository {
                    created_at, updated_at, expires_at, withdrawn_at,
                    triggering_event_id, last_event_id, escalated_from_id, reason, rejection_reason,
                    acknowledged_at, acknowledged_by, signal_group_id, origin_mode
-            FROM mitigations WHERE victim_ip = $1 ORDER BY created_at DESC LIMIT $2
+            FROM mitigations
+            WHERE victim_ip = $1 OR prefixd_victim_inet(victim_ip) = ANY($3::inet[])
+            ORDER BY created_at DESC LIMIT $2
             "#,
         )
         .bind(ip)
         .bind(limit as i64)
+        .bind(crate::domain::victim_lookup_keys(ip))
         .fetch_all(&self.pool)
         .await?;
         rows.into_iter()

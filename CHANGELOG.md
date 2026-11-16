@@ -72,18 +72,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Victim addresses are stored in canonical form on every ingest route and in
   manual mitigations: IPv6 lowercase and zero-compressed. A detector event's
   IPv4-mapped IPv6 host is its IPv4 address, so such an event now mitigates as
-  an IPv4 victim where it was skipped as unowned before. Manual input names
-  the family it means: `POST /v1/mitigations`, its preview and a manual
-  blackhole refuse an IPv4-mapped destination with 400 naming the IPv4 form to
-  use. A detector unban whose victim is not an address or CIDR is refused with
-  400 on every route, as a ban is. Migration 023
-  rewrites the IPv6 victim of live mitigations and open signal groups the same
-  way, leaving an IPv4-mapped victim with the IPv6 rule it was created with;
-  events, audit rows and ended mitigations keep the spelling the detector sent.
-  The `victim_ip` filter and IP history compare in canonical form, so they no
-  longer find a pre-upgrade history row by its non-canonical spelling; use `q`
-  for those. The migration changes no schema and takes row locks on live rows
-  only; an older controller reads the rewritten rows unchanged. See
+  an IPv4 victim where it was skipped as unowned before; a mapped detector
+  prefix is refused with 400. Manual input names the family it means:
+  `POST /v1/mitigations`, its preview and a manual blackhole refuse an
+  IPv4-mapped destination with 400 naming the IPv4 form to use, and so do the
+  safelist API, `safelist.prefixes` and inventory prefixes and assets, where a
+  mapped entry never protected or owned the IPv4 host. Alert payloads,
+  WebSocket messages, audit details and API responses now carry the canonical
+  victim, so SIEM rules, alert routing and scripts that matched a detector's
+  raw spelling must match the canonical form. Migration 023 rewrites the IPv6
+  victim of live mitigations and open signal groups the same way; events,
+  audit rows and ended mitigations keep the spelling the detector sent, and
+  the `victim_ip` filter, IP history and incident reports compare addresses,
+  so they find every spelling. The migration also adds a function and two
+  indexes for those lookups; building the events index takes time
+  proportional to the stored events, during which ingest waits. 023 adds no
+  rollback constraint of its own; the release is one-way because of
+  migration 022. See
   [canonical victims](docs/how-to/upgrading.md#canonical-victims).
 - Unknown configuration keys in `prefixd.yaml`, `correlation.yaml` and
   `alerting.yaml` are ignored in this release with a warning, and the next

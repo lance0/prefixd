@@ -279,18 +279,29 @@ impl Inventory {
 }
 
 fn parse_prefix(customer_id: &str, prefix: &str) -> crate::error::Result<IpNet> {
-    prefix.parse().map_err(|_| {
+    let network: IpNet = prefix.parse().map_err(|_| {
         crate::error::PrefixdError::Config(format!(
             "inventory customer {customer_id}: invalid prefix {prefix:?}"
         ))
-    })
+    })?;
+    refuse_mapped(customer_id, &network)?;
+    Ok(network)
 }
 
 fn parse_asset(customer_id: &str, ip: &str) -> crate::error::Result<IpAddr> {
-    ip.parse().map_err(|_| {
+    let address: IpAddr = ip.parse().map_err(|_| {
         crate::error::PrefixdError::Config(format!(
             "inventory customer {customer_id}: invalid asset IP {ip:?}"
         ))
+    })?;
+    refuse_mapped(customer_id, &address.into())?;
+    Ok(address)
+}
+
+/// Victims are stored in IPv4 form, so a mapped entry would never own one.
+fn refuse_mapped(customer_id: &str, network: &IpNet) -> crate::error::Result<()> {
+    crate::domain::refuse_ipv4_mapped(network).map_err(|message| {
+        crate::error::PrefixdError::Config(format!("inventory customer {customer_id}: {message}"))
     })
 }
 

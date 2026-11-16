@@ -52,6 +52,48 @@ pub fn refuse_ipv4_mapped(destination: &IpNet) -> Result<(), String> {
     ))
 }
 
+/// The inet values a stored victim of this destination may hold: the
+/// destination itself, and for an IPv4 host its IPv4-mapped spelling, which
+/// earlier releases stored as sent. History lookups compare stored text in
+/// PostgreSQL's inet form against these, so every spelling of one address
+/// matches without rewriting history. A value that is not an address has none.
+pub fn victim_lookup_keys(value: &str) -> Vec<String> {
+    let Ok(destination) = parse_flowspec_destination(value) else {
+        return Vec::new();
+    };
+    let mut keys = Vec::with_capacity(2);
+    match destination {
+        IpNet::V4(network) if network.prefix_len() == 32 => {
+            keys.push(network.addr().to_string());
+            keys.push(network.addr().to_ipv6_mapped().to_string());
+        }
+        IpNet::V6(network) if network.prefix_len() == 128 => {
+            let address = network.addr();
+            keys.push(address.to_canonical().to_string());
+            if let Some(ipv4) = address.to_ipv4_mapped() {
+                keys.push(ipv4.to_ipv6_mapped().to_string());
+            }
+        }
+        other => keys.push(other.to_string()),
+    }
+    keys
+}
+
+/// Whether a stored victim is one of the spellings [`victim_lookup_keys`]
+/// matches for `query`: the in-memory form of the history lookups.
+pub fn same_victim(stored: &str, query: &str) -> bool {
+    if stored == query {
+        return true;
+    }
+    let Ok(stored) = parse_flowspec_destination(stored) else {
+        return false;
+    };
+    victim_lookup_keys(query)
+        .iter()
+        .filter_map(|key| parse_flowspec_destination(key).ok())
+        .any(|key| key == stored)
+}
+
 /// Parse a literal address or an exact network, rejecting implicit widening.
 /// Admission still needs prefix-length, whole-prefix ownership and safelist checks.
 pub fn parse_flowspec_destination(value: &str) -> Result<IpNet, DestinationError> {
@@ -99,6 +141,32 @@ mod tests {
         for invalid in ["", "203.0.113.010", "203.0.113.1/24", "example.com"] {
             assert!(canonical_destination(invalid).is_err(), "{invalid}");
         }
+    }
+
+    #[test]
+    fn every_spelling_of_one_victim_is_the_same_victim() {
+        for (stored, query) in [
+            ("2001:0db8:0113::0010", "2001:db8:113::10"),
+            ("2001:DB8:113::10", "2001:0db8:0113::0010"),
+            ("::ffff:203.0.113.10", "203.0.113.10"),
+            ("203.0.113.10", "::ffff:203.0.113.10"),
+            ("2001:0db8:0001::/48", "2001:db8:1::/48"),
+            ("any", "any"),
+        ] {
+            assert!(same_victim(stored, query), "{stored} {query}");
+        }
+        for (stored, query) in [
+            ("203.0.113.10", "203.0.113.11"),
+            ("203.0.113.0/24", "203.0.113.0"),
+            ("any", "203.0.113.10"),
+        ] {
+            assert!(!same_victim(stored, query), "{stored} {query}");
+        }
+        assert_eq!(
+            victim_lookup_keys("203.0.113.10"),
+            ["203.0.113.10", "::ffff:203.0.113.10"]
+        );
+        assert!(victim_lookup_keys("any").is_empty());
     }
 
     #[test]

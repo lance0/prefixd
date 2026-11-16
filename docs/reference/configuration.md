@@ -572,6 +572,10 @@ safelist:
     - "192.168.0.0/16"   # RFC1918
 ```
 
+Entries are host addresses or CIDRs. An IPv4-mapped IPv6 entry
+(`::ffff:203.0.113.10/128`) is refused at load, naming the IPv4 form, because
+victims are matched as IPv4 and it would never protect the host.
+
 ### Correlation
 
 At startup and reload, a present `correlation.yaml` takes precedence over the
@@ -956,7 +960,10 @@ Blackhole guardrails are stricter than FlowSpec's and do not use the
 packet length) and no rate. Its victim must be
 owned in inventory, even for a manual request, and must not be safelisted,
 unspecified, loopback, multicast, link-local, IPv4 broadcast, IPv4-mapped
-IPv6 or a configured next hop. The blackhole quotas are checked in the same
+IPv6 or a configured next hop. A detector event's IPv4-mapped host reaches
+these checks as its IPv4 address; manual input with a mapped destination, and
+a mapped detector prefix event ([ADR 033](../adr/033-detector-prefix-mitigations.md)),
+are refused with `400` before them. The blackhole quotas are checked in the same
 locked admission transaction as the [quotas](#quotas), so concurrent
 admissions cannot exceed them. FlowSpec active quotas do not apply to
 blackholes, and blackholes do not consume FlowSpec slots. The shared
@@ -1163,7 +1170,9 @@ sections ignore them.
 
 ## inventory.yaml
 
-Maps IP addresses to customers and services.
+Maps IP addresses to customers and services. An IPv4-mapped IPv6 prefix or
+asset is refused at load, naming the IPv4 form, because victims are matched as
+IPv4 and it would never own one.
 
 ### Basic Structure
 

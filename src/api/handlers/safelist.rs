@@ -202,12 +202,16 @@ pub async fn add_safelist(
     State(state): State<Arc<AppState>>,
     principal: AuthPrincipal,
     Json(req): Json<AddSafelistRequest>,
-) -> Result<impl IntoResponse, StatusCode> {
+) -> Result<axum::response::Response, StatusCode> {
     use crate::domain::OperatorRole;
     let operator = require_role(&principal, OperatorRole::Admin)?;
     let operator_id = operator.username;
 
     let prefix = validate_cidr(&req.prefix).map_err(|_| StatusCode::BAD_REQUEST)?;
+    // A mapped entry would never protect the IPv4 host it names.
+    if let Err(message) = crate::domain::refuse_ipv4_mapped(&prefix) {
+        return Ok(super::AppError(PrefixdError::InvalidRequest(message)).into_response());
+    }
     validate_string_len(&operator_id, "operator_id", MAX_USERNAME_LEN)
         .map_err(|_| StatusCode::BAD_REQUEST)?;
     if let Some(ref reason) = req.reason {
@@ -227,7 +231,7 @@ pub async fn add_safelist(
 
     tracing::info!(target: "prefixd::api::handlers", prefix = %req.prefix, operator = %operator_id, "safelist entry added");
     let response = withdraw_covered_mitigations(&state, prefix).await;
-    Ok((StatusCode::CREATED, Json(response)))
+    Ok((StatusCode::CREATED, Json(response)).into_response())
 }
 
 /// Remove a prefix from the safelist (admin only)

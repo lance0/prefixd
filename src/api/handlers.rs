@@ -562,8 +562,14 @@ fn validate_ip(ip: &str) -> Result<IpAddr, PrefixdError> {
 }
 
 fn validate_event_destination(value: &str) -> Result<ipnet::IpNet, PrefixdError> {
-    crate::domain::parse_flowspec_destination(value)
-        .map_err(|error| PrefixdError::InvalidPrefix(format!("{value}: {error}")))
+    let destination = crate::domain::parse_flowspec_destination(value)
+        .map_err(|error| PrefixdError::InvalidPrefix(format!("{value}: {error}")))?;
+    // A detector's mapped host is its IPv4 address; a mapped prefix would be
+    // an IPv6 rule that matches no IPv4 traffic, so it is refused.
+    if destination.prefix_len() != destination.max_prefix_len() {
+        crate::domain::refuse_ipv4_mapped(&destination).map_err(PrefixdError::InvalidPrefix)?;
+    }
+    Ok(destination)
 }
 
 /// Detector metadata cannot select a routing scope; other legacy metadata remains accepted.

@@ -1282,7 +1282,9 @@ impl RepositoryTrait for MockRepository {
                 let customer_ok = customer_id
                     .map(|cid| m.customer_id.as_deref() == Some(cid))
                     .unwrap_or(true);
-                let ip_ok = victim_ip.map(|ip| m.victim_ip == ip).unwrap_or(true);
+                let ip_ok = victim_ip
+                    .map(|ip| crate::domain::same_victim(&m.victim_ip, ip))
+                    .unwrap_or(true);
                 let ack_ok = acknowledged.is_none_or(|ack| {
                     if ack {
                         m.acknowledged_at.is_some()
@@ -1601,7 +1603,7 @@ impl RepositoryTrait for MockRepository {
         let events = self.events.lock().unwrap();
         Ok(events
             .iter()
-            .filter(|e| e.victim_ip == ip)
+            .filter(|e| crate::domain::same_victim(&e.victim_ip, ip))
             .take(limit as usize)
             .cloned()
             .collect())
@@ -1611,7 +1613,7 @@ impl RepositoryTrait for MockRepository {
         let mitigations = self.mitigations.lock().unwrap();
         Ok(mitigations
             .iter()
-            .filter(|m| m.victim_ip == ip)
+            .filter(|m| crate::domain::same_victim(&m.victim_ip, ip))
             .take(limit as usize)
             .cloned()
             .collect())
