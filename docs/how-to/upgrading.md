@@ -1782,8 +1782,9 @@ that the index is valid; it can run while 0.27.0 serves traffic.
 
 Inventory clients of the shared token: FastNetMon scripts and hostgroup shims,
 Alertmanager receivers, webhook adapters, Grafana contact points and automation.
-Choose a unique token name, source and POP for each detector, and an operator or
-admin scope for other automation. Ingest tokens have no read access. Rewrite
+For `credentials` mode, choose a unique token name, source and POP for each
+detector, and an operator or admin scope for other automation. Ingest tokens
+have no read access. Rewrite
 custom detector scripts that query mitigations and call `/withdraw` to post
 `action: unban` with their source and victim instead. Native Alertmanager resolves
 also identify the firing episode, as described below.
@@ -1796,13 +1797,30 @@ can contain password hashes; upgrading does not remove old copies. See
 Stage the new FastNetMon script and `/etc/default/prefixd` changes on each detector
 host without replacing the running integration yet. Install `bash`, `curl` and
 `jq` on the host before the window; the new script refuses to send if curl or jq
-is missing. Set `PREFIXD_API` to the controller ingress and `PREFIXD_TOKEN_FILE`
-to a private file readable by the FastNetMon user. Remove `PREFIXD_OPERATOR`,
+is missing. Set `PREFIXD_API` to the controller ingress. In `credentials` mode,
+set `PREFIXD_AUTH_MODE=credentials` and `PREFIXD_TOKEN_FILE` to a private file
+readable by the FastNetMon user; unset `PREFIXD_TOKEN` to keep one token source.
+For a controller retaining `none`, put this in the staged `/etc/default/prefixd`
+and remove token settings from the detector service environment:
+
+```bash
+PREFIXD_AUTH_MODE=none
+unset PREFIXD_TOKEN PREFIXD_TOKEN_FILE
+```
+
+FastNetMon over native mTLS was **not qualified in this release**. The bundled
+script has no client-certificate options; neither a bearer token nor
+`PREFIXD_AUTH_MODE=none` supplies mTLS authentication. A deployment retaining
+mTLS needs its own certificate-authenticated detector integration and health
+checks qualified before cutover; the commands below do not qualify that path.
+
+Remove `PREFIXD_OPERATOR`,
 `UNBAN_QUERY_*` and `WITHDRAW_*`;
 rename `BAN_POST_ATTEMPTS` and `BAN_POST_DELAY_SECONDS` to
 `EVENT_POST_ATTEMPTS` and `EVENT_POST_DELAY_SECONDS`. Keep the connect and total
 timeouts nonzero. See [FastNetMon installation](detectors/fastnetmon.md#installation).
-**Do not mint tokens yet:** the old schema has no `api_tokens` table.
+**In `credentials` mode, do not mint tokens yet:** the old schema has no
+`api_tokens` table.
 
 #### 2. Stage and validate the new configuration
 
@@ -1898,23 +1916,48 @@ old Alertmanager mitigations while 0.27.0 still runs: the new
 ban. Custom Alertmanager senders must supply both fields for firing and resolved
 notifications, preserving `startsAt` across that episode.
 
-Inspect active mitigations and pending withdrawals, then take the final backup
-after these preparations while the old controller still renews its lease. Keep
-the backup with the saved configuration and image references. Stop every old
-controller on this database, including standbys on other hosts:
+Inspect active mitigations and pending withdrawals, then stop **every old
+controller on this database**, including standbys on other hosts. Pausing
+detectors alone does not stop reconciliation or operator writes. On Compose,
+stop the existing 0.27.0 container on each host:
 
 ```bash
-docker compose exec -T postgres pg_dump -U prefixd prefixd \
-  > .prefixd/prefixd-pre-0.28.0.sql.tmp &&
-  mv .prefixd/prefixd-pre-0.28.0.sql.tmp .prefixd/prefixd-pre-0.28.0.sql &&
-  docker compose stop "$PREFIXD_SERVICE"
+docker compose stop "$PREFIXD_SERVICE"
 ```
 
-The controller stops only after the new backup succeeds and replaces the earlier
-one. If any command fails, resolve it before proceeding. Leave PostgreSQL and
-the speaker running. Do not use `docker compose down`.
-On bare metal, stop the controller service on each host before installing the
-new binary and staged configuration.
+Only after all controller writers have stopped, take the final backup. Keep it
+with the saved configuration and image references. Do not install new controller
+configuration or recreate the stopped containers until the backup succeeds:
+
+```bash
+if docker compose exec -T postgres pg_dump -U prefixd prefixd \
+  > .prefixd/prefixd-pre-0.28.0.sql.tmp &&
+  mv .prefixd/prefixd-pre-0.28.0.sql.tmp .prefixd/prefixd-pre-0.28.0.sql; then
+  echo "Final backup complete; continue with step 4."
+else
+  docker compose start "$PREFIXD_SERVICE"
+  echo "Backup failed: restart every remaining 0.27.0 controller and stop the upgrade." >&2
+  exit 1
+fi
+```
+
+If the dump or its final rename fails, restart the unchanged 0.27.0 containers
+on **all** hosts, verify lease renewal, and stop the upgrade. The earlier online
+backup is not a substitute for this final snapshot: it can omit withdrawals
+committed before the writers stopped. Leave PostgreSQL and the speaker running;
+do not use `docker compose down`. On bare metal, stop every controller service
+before the dump and restart the old services if it fails.
+
+Count the entire stopped-writer interval against the remaining lease: controller
+shutdown, final dump, installation, migrations, startup and the first confirmed
+lease extension. The [2026-11-16 million-event rehearsal](https://github.com/lance0/prefixd/pull/504)
+measured 33.193 seconds from stop to confirmed extension in the default case,
+with only 11.673 seconds left before the original lease deadline. That run did
+**not** include a final `pg_dump`; its passing result does not prove this full
+window fits. Measure the dump on the deployment's database copy and include its
+duration in the full rehearsal. Do not assume a fresh 60-second lease at stop.
+If the total cannot fit the observed remaining lease, plan for route lapse
+instead of claiming uninterrupted mitigation.
 
 #### 4. Install configuration and start the new controllers
 
@@ -1958,6 +2001,12 @@ withdrawal. The old resolve may no longer describe that rule. See
 [historical unban replay](#alertmanager-firing-identity).
 
 #### 5. Create and install credentials, then resume detectors
+
+The account/token setup and token-file commands in this step apply only to
+`credentials` mode. For `none`, install the staged script and defaults from
+step 1 with `PREFIXD_AUTH_MODE=none` and both token variables unset, then resume
+delivery without creating or transferring tokens. For mTLS, use the separately
+qualified certificate-authenticated integration described in step 1.
 
 If no Admin account exists, create it with the local database CLI. Enter the
 password twice at the hidden prompts. A mismatch asks again; cancellation
@@ -2012,24 +2061,44 @@ signed-in session.
 
 #### 6. Verify before ending the window
 
+For `credentials` or `none`, check readiness at the configured ingress (the
+local Compose ingress is shown):
+
 ```bash
 curl --fail http://localhost/v1/ready
+```
+
+For `credentials` only, check the operator token and token last-use times:
+
+```bash
 docker compose exec -T "$PREFIXD_SERVICE" prefixdctl --token-file /dev/stdin status \
   < .prefixd/upgrade-tokens/ops-cutover.token
 docker compose exec -T "$PREFIXD_SERVICE" prefixdctl tokens list
 ```
 
-Check the expected running mode, active fence, speaker target, lease state and
-token last-use times. A token request needs a current database read; `503` on
+For `none`, omit the token file and clear token variables in the CLI process:
+
+```bash
+docker compose exec -T "$PREFIXD_SERVICE" env -u PREFIXD_TOKEN -u PREFIXD_TOKEN_FILE \
+  prefixdctl status
+```
+
+For mTLS, use the deployment's separately qualified certificate-authenticated
+health check; the token-file example does not authenticate a native mTLS client.
+FastNetMon over mTLS was not qualified in this release.
+
+Check the expected running mode, active fence, speaker target and lease state.
+In `credentials` mode, a token request needs a current database read; `503` on
 detailed health during a database outage means the credential store is
 unavailable, even with a session cookie. Public liveness cannot establish
 database or routing health.
 
-Sign in to the dashboard, inspect **Administration → API
+In `credentials` mode, sign in to the dashboard, inspect **Administration → API
 tokens**, and confirm **Mitigate now** opens the manual rule form with the
 operator as actor. Exercise a controlled detector ban and unban for each
-integration and confirm its scoped token cannot read or act as another source.
-Alertmanager should also resolve and fire again as a new episode.
+integration; in `credentials` mode, also confirm its scoped token cannot read
+or act as another source. Alertmanager should resolve and fire again as a new
+episode.
 
 Validate the current Prometheus rules in a fresh container, then recreate
 Prometheus and check that the leased-risk alert is loaded. Compose bind-mounts
