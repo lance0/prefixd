@@ -1,10 +1,9 @@
 # Upgrade Guide
 
-Upgrading from 0.27.0? Read [source-bound ingest tokens](#source-bound-ingest-tokens)
-first: the next release removes the shared bearer token, and every detector and
-automation needs a new credential. On the Compose stack, also set the
-[database password](#compose-database-password) before pulling the new
-`docker-compose.yml`.
+Upgrading from 0.27.0? Follow [v0.27.0 → 0.28.0](#v0270--0280).
+It orders the configuration, database and detector changes for one maintenance
+window. The shared bearer token is removed, so stage the detector scripts and
+token-file paths before the window, then create tokens after migration.
 
 Upgrading a v0.26.0 deployment? Follow
 [v0.26.0 → 0.27.0](#v0260--0270); it gives the order of the steps from the
@@ -24,8 +23,9 @@ Migration 026 adds a nullable internal admission POP to `events` without
 rewriting existing rows. New detector bans retain their admitted mitigation IDs
 atomically and can resume an interrupted attempt with the same event ID on the
 original POP. Another POP returns a scope-conflict `409` without a recorded
-outcome; use different IDs for separate intended admissions on different POPs. The schema version becomes 26. Stop every older controller
-before migration and keep it off the upgraded database; v0.27.0 has no
+outcome; use different IDs for separate intended admissions on different POPs.
+The schema version becomes 26. Stop every older controller before migration
+and keep it off the upgraded database; v0.27.0 has no
 newer-schema guard. Follow the
 [database downgrade procedure](#database-schema-version-and-downgrade).
 
@@ -37,8 +37,7 @@ authorizing a new admission with a new event ID. The upgrade does not fabricate
 an outcome or replay historical events. Completed outcomes retain ordinary
 deduplication.
 
-A current
-ban with no admitted IDs remains retryable while an earlier withdrawal is
+A current ban with no admitted IDs remains retryable while an earlier withdrawal is
 pending. Alertmanager and generic webhook notifications now return `503` for
 ban-side server failures too; they still include every item's result. A resend
 deduplicates successful items and retries unapplied ones when event IDs are
@@ -74,6 +73,9 @@ the protection; drain affected rules or accept that policy change explicitly.
   not establish downgrade compatibility.
 - PostgreSQL retains mitigation intent. Reconciliation checks eligible intent
   after restart; stored Active status does not prove router enforcement.
+- A leased restart re-adds retained rules and increments the repair counter.
+  Historical zero-repair checks below need this qualification: record expected
+  lease re-adds separately and require no missing-rule or action-drift repairs.
 - The independent speaker can retain rules while prefixd is stopped. Application
   TTL cleanup pauses until the controller resumes.
 - **Upgrade without changing `mode`.** Start the upgraded binary in the mode the
@@ -402,90 +404,11 @@ event, pending operation or audit row.
 
 ### Migration steps
 
-1. **Before the window.**
-   - Back up the database.
-   - Run the [username query](#operator-usernames) and rename what it finds.
-   - Inventory every client that holds the shared token: detector hosts and
-     shims, Alertmanager and Grafana contact points, CI jobs and scripts.
-   - Custom detector scripts that read `/v1/mitigations` or call `/withdraw`
-     cannot do that with an ingest token, which has no read access. Rewrite
-     the unban as an event `unban` that names the victim, as the bundled
-     FastNetMon script does; prefixd withdraws what that source created for
-     the victim.
-   - List the webhook adapters with `auth.type: none`, the HMAC adapters on an
-     allowlist without `fields.source_id`, and every `secret_env` outside the
-     `PREFIXD_WEBHOOK_` namespace.
-   - Test harnesses need two tokens each, one ingest and one operator. The
-     bundled `scripts/chaos-test.sh` reads `PREFIXD_TOKEN` and
-     `PREFIXD_INGEST_TOKEN` (bound to source `chaos-test`).
-   - Decide one token name, source and POP per detector, and one operator token
-     per automation.
-   - Record the planned cutover time.
-2. **Configuration.**
-   - Set `http.auth.mode: credentials` and delete `bearer_token_env`.
-   - Remove `PREFIXD_API_TOKEN` from the controller's environment. The shipped
-     Compose file and `.env.example` no longer pass it.
-   - Remove any `dashboard` source from `correlation.yaml`, and from
-     `blackhole.detector_sources` and `guardrails.detector_prefix_sources`;
-     no credential posts as `dashboard` any more.
-   - Change every webhook adapter with `auth.type: none` to `hmac` or
-     `bearer`, map `fields.source_id` on allowlisted HMAC adapters, and rename
-     each `secret_env` into the `PREFIXD_WEBHOOK_` namespace with a value of
-     at least 32 bytes.
-   - Run `prefixd --check` with the new release's binary or image and the
-     controller's environment, for example `docker run --rm --env-file
-     /etc/prefixd/prefixd.env -v /etc/prefixd:/etc/prefixd:ro <new image>
-     --check --config /etc/prefixd` (the image's entrypoint is `prefixd`).
-     The check reads webhook adapter secrets and other `*_env` values from
-     that environment, and refuses an HMAC adapter whose secret it cannot
-     see. The old binary accepts a
-     configuration the new one refuses, such as `mode: bearer`. With leased
-     FlowSpec, rustbgpd withdraws leased rules within one lease while no
-     controller runs, so a refused configuration must not be discovered by a
-     restart.
-   - Stop forwarding any `Authorization: Bearer` header that an identity
-     proxy injects (see [Bearer headers from identity proxies](#bearer-headers-from-identity-proxies)).
-3. **Cutover.**
-   1. Stop every old controller on the database.
-   2. Start the new ones. The first to start applies migration 022, after any
-      earlier migration this release adds.
-   3. If no admin account exists, create one in the controller service
-      (`prefixd-rustbgpd` or `prefixd-gobgp`):
-
-      ```bash
-      docker compose exec prefixd-rustbgpd prefixdctl operators create --username admin --role admin
-      ```
-
-   4. Mint one ingest token per detector and the operator tokens for
-      automation and harnesses, from **Administration → API tokens** in an
-      Admin session or with `prefixdctl`. Each secret is shown once:
-
-      ```bash
-      docker compose exec prefixd-rustbgpd prefixdctl tokens create --name fnm-pop1 --scope ingest --source fastnetmon --pop iad1
-      docker compose exec prefixd-rustbgpd prefixdctl tokens create --name ci-deploy --scope operator
-      ```
-
-      A FastNetMon host that also sends hostgroup prefix events needs a
-      second ingest token bound to `fastnetmon-hostgroup`, the source to list
-      in `guardrails.detector_prefix_sources`. Each Alertmanager receiver
-      needs an ingest token bound to `alertmanager`, and each bearer webhook
-      adapter one bound to its name.
-
-4. **Detectors.** Install each token, and the new FastNetMon script with its
-   token file. Detectors get 401 until their token is in place, and FastNetMon
-   does not repeat a ban it failed to deliver, so keep this step short. Store a
-   token file with mode 0400, owned by the client's user, and keep tokens off
-   command lines (`curl -K -` reads the header from stdin).
-5. **Verification.** Check that each token's last use advances
-   (`prefixdctl tokens list`), and that the controller's startup log has no
-   `PREFIXD_API_TOKEN` warning.
-6. **Bans from before the cutover.** An unban names the victim, so a detector's
-   unban after the cutover withdraws the live mitigations its source created
-   before it as well; no event ID carries over. A custom script that still
-   unbans by event ID alone gets `no_active_mitigation` unless its event names
-   the victim; list its mitigations with
-   `GET /v1/events?source=<source>&end=<cutover time>` and withdraw those still
-   active, or let them expire.
+Use the complete [v0.27.0 → 0.28.0 procedure](#v0270--0280), which includes
+the schema, configuration, detector and speaker checks. Token creation needs
+the `api_tokens` table from migration 022; `prefixdctl tokens create` does not
+apply migrations. Prepare names, sources, POP bindings and private file paths
+before the window, then mint the credentials after the new controller migrates.
 
 Rotation afterward needs no window: create a token under a new name, update the
 client, confirm its last use advances, then revoke the old token. If a token leaked, revoke it first, then review `GET /v1/audit` for actor `token:<name>` to find what it did, including configuration changes such as alerting destinations, playbooks and correlation settings, and undo them. Deleting or
@@ -569,9 +492,9 @@ which nothing reads any more.
 Migration 023 builds the events index while no controller runs, and that time
 counts against the leases: with `leased_flowspec: true` and the default
 `lease_seconds: 60`, rustbgpd withdraws every leased rule and blackhole once a
-lease lapses. The build takes roughly 2 seconds per million events on a warm
-cache, and several times that on cold or slow storage. Check the size of the
-event history first:
+lease lapses. Build time depends on event count, cache state, storage and other
+database work. Time it on a restored copy instead of assuming it fits in a
+lease. Check the size of the event history first:
 
 ```sql
 SELECT pg_size_pretty(pg_relation_size('events')), count(*) FROM events;
@@ -601,12 +524,29 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_events_victim_inet
     ON events (prefixd_victim_inet(victim_ip), ingested_at);
 ```
 
-If a concurrent build fails it leaves an invalid index; drop it with
-`DROP INDEX CONCURRENTLY idx_events_victim_inet` and run it again. Migration
-023's `CREATE OR REPLACE FUNCTION` and `CREATE INDEX IF NOT EXISTS` then find
-both in place and do nothing, and the window covers only the live-row rewrite
-and the small mitigations index. An older controller is unaffected by the
-function and index.
+Confirm the index is valid and has the expected definition before relying on it
+to shorten the window:
+
+```sql
+SELECT i.indisvalid, pg_get_indexdef(i.indexrelid)
+FROM pg_index i
+WHERE i.indexrelid = to_regclass('idx_events_victim_inet');
+```
+
+Expect one row, `indisvalid = true`, and the function expression plus
+`ingested_at` shown above. `IF NOT EXISTS` checks only the name; it does not
+repair an invalid or different index. If a concurrent build fails, inspect the
+error, drop its invalid index with
+`DROP INDEX CONCURRENTLY idx_events_victim_inet`, then rebuild and check it.
+Migration 023 replaces the same function definition and skips the existing
+index. It still rewrites live victim text, drops the old event index and builds
+the smaller mitigation index during the window. An older controller is
+unaffected by the prepared function and index.
+
+Keep `PARALLEL RESTRICTED` on the function. Its exception handler uses a
+subtransaction that cannot run in a parallel worker. Requesting parallel
+maintenance workers does not make this expression-index build run in workers;
+do not change the function to `PARALLEL SAFE` to force it.
 
 ### Live rows the migration leaves
 
@@ -1763,6 +1703,364 @@ prefixdctl migrations
 ---
 
 ## Version-Specific Notes
+
+### v0.27.0 → 0.28.0
+
+This is the procedure for the upcoming 0.28.0 release. Use the published release
+images once available; it does not authorize running an unreleased `main` image
+on an existing deployment. Its Compose commands replace the general Compose
+sequence for this version. On bare metal, apply the preparation and ordering
+requirements below to the [bare-metal commands](#bare-metal-upgrade); run the
+token commands locally with the controller's `DATABASE_URL` after startup.
+
+The release applies migrations 021 through 026 and replaces the shared bearer
+token with source-bound API tokens. **Schedule one maintenance window for every
+controller sharing a database. Stop all old controllers before starting any new
+one.** A standby also runs migrations. Rollback requires the pre-upgrade database
+backup and old configuration; do not start 0.27.0 against the migrated database.
+It has no schema-version refusal and would accept the old shared token again.
+
+Keep the POP, operation mode, speaker backend and speaker endpoint unchanged.
+Keep the speaker running. rustbgpd 0.83.0 remains the minimum; this controller
+upgrade does not require a speaker restart. With leased FlowSpec, budget from
+the last old renewal through the first confirmed lease extension by the new
+controller. Include shutdown, configuration installation and migrations. Only
+about 40 seconds of the default 60-second lease may remain at shutdown. Measure
+on a restored copy of your database, use the optional index preparation below,
+and plan for route withdrawal and re-addition if the interval exceeds the
+remaining lease. GoBGP rules are unleased and can outlive their application TTL
+while prefixd is down.
+
+The credential commands below assume `http.auth.mode: credentials`, including
+the required move from `bearer`. Existing `none` and `mtls` deployments can keep
+their authentication mode and skip token creation and token-scope verification.
+Those modes do not authenticate API tokens or provide per-detector source
+binding; their callers retain Admin authority. Use the local database CLI for
+identity management there. A token file alone does not change that trust model.
+
+The Compose commands use the existing project and its named volumes. Choose
+the profile you already run; for GoBGP, set `PREFIXD_PROFILE=gobgp`,
+`PREFIXD_SERVICE=prefixd-gobgp` and
+`PREFIXD_MAIN_CONFIG=configs/prefixd-gobgp.yaml` instead:
+
+```bash
+export PREFIXD_PROFILE=rustbgpd
+export PREFIXD_SERVICE=prefixd-rustbgpd
+export PREFIXD_MAIN_CONFIG=configs/prefixd.yaml
+umask 077
+mkdir -p .prefixd/upgrade-config .prefixd/upgrade-tokens
+```
+
+#### 1. Prepare while 0.27.0 is running
+
+Save your current Compose files, environment, image references and configuration
+in private storage. Keep `.prefixd/` out of version control; the new release's
+`.gitignore` excludes it.
+Copy the controller's actual configuration, including persisted inventory and
+playbooks, rather than assuming the checkout matches the named volume:
+
+```bash
+docker compose cp "$PREFIXD_SERVICE:/etc/prefixd/." .prefixd/upgrade-config/
+docker compose exec -T postgres pg_dump -U prefixd prefixd > .prefixd/prefixd-pre-0.28.0.sql
+docker compose exec -T postgres psql -X -v ON_ERROR_STOP=1 -U prefixd -d prefixd <<'SQL'
+SELECT username FROM operators
+WHERE username !~ '^[A-Za-z0-9_-]{1,64}$'
+   OR lower(username) IN ('prefixdctl', 'anonymous', 'mtls-client');
+SELECT username, role FROM operators
+WHERE role NOT IN ('admin', 'operator', 'viewer');
+SELECT pg_size_pretty(pg_relation_size('events')) AS events_size,
+       count(*) AS event_count FROM events;
+SQL
+```
+
+Correct every returned username or role before the window, using the
+[username](#operator-usernames) and [role](#operator-roles) instructions.
+Rehearse the migration with the same PostgreSQL version and a restored copy of
+the deployment database. Include the controller restart and first confirmed
+lease extension in the timing. For a large event history, run the
+[concurrent event-index preparation](#event-index-build-time) now and verify
+that the index is valid; it can run while 0.27.0 serves traffic.
+
+Inventory clients of the shared token: FastNetMon scripts and hostgroup shims,
+Alertmanager receivers, webhook adapters, Grafana contact points and automation.
+Choose a unique token name, source and POP for each detector, and an operator or
+admin scope for other automation. Ingest tokens have no read access. Rewrite
+custom detector scripts that query mitigations and call `/withdraw` to post
+`action: unban` with their source and victim instead. Native Alertmanager resolves
+also identify the firing episode, as described below.
+
+If earlier releases ran with debug logging, restrict access to the retained logs
+and reset affected operators' passwords through an Admin session. Those logs
+can contain password hashes; upgrading does not remove old copies. See
+[earlier debug logs](#password-hashes-in-earlier-debug-logs).
+
+Stage the new FastNetMon script and `/etc/default/prefixd` changes on each detector
+host without replacing the running integration yet. Install `bash`, `curl` and
+`jq` on the host before the window; the new script refuses to send if curl or jq
+is missing. Set `PREFIXD_API` to the controller ingress and `PREFIXD_TOKEN_FILE`
+to a private file readable by the FastNetMon user. Remove `PREFIXD_OPERATOR`,
+`UNBAN_QUERY_*` and `WITHDRAW_*`;
+rename `BAN_POST_ATTEMPTS` and `BAN_POST_DELAY_SECONDS` to
+`EVENT_POST_ATTEMPTS` and `EVENT_POST_DELAY_SECONDS`. Keep the connect and total
+timeouts nonzero. See [FastNetMon installation](detectors/fastnetmon.md#installation).
+**Do not mint tokens yet:** the old schema has no `api_tokens` table.
+
+#### 2. Stage and validate the new configuration
+
+Before installing the new Compose file, set `POSTGRES_PASSWORD` in the existing
+project's private `.env` to the password the database already uses. Preserve an
+existing value; a new random password does not change the database password.
+Do not run `scripts/compose-bootstrap.sh env` against this stack. Follow
+[Compose database password](#compose-database-password), including the shell
+environment check, then install the release's Compose files without changing
+the project name or losing local overrides. Select and pull the release images
+while the old controller keeps running:
+
+```bash
+export PREFIXD_IMAGE=ghcr.io/lance0/prefixd:0.28.0
+export PREFIXD_DASHBOARD_IMAGE=ghcr.io/lance0/prefixd-dashboard:0.28.0
+docker compose --profile "$PREFIXD_PROFILE" config --quiet
+docker compose --profile "$PREFIXD_PROFILE" pull "$PREFIXD_SERVICE" dashboard init
+```
+
+Edit the copies under `.prefixd/upgrade-config` and stage the matching service environment:
+
+- Replace `http.auth.mode: bearer` with `credentials`, delete
+  `http.auth.bearer_token_env` and remove `PREFIXD_API_TOKEN` from the controller
+  environment. Keep an existing `credentials`, `mtls` or `none` mode unless you
+  intend to change it. The speaker's `bgp.rustbgpd.bearer_token_env` is unrelated.
+- Remove the `dashboard` source and its detector allowlist entries. Mitigate now
+  opens the manual rule form and records the signed-in operator as its actor.
+- For authenticated deployments, replace webhook `auth.type: none` with
+  `bearer` or `hmac`. An HMAC adapter on a detector allowlist, or one mapping
+  `fields.action`, must map `fields.source_id`. Rename its secret variable into
+  `PREFIXD_WEBHOOK_` in both configuration and environment and use at least
+  32 bytes. Check [adapter and allowlist names](#source-bound-ingest-tokens).
+- Configure each generic webhook's `fields.source_id` to supply a stable event
+  ID across resends, and have its sender retry `503` responses. Without an ID,
+  a ban is a new request on every resend. See
+  [detector retry behavior](#interrupted-detector-bans).
+- Replace IPv4-mapped entries in inventory and configured safelists with IPv4
+  forms. Review persisted mapped safelist entries and live mitigations using
+  [canonical victims](#canonical-victims). Manual APIs now refuse mapped input.
+- Remove unknown keys reported by the new check. Delete unused later playbook
+  steps; only the first step runs. Existing named volumes keep old playbooks.
+- Review [portless detector matches](#detector-events-without-destination-ports).
+  Host UDP/TCP police rules with no observed ports cover that protocol at the
+  victim, including legitimate traffic. Review rates or require observed ports.
+  Prefix TCP police still requires ports; portless UDP/TCP detector discard is
+  refused. Existing stored rules keep their matches until withdrawal or expiry.
+- Stop forwarding an identity proxy's injected Bearer header. It would replace
+  the dashboard session. Ensure proxies preserve a client's single prefixd
+  Authorization header; see [identity proxies](#bearer-headers-from-identity-proxies).
+- Update alert consumers and audit filters for canonical victims,
+  `token:<name>`/`webhook:<adapter>` actors with `details.source`, and
+  `no_active_mitigation`. Review the [Upgrade notes](../../CHANGELOG.md#unreleased)
+  for test-alert IDs and event types, dry-run titles, Opsgenie closures and
+  outage lease-state monitoring. Identity-management automation needs the local
+  database CLI or an Admin session; API tokens cannot manage identities.
+- Stage the updated `grafana/prometheus-alerts.yml` and route
+  `PrefixdLeasedMitigationsAtRisk` to the on-call operator. Keep the scrape job
+  named `prefixd`, a stable target `instance`, and 15-second scrape and
+  evaluation intervals. Reload these rules after the controller upgrade; see
+  [leased mitigation outage alert](#leased-mitigation-outage-alert).
+- Update detailed-health consumers for `degraded` lease warnings, with
+  `standby` retaining precedence. `speaker.lease.remaining_seconds` is an
+  approximate countdown, and `last_renewal_at` includes failed attempts; it is
+  not a fresh lease deadline. See
+  [controller health](#controller-health-and-lease-warnings).
+
+Run the new image's check against the staged directory, with the same environment
+overrides as the controller. Run it as the private staging directory's owner.
+The file mounts also replace the profile's main-file overlay and the optional
+host-managed inventory overlay. This command starts no dependencies and contacts
+neither PostgreSQL nor the speaker:
+
+```bash
+docker compose --profile "$PREFIXD_PROFILE" run --rm --no-deps \
+  --user "$(id -u):$(id -g)" \
+  --volume "$PWD/.prefixd/upgrade-config:/etc/prefixd:ro" \
+  --volume "$PWD/.prefixd/upgrade-config/prefixd.yaml:/etc/prefixd/prefixd.yaml:ro" \
+  --volume "$PWD/.prefixd/upgrade-config/inventory.yaml:/etc/prefixd/inventory.yaml:ro" \
+  --entrypoint prefixd "$PREFIXD_SERVICE" --check --config /etc/prefixd
+```
+
+Resolve errors before stopping the old controller. The check cannot establish
+database, listener, speaker or lease readiness. On bare metal, run the new binary
+as the service user with the service's environment and
+`--check --config /path/to/.prefixd/upgrade-config`.
+
+#### 3. Pause input and stop all old controllers
+
+Pause detector delivery and record the cutover time. Drain or let expire the
+old Alertmanager mitigations while 0.27.0 still runs: the new
+[firing identity](#alertmanager-firing-identity) combines the fingerprint and
+`startsAt`, so it cannot pair a new resolve with a historical fingerprint-only
+ban. Custom Alertmanager senders must supply both fields for firing and resolved
+notifications, preserving `startsAt` across that episode.
+
+Inspect active mitigations and pending withdrawals, then take the final backup
+after these preparations while the old controller still renews its lease. Keep
+the backup with the saved configuration and image references. Stop every old
+controller on this database, including standbys on other hosts:
+
+```bash
+docker compose exec -T postgres pg_dump -U prefixd prefixd \
+  > .prefixd/prefixd-pre-0.28.0.sql.tmp &&
+  mv .prefixd/prefixd-pre-0.28.0.sql.tmp .prefixd/prefixd-pre-0.28.0.sql &&
+  docker compose stop "$PREFIXD_SERVICE"
+```
+
+The controller stops only after the new backup succeeds and replaces the earlier
+one. If any command fails, resolve it before proceeding. Leave PostgreSQL and
+the speaker running. Do not use `docker compose down`.
+On bare metal, stop the controller service on each host before installing the
+new binary and staged configuration.
+
+#### 4. Install configuration and start the new controllers
+
+For the standard named-volume Compose layout, copy the staged mutable files into
+the existing volume and replace the selected main-file overlay. If you manage
+inventory through a host bind mount, install that file at its host path instead.
+
+```bash
+docker compose --profile "$PREFIXD_PROFILE" run --rm --no-deps \
+  --volume "$PWD/.prefixd/upgrade-config:/import:ro" --entrypoint sh init -ec '
+  for name in inventory.yaml playbooks.yaml correlation.yaml alerting.yaml; do
+    if [ -f "/import/$name" ]; then
+      install -m 0600 -o 999 -g 999 "/import/$name" "/etc/prefixd/$name"
+    fi
+  done'
+sudo install -m 0600 -o 999 -g 999 .prefixd/upgrade-config/prefixd.yaml "$PREFIXD_MAIN_CONFIG"
+docker compose --profile "$PREFIXD_PROFILE" up -d --no-deps --no-build \
+  "$PREFIXD_SERVICE" dashboard
+docker compose logs --tail 100 "$PREFIXD_SERVICE"
+docker compose exec -T "$PREFIXD_SERVICE" prefixdctl migrations
+```
+
+Start the other upgraded controllers on the same database after the first has
+completed migration. Confirm migrations 021–026 and successful ownership, fence
+and lease startup. A refused migration leaves its transaction unapplied; diagnose
+the error while accounting for the remaining lease. Preserve the failed run.
+Do not delete migration records or start an old controller to bypass it.
+
+Migration 026 records the original POP for new ban admissions. Retry an
+interrupted ban on that POP; a different POP returns `409` without a recorded
+outcome. Separate intended POP admissions need separate event IDs. Historical
+incomplete bans have no recorded admission POP and remain ineligible for
+automatic retry. Inspect the event, mitigations and audit before authorizing
+a fresh admission with a new ID. See
+[interrupted detector bans](#interrupted-detector-bans).
+Migrations preserve pending withdrawal intent and audit history; migration 023
+changes live victim spelling without changing the stored rule.
+If a historical unban replay returns `409` because its saved withdrawal intent
+is missing, inspect the current mitigation before using a confirmed operator
+withdrawal. The old resolve may no longer describe that rule. See
+[historical unban replay](#alertmanager-firing-identity).
+
+#### 5. Create and install credentials, then resume detectors
+
+If no Admin account exists, create it with the local database CLI. Enter the
+password twice at the hidden prompts. A mismatch asks again; cancellation
+creates no account:
+
+```bash
+docker compose exec "$PREFIXD_SERVICE" prefixdctl operators create --username admin --role admin
+```
+
+Now mint one token per client. Replace the example name and `iad1` with the
+planned name and configured POP. Capture the one-time secret into a private file:
+
+```bash
+docker compose exec -T "$PREFIXD_SERVICE" prefixdctl tokens create \
+  --name fnm-pop1 --scope ingest --source fastnetmon --pop iad1 \
+  > .prefixd/upgrade-tokens/fnm-pop1.token
+docker compose exec -T "$PREFIXD_SERVICE" prefixdctl tokens verify \
+  < .prefixd/upgrade-tokens/fnm-pop1.token
+docker compose exec -T "$PREFIXD_SERVICE" prefixdctl tokens create \
+  --name ops-cutover --scope operator --pop iad1 > .prefixd/upgrade-tokens/ops-cutover.token
+```
+
+A hostgroup shim needs a separate ingest token bound to `fastnetmon-hostgroup`;
+use that source in `guardrails.detector_prefix_sources`. Alertmanager needs
+`alertmanager`, and a bearer webhook adapter needs its adapter name. A harness
+needs separate ingest and operator tokens; `scripts/chaos-test.sh` uses source
+`chaos-test`. Operator sessions and operator tokens get `403` on ingest routes.
+An Admin can ingest any source, but detector hosts should use their scoped token.
+
+Transfer each secret securely to its detector, then install it as the detector
+user. On a FastNetMon host, after transferring `fnm-pop1.token` and staging the
+new script from this release:
+
+```bash
+sudo install -d -m 0755 /etc/prefixd
+sudo install -m 0400 -o fastnetmon fnm-pop1.token /etc/prefixd/fastnetmon.token
+rm fnm-pop1.token
+sudo install -m 0755 scripts/prefixd-fastnetmon.sh /usr/local/bin/prefixd-fastnetmon.sh
+```
+
+Activate the staged `/etc/default/prefixd` and notify-script setting, and resume
+delivery. Until this step, old credentials get `401`; arrange for attacks that
+started during the gap to be sent again. The new script posts unbans by victim
+and uses one event ID across retries. After a connection error or `503`, a
+retried ban's `409` counts as `INTENT_RECORDED` only if curl completes and the
+JSON identifies that event with an admitted outcome and complete mitigation
+UUIDs. This confirms historical local intent; check the current mitigation and
+speaker state. Ingest credentials cannot read mitigations.
+Use `PREFIXD_TOKEN_FILE` or `--token-file` for the CLI, with no session cookie or
+second token source. Identity changes and notification preferences require a
+signed-in session.
+
+#### 6. Verify before ending the window
+
+```bash
+curl --fail http://localhost/v1/ready
+docker compose exec -T "$PREFIXD_SERVICE" prefixdctl --token-file /dev/stdin status \
+  < .prefixd/upgrade-tokens/ops-cutover.token
+docker compose exec -T "$PREFIXD_SERVICE" prefixdctl tokens list
+```
+
+Check the expected running mode, active fence, speaker target, lease state and
+token last-use times. A token request needs a current database read; `503` on
+detailed health during a database outage means the credential store is
+unavailable, even with a session cookie. Public liveness cannot establish
+database or routing health.
+
+Sign in to the dashboard, inspect **Administration → API
+tokens**, and confirm **Mitigate now** opens the manual rule form with the
+operator as actor. Exercise a controlled detector ban and unban for each
+integration and confirm its scoped token cannot read or act as another source.
+Alertmanager should also resolve and fire again as a new episode.
+
+Validate the current Prometheus rules in a fresh container, then recreate
+Prometheus and check that the leased-risk alert is loaded. Compose bind-mounts
+the individual files: after a checkout or atomic replacement, a running
+container can still read the old file even after a reload. Recreating it
+remounts the current files and preserves the named data volume:
+
+```bash
+docker compose run --rm --no-deps --entrypoint promtool prometheus \
+  check rules /etc/prometheus/prometheus-alerts.yml &&
+  docker compose up -d --no-deps --force-recreate prometheus
+docker compose logs --tail 50 prometheus
+```
+
+The alert reports renewal risk, with a one-hour outage lookback; its notification
+is not guaranteed before lease expiry. Confirm the matching dashboard reports
+standby, dry-run and lease warnings, and does not keep an old countdown after a
+failed health read.
+
+Compare retained mitigation IDs, rule matches/actions, pending withdrawals and
+audit history with the pre-upgrade inventory. Observe the speaker RIB through
+restart and the first reconciliation. Startup re-adds retained leased rules and
+can increment the repair counter; distinguish those expected lease re-adds from
+missing-rule or action-drift repairs. Local speaker acceptance does not prove
+router enforcement. Record whether any route lapsed during the window.
+
+Review rules created before cutover that custom integrations can no longer
+unban, and withdraw them with a reason or let them expire. Keep the old backup
+and configuration private, remove temporary token copies after installation,
+and revoke any temporary cutover token when verification is complete.
 
 ### v0.26.0 → 0.27.0
 

@@ -224,17 +224,21 @@ it. The script therefore retries the same event, with the same `event_id`,
 when prefixd cannot be reached or answers `503` (including a standby or draining
 controller, or a mitigation that changed during admission). It stops after
 `EVENT_POST_ATTEMPTS` attempts in total, each bounded by the two timeouts.
-It never retries a `4xx`, except that a retried
-ban meeting its own event ID as `409` counts as recorded intent only when
-`event_outcome` says `mitigated`, `extended` or `dry_run` and lists mitigation
-IDs. It logs `INTENT_RECORDED`, which does not prove current enforcement;
-refused or interrupted outcomes remain errors. It refuses to run at all without a token, unless
+After a successful curl transfer, a `4xx` ends retries. A retried ban meeting
+its own event ID as `409` counts as recorded intent only when
+curl completes and the valid JSON identifies that event, `event_outcome` says
+`mitigated`, `extended` or `dry_run`, and every listed mitigation ID is a complete
+UUID. The list must not be empty. It logs `INTENT_RECORDED`, which does not prove
+current enforcement; refused or interrupted outcomes remain errors. It refuses
+to run at all without a token, unless
 `PREFIXD_AUTH_MODE=none`. A `403` means the token
 is not bound to `fastnetmon`, or is bound to another POP. A `409` on a ban
 means the event ID already arrived, or the rule conflicts with speaker or
 injection ownership; read the error text. A `503` can be returned after the
-event row was stored. New incomplete attempts resume with the same event ID;
-committed intent returns `409` with its recorded outcome. Historical ambiguous
+event row was stored. New incomplete attempts resume with the same event ID on
+their original POP; another POP returns `409` without a recorded outcome.
+Use separate event IDs for separate intended POP admissions. Committed intent
+returns `409` with its recorded outcome. Historical ambiguous
 attempts are refused with an unknown-outcome conflict; inspect them before
 authorizing a new event ID. Check `GET /v1/mitigations`, not just the event. Point `PREFIXD_API` at the active
 controller, or at a load balancer that routes by `GET /v1/ready`; see
@@ -586,8 +590,11 @@ tail -f /var/log/prefixd-fastnetmon.log
 ### Common issues
 
 1. **Connection refused**: Verify `PREFIXD_API` is reachable
-1. **503 Service Unavailable**: `PREFIXD_API` reaches a standby controller; route
-   it to the controller whose `GET /v1/ready` returns `200`
+1. **503 Service Unavailable**: Read the response. A standby or draining
+   controller, unavailable storage, or a changed mitigation or pending withdrawal
+   can return `503`. The script retries the same event ID. Use `GET /v1/ready`
+   to route delivery to a ready controller on the original POP; recovery of
+   storage or pending withdrawal may still be needed there.
 2. **401 Unauthorized**: the token is not a valid API token, or it was
    revoked or expired; the error names which. A value from the removed
    `PREFIXD_API_TOKEN` is refused as malformed
@@ -609,7 +616,11 @@ tail -f /var/log/prefixd-fastnetmon.log
 
 ### Debug mode
 
-Add `set -x` at the top of the script for verbose output.
+Inspect `/var/log/prefixd-fastnetmon.log` and the response mapping under
+[Ban Flow](#ban-flow). Keep shell tracing (`set -x` or `bash -x`) disabled:
+it prints token assignments and the Authorization header passed to curl.
+If tracing was enabled, restrict access to the captured output and revoke the
+exposed token before installing a replacement.
 
 ## Advanced: Custom Vector Mapping
 
