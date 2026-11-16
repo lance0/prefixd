@@ -407,10 +407,9 @@ pub async fn find_mitigation_owner(
                 .iter()
                 .any(|owner| owner.mitigation_id == request.mitigation_id)
         {
-            return Err(PrefixdError::Conflict(format!(
-                "{} has a pending withdrawal",
-                route.noun()
-            )));
+            return Err(PrefixdError::PendingWithdrawal {
+                route: route.noun(),
+            });
         }
     }
     if owners.len() > 1 {
@@ -1085,16 +1084,20 @@ mod tests {
             mitigation_rule(&candidate).unwrap().nlri_hash(),
             mitigation_rule(&original).unwrap().nlri_hash()
         );
-        assert!(matches!(
-            find_mitigation_owner(
-                &repo,
-                "test",
-                &MitigationRoute::of(&candidate),
-                &candidate.scope_hash
-            )
-            .await,
-            Err(PrefixdError::Conflict(message)) if message == "FlowSpec rule has a pending withdrawal"
-        ));
+        let error = find_mitigation_owner(
+            &repo,
+            "test",
+            &MitigationRoute::of(&candidate),
+            &candidate.scope_hash,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, PrefixdError::PendingWithdrawal { .. }));
+        assert_eq!(error.status_code(), axum::http::StatusCode::CONFLICT);
+        assert_eq!(
+            error.to_string(),
+            "conflict: FlowSpec rule has a pending withdrawal"
+        );
     }
 
     #[tokio::test]

@@ -5606,10 +5606,13 @@ mod tests {
         let candidate = action_mitigation("192.0.2.7/32", FlowSpecAction::discard());
         assert!(owner(&candidate).await.unwrap().is_none());
         // The blackhole itself still reports its pending withdrawal.
-        assert!(matches!(
-            owner(&blackhole).await,
-            Err(PrefixdError::Conflict(_))
-        ));
+        let error = owner(&blackhole).await.unwrap_err();
+        assert!(matches!(error, PrefixdError::PendingWithdrawal { .. }));
+        assert_eq!(error.status_code(), axum::http::StatusCode::CONFLICT);
+        assert_eq!(
+            error.to_string(),
+            "conflict: blackhole route has a pending withdrawal"
+        );
         let reconciler = blackhole_reconciler(repo.clone(), speaker.clone(), live_config(), false);
         reconciler.sync_announcements().await.unwrap();
         assert_eq!(speaker.inner.announced_count().await, 1);

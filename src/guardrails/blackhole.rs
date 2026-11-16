@@ -1060,8 +1060,15 @@ mod tests {
         let error = admit_enforced(&repo, &speaker, intent("203.0.113.10/32"))
             .await
             .unwrap_err();
-        assert!(matches!(error, PrefixdError::Conflict(_)), "{error}");
-        assert!(error.to_string().contains("pending withdrawal"), "{error}");
+        assert!(
+            matches!(error, PrefixdError::PendingWithdrawal { .. }),
+            "{error}"
+        );
+        assert_eq!(error.status_code(), axum::http::StatusCode::CONFLICT);
+        assert_eq!(
+            error.to_string(),
+            "conflict: blackhole route has a pending withdrawal"
+        );
         assert_eq!(speaker.adds.load(SeqCst), 1);
         assert_eq!(repo.count_active_global().await.unwrap(), 1);
     }

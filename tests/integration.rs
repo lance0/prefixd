@@ -212,7 +212,7 @@ async fn test_ambiguous_withdrawals_retry_without_reannouncement_or_consuming_ne
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert!(
             repo.find_ban_event_by_external_id("test", "new-attack-during-delete")
                 .await
