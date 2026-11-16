@@ -187,7 +187,7 @@ async fn test_cli_operator_password_terminal() {
     );
 
     let backend = AuthBackend::new(ctx.repo.clone(), prefixd::config::AuthMode::Credentials);
-    for username in ["pty-admin", "pty-explicit"] {
+    for username in ["pty-admin", "pty-corrected", "pty-explicit"] {
         let operator = backend
             .authenticate(Credentials {
                 username: username.to_string(),
@@ -203,7 +203,15 @@ async fn test_cli_operator_password_terminal() {
                 .starts_with("$argon2id$")
         );
     }
-    for username in ["pty-empty", "pty-interrupt", "pty-eof", "pty-no-terminal"] {
+    for username in [
+        "pty-empty",
+        "pty-interrupt",
+        "pty-eof",
+        "pty-confirm-interrupt",
+        "pty-confirm-eof",
+        "pty-mismatch-cancel",
+        "pty-no-terminal",
+    ] {
         assert!(
             ctx.repo
                 .get_operator_by_username(username)

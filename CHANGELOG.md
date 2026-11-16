@@ -544,6 +544,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Interactive `prefixdctl operators create`, including the first Compose Admin,
+  now asks for hidden password confirmation. A mismatch asks again, and
+  cancellation creates no operator. Explicit `--password` automation is unchanged.
+- Detailed health degrades on injection lease renewal failure, expiry or overdue
+  renewal, with standby retaining precedence. It adds controller `mode`, an
+  approximate monotonic `speaker.lease.remaining_seconds` and `renewal_overdue`,
+  sampled even when the renewal task stalls. The dashboard shows one top-bar
+  warning for standby, dry-run or lease failure/expiry/overdue renewal. Failed
+  or stale health reads replace the old countdown with an explicit warning.
+  A confirmed empty owned leased-intent inventory suppresses historical lease
+  alarms; `has_leased_intent` keeps empty, unknown and failed reads distinct.
+
 - The API and upgrade guides distinguish an isolated session-store failure
   from a database outage. Scoped-token requests need a current database read
   and return `503` when it fails, including on `/v1/health/detail`; a stale

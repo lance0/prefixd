@@ -389,6 +389,7 @@ export interface PublicHealthResponse {
 
 export interface HealthResponse {
   status: string
+  mode?: "dry-run" | "enforced"
   version: string
   pop: string
   uptime_seconds: number
@@ -402,6 +403,14 @@ export interface HealthResponse {
   auth_mode: string
   speaker?: {
     backend: string
+    lease?: {
+      state: "none" | "live" | "renewal_failing" | "expired" | "not_renewing" | "standby"
+      /** Local monotonic estimate, not proof of installation or forwarding. */
+      remaining_seconds: number | null
+      renewal_overdue?: boolean
+      /** Local desired intent; false only after a successful empty observation. */
+      has_leased_intent?: boolean | null
+    }
     daemon?: {
       status: "observed" | "error" | "unsupported"
       version: string | null

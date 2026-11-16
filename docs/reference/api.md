@@ -2796,11 +2796,22 @@ store remains readable. A failed cookie-only session load stays unauthenticated
 and returns `500`. Public liveness at `/v1/health` remains available; unknown
 paths return `404` without loading a session.
 
+`mode` is the configured controller operation mode, `dry-run` or `enforced`.
+Lease states `renewal_failing` and `expired`, or `renewal_overdue: true`, make
+the top-level `status` `degraded` unless a successful intent read confirmed
+that no owned leased mitigation remains. A lost controller fence takes
+precedence and reports `standby`. The dashboard uses this response for one top-bar warning:
+standby before dry-run before lease failure, expiry or overdue renewal. It subtracts local receipt age from
+the approximate countdown and replaces failed or stale reads (older than
+15 seconds) with an unavailable or stale warning. Public liveness remains
+unchanged.
+
 **Illustrative response with rustbgpd:**
 
 ```json
 {
   "status": "healthy",
+  "mode": "enforced",
   "version": "<prefixd-version>",
   "pop": "iad1",
   "uptime_seconds": 86400,
@@ -2840,6 +2851,9 @@ paths return `404` without loading a session.
       "lease_seconds": 60,
       "state": "live",
       "generation": {"incarnation": 1311768467294899695, "sequence": 4},
+      "remaining_seconds": 40,
+      "renewal_overdue": false,
+      "has_leased_intent": true,
       "last_renewal_at": "2026-10-18T12:00:00Z",
       "last_renewal_result": "success",
       "renew_until": "2026-10-18T12:30:00Z"
@@ -2906,6 +2920,27 @@ PostgreSQL outage the active controller loses its fence within seconds, so it
 reports `standby` with `renewal_stopped: "ttl_bound"`, not `expired`, even
 after rustbgpd has removed the routes; detect that from `renewal_stopped`
 together with `prefixd_controller_fence_active`. `generation` is held in memory and changes after a speaker restart.
+`remaining_seconds` is a local monotonic estimate: whole seconds from the last
+live observation until one configured lease has elapsed, zero for `expired`,
+and null for `none`, `not_renewing` or `standby`. It counts down across failed
+renewals; `last_renewal_at` records attempts, including failures, and must not
+be used to reset a countdown. Startup adoption knows that a generation was
+live but not its remaining remote duration, and RPC delay also limits this
+estimate. It proves neither route installation nor router forwarding.
+`renewal_overdue` is true for a held `live` or `renewal_failing` lease when two
+renewal intervals have passed since the last live observation, or renewal
+stopped at the TTL bound. It is sampled when health is read, so a stalled
+renewal task cannot leave the dashboard silently showing its old live state.
+This warning does not change the lease state or prove remote expiry. A
+successful renewal or leased add refreshes the observation.
+`has_leased_intent` describes local desired leased intent, not remote routes:
+null before observation, true after a committed owned leased write or a
+successful inventory containing owned leased intent, and false after a
+successful empty inventory with no intervening leased write. A failed read
+keeps the previous value; a leased write overlapping an older empty read keeps
+true. Only explicit false suppresses lease-specific health degradation and
+banner warnings, so a historical expired generation does not alarm forever on
+an idle controller. Unknown intent does not suppress a lease warning.
 `last_renewal_result` is `success`, `not_live` or `error`. `renew_until` is the
 latest `expires_at` among the leased routes this owner holds: the read at the
 start of each reconciliation pass (on a timer in standby) sets it, and every
