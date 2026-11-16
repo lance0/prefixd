@@ -795,6 +795,28 @@ prefixd runs holds replayed routes from selection after its restart; below
 export observation, and below 0.79.0 the lease RPCs are unsupported, so leased
 adds fail and create nothing. GoBGP is unaffected.
 
+## Controller health and lease warnings
+
+Detailed health now reports `degraded` when an injection lease is
+`renewal_failing`, `expired`, or has overdue renewal, even if the database
+and speaker probes succeed. A successful read confirming no owned leased
+intent suppresses only these lease warnings, avoiding an idle controller's
+historical expired generation. `standby` still takes precedence when this
+controller loses its fence. Monitors that read `GET /v1/health/detail` should
+treat `degraded` and `standby` as operational warnings; public liveness and readiness keep their existing meanings.
+
+The response adds the controller's `mode` and nullable
+`speaker.lease.remaining_seconds`, `renewal_overdue`, and nullable
+`has_leased_intent` (local desired intent, not remote route inventory). The countdown is an
+approximate local monotonic estimate, not an installation or forwarding
+guarantee. `renewal_overdue` detects an old live observation even when the
+renewal task stalls; it does not declare the remote lease expired. Failed
+renewal attempts do not reset the countdown; `last_renewal_at` is the time of
+the last attempt, successful or otherwise. The dashboard shows one warning for
+standby, dry-run, or lease failure/expiry/overdue renewal, in that order. Failed and stale health reads show their own
+warning and do not keep an old countdown. Deploy the matching dashboard to
+show these warnings; no configuration or database migration is required.
+
 ## Controller fence and rolling deploys
 
 Each controller derives a stable owner, `prefixd.<pop>.<hash>`, from its POP and

@@ -515,6 +515,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Detailed health degrades on injection lease renewal failure, expiry or overdue
+  renewal, with standby retaining precedence. It adds controller `mode`, an
+  approximate monotonic `speaker.lease.remaining_seconds` and `renewal_overdue`,
+  sampled even when the renewal task stalls. The dashboard shows one top-bar
+  warning for standby, dry-run or lease failure/expiry/overdue renewal. Failed
+  or stale health reads replace the old countdown with an explicit warning.
+  A confirmed empty owned leased-intent inventory suppresses historical lease
+  alarms; `has_leased_intent` keeps empty, unknown and failed reads distinct.
+
 - `prefixdctl` works in the Compose controller. Both controller services set
   `PREFIXD_API=http://127.0.0.1:8080`, so `docker compose exec` runs no longer
   fail against the CLI's default port 80.
