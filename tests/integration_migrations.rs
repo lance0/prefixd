@@ -1059,3 +1059,129 @@ async fn canonical_victim_migration_rewrites_only_live_rows_to_the_rust_spelling
     replayed.sort();
     assert_eq!(replayed, expected);
 }
+
+/// Force every eligible query onto a parallel worker, on whichever setting the
+/// server has: `debug_parallel_query` from PostgreSQL 16, `force_parallel_mode`
+/// before it.
+async fn force_parallel(connection: &mut sqlx::PgConnection) {
+    let version: i32 = sqlx::query_scalar("SELECT current_setting('server_version_num')::int")
+        .fetch_one(&mut *connection)
+        .await
+        .unwrap();
+    let setting = if version >= 160000 {
+        "debug_parallel_query"
+    } else {
+        "force_parallel_mode"
+    };
+    sqlx::raw_sql(&format!(
+        "SET {setting} = on; SET parallel_setup_cost = 0; SET parallel_tuple_cost = 0;"
+    ))
+    .execute(&mut *connection)
+    .await
+    .unwrap();
+}
+
+/// `prefixd_victim_inet` starts a subtransaction for its EXCEPTION block, which
+/// a parallel worker cannot. Marked PARALLEL SAFE, a query the planner runs in
+/// a worker fails with "cannot start subtransactions during a parallel
+/// operation", as a parallel build of the events index on a large history did
+/// and the migration rolled back. PARALLEL RESTRICTED keeps it in the leader.
+/// Negative control: the same query with the function redeclared PARALLEL
+/// SAFE fails.
+#[tokio::test]
+async fn victim_inet_function_runs_under_forced_parallelism() {
+    let fixture = start_postgres().await;
+    let setup = connect(&fixture).await;
+    prefixd::db::init_postgres_pool(&fixture.url)
+        .await
+        .expect("migrate a fresh database");
+    sqlx::raw_sql(
+        "INSERT INTO events (event_id, source, event_timestamp, ingested_at, victim_ip, vector,
+             top_dst_ports_json, action)
+         SELECT gen_random_uuid(), 'parallel', now(), now(), v, 'udp_flood', '[]', 'ban'
+         FROM unnest(ARRAY['2001:0db8::10', '203.0.113.10', 'any']) AS v;",
+    )
+    .execute(&setup)
+    .await
+    .expect("seed events");
+    let query = "SELECT count(*) FROM events
+                 WHERE prefixd_victim_inet(victim_ip) = ANY('{2001:db8::10,203.0.113.10}'::inet[])";
+
+    let mut connection = setup.acquire().await.unwrap();
+    force_parallel(&mut connection).await;
+    let found: i64 = sqlx::query_scalar(query)
+        .fetch_one(&mut *connection)
+        .await
+        .expect("the shipped function runs under forced parallelism");
+    assert_eq!(found, 2);
+    // A parallel build of the same expression index succeeds too.
+    sqlx::raw_sql(
+        "SET max_parallel_maintenance_workers = 4; SET min_parallel_table_scan_size = 0;
+         DROP INDEX idx_events_victim_inet;
+         CREATE INDEX idx_events_victim_inet ON events (prefixd_victim_inet(victim_ip), ingested_at);",
+    )
+    .execute(&mut *connection)
+    .await
+    .expect("rebuild the index with parallel workers allowed");
+
+    // Control: declared PARALLEL SAFE, the same query fails in a worker.
+    sqlx::raw_sql("ALTER FUNCTION prefixd_victim_inet(text) PARALLEL SAFE")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    let error = sqlx::query_scalar::<_, i64>(query)
+        .fetch_one(&mut *connection)
+        .await
+        .expect_err("a PARALLEL SAFE function with an EXCEPTION block fails in a worker");
+    assert!(
+        error.to_string().contains("cannot start subtransactions"),
+        "{error}"
+    );
+}
+
+/// The upgrade guide's pre-window build is the migration's own function and
+/// index, so running it first makes migration 023 a no-op for both, and the
+/// concurrent build can run while the old controller does.
+#[tokio::test]
+async fn the_guides_concurrent_index_build_matches_migration_023() {
+    let [function, index] = &guide_queries("### Event index build time")[1..] else {
+        panic!("the size query, the function and the index");
+    };
+    assert!(VICTIM_MIGRATION.contains(function.as_str()), "{function}");
+    assert!(
+        VICTIM_MIGRATION.contains(&index.replace("CONCURRENTLY ", "")),
+        "{index}"
+    );
+
+    let fixture = start_postgres().await;
+    let setup = connect(&fixture).await;
+    prefixd::db::init_postgres_pool(&fixture.url)
+        .await
+        .expect("migrate a fresh database");
+    // Back at 022, as before the window.
+    sqlx::raw_sql(
+        "DROP INDEX idx_events_victim_inet; DROP INDEX idx_mitigations_victim_inet;
+         DROP FUNCTION prefixd_victim_inet(text);
+         DELETE FROM schema_migrations WHERE version = 23;",
+    )
+    .execute(&setup)
+    .await
+    .unwrap();
+    for (statement, label) in [(function, "function"), (index, "index")] {
+        sqlx::raw_sql(statement)
+            .execute(&setup)
+            .await
+            .unwrap_or_else(|error| panic!("the guide's {label}: {error}"));
+    }
+    let oid = || async {
+        sqlx::query_scalar::<_, i64>("SELECT 'idx_events_victim_inet'::regclass::oid::bigint")
+            .fetch_one(&setup)
+            .await
+            .unwrap()
+    };
+    let before = oid().await;
+    prefixd::db::init_postgres_pool(&fixture.url)
+        .await
+        .expect("apply migration 023 after the guide's build");
+    assert_eq!(oid().await, before, "023 kept the prebuilt index");
+}

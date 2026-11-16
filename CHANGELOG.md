@@ -75,9 +75,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an IPv4 victim where it was skipped as unowned before; a mapped detector
   prefix is refused with 400. Manual input names the family it means:
   `POST /v1/mitigations`, its preview and a manual blackhole refuse an
-  IPv4-mapped destination with 400 naming the IPv4 form to use, and so do the
-  safelist API, `safelist.prefixes` and inventory prefixes and assets, where a
-  mapped entry never protected or owned the IPv4 host. Alert payloads,
+  IPv4-mapped destination with 400 naming the IPv4 form to use, and so does
+  the safelist API. A mapped entry in `safelist.prefixes` or in inventory
+  prefixes and assets, which never protected or owned the IPv4 host, is
+  refused at startup, on reload and by `prefixd --check`; replace it with the
+  IPv4 form before upgrading. Alert payloads,
   WebSocket messages, audit details and API responses now carry the canonical
   victim, so SIEM rules, alert routing and scripts that matched a detector's
   raw spelling must match the canonical form. Migration 023 rewrites the IPv6
@@ -85,8 +87,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   audit rows and ended mitigations keep the spelling the detector sent, and
   the `victim_ip` filter, IP history and incident reports compare addresses,
   so they find every spelling. The migration also adds a function and two
-  indexes for those lookups; building the events index takes time
-  proportional to the stored events, during which ingest waits. 023 adds no
+  indexes for those lookups and drops `idx_events_victim_ingested`. Building
+  the events index takes roughly 2 seconds per million events on a warm cache
+  while no controller runs, which counts against leased rules; on a large
+  history, build it concurrently before the window as
+  [event index build time](docs/how-to/upgrading.md#event-index-build-time)
+  describes. 023 adds no
   rollback constraint of its own; the release is one-way because of
   migration 022. See
   [canonical victims](docs/how-to/upgrading.md#canonical-victims).

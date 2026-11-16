@@ -66,11 +66,18 @@ $$;
 -- History keeps the detector's spelling, so lookups by address compare in
 -- inet form instead: one address matches whatever text spelled it. The
 -- function is NULL for text that is not an address (`any`, an empty target),
--- so a lookup never fails on such a row. The indexes keep IP history and
--- incident reports from scanning all history; building the events index takes
--- time proportional to the stored events, during which ingest waits.
+-- so a lookup never fails on such a row. Its EXCEPTION block starts a
+-- subtransaction, which a parallel worker cannot, so it is PARALLEL
+-- RESTRICTED: a parallel index build or query keeps it in the leader. The
+-- indexes keep IP history and incident reports from scanning all history;
+-- building the events index takes time proportional to the stored events,
+-- during which ingest waits. The upgrade guide gives the same function and a
+-- CONCURRENTLY build to run before the window, which makes these no-ops.
+-- Nothing reads idx_events_victim_ingested once events are matched by
+-- address, so it is dropped to offset the new index's write cost.
 CREATE OR REPLACE FUNCTION prefixd_victim_inet(victim TEXT) RETURNS inet
-LANGUAGE plpgsql IMMUTABLE STRICT PARALLEL SAFE AS $$
+LANGUAGE plpgsql IMMUTABLE STRICT PARALLEL RESTRICTED
+SET search_path = pg_catalog AS $$
 BEGIN
     RETURN victim::inet;
 EXCEPTION WHEN invalid_text_representation THEN
@@ -79,5 +86,6 @@ END
 $$;
 CREATE INDEX IF NOT EXISTS idx_events_victim_inet
     ON events (prefixd_victim_inet(victim_ip), ingested_at);
+DROP INDEX IF EXISTS idx_events_victim_ingested;
 CREATE INDEX IF NOT EXISTS idx_mitigations_victim_inet
     ON mitigations (prefixd_victim_inet(victim_ip), created_at);
