@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrade notes
 
+- **Portless detector police rules match the whole protocol.** UDP/TCP events
+  without destination ports no longer borrow the service's `allowed_ports`.
+  New rules police all traffic of that protocol to the victim, legitimate
+  traffic included. Review rates, or set `require_top_ports: true` and supply
+  detector ports. Portless UDP/TCP detector discard is refused; prefix TCP
+  police still requires ports. Existing rules keep their saved matches until
+  expiry or withdrawal. See
+  [detector port selection](docs/how-to/upgrading.md#detector-events-without-destination-ports).
 - **Compose needs `POSTGRES_PASSWORD`.** `docker-compose.yml` no longer falls
   back to the published `prefixd_secret`; every Compose command refuses to run
   until the variable is set. Before upgrading an existing Compose stack, put
@@ -356,8 +364,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   script run directly and from a replayed NetFlow v5 flood must create the
   mitigation and the exact rule at FRR, re-bans must extend it, and unbans,
   including FastNetMon's own timer unban of the detected ban, must withdraw it.
-  The detected ban's rule polices the service's allowed UDP ports, not the
-  flood's port, because the script sends none. The lane runs prefixd in
+  The detected ban's rule polices UDP to the victim without a port component,
+  and the lane asserts that it covers the flood's port. The lane runs prefixd in
   `credentials` mode with API tokens minted by `prefixdctl`: the script holds
   an ingest token bound to `fastnetmon`, the driver an operator token for its
   reads, and an ingest token bound to another source and the operator token
@@ -515,6 +523,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Detector floods without destination ports no longer target unrelated
+  service ports, missing attacks outside that list. The FastNetMon interop
+  lane now checks that the generated rule covers its synthetic flood's port.
+  Detector police events also cannot prolong a saved protocol-only UDP/TCP
+  discard.
 - `prefixdctl` works in the Compose controller. Both controller services set
   `PREFIXD_API=http://127.0.0.1:8080`, so `docker compose exec` runs no longer
   fail against the CLI's default port 80.

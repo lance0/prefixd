@@ -8,7 +8,15 @@ The log lines are prefixd-fastnetmon.sh output from a 2026-11-16 lane run.
 import socket
 import unittest
 
-from fastnetmon_frr import CONF, ban_outcome, ban_time, messages, police, unban_outcome
+from fastnetmon_frr import (
+    CONF,
+    ban_outcome,
+    ban_time,
+    check_udp_flood_coverage,
+    messages,
+    police,
+    unban_outcome,
+)
 from netflow_v5 import HEADER, RECORD, RECORDS, datagram
 
 MID = "a55fc086-8db5-495a-8021-2867853142ca"
@@ -100,6 +108,16 @@ class BanTimeTests(unittest.TestCase):
 
 
 class RuleTests(unittest.TestCase):
+    def test_detected_rule_covers_the_flood(self):
+        for ports in ([], [80], [53, 80]):
+            check_udp_flood_coverage({"protocol": 17, "dst_ports": ports}, 80)
+        for rule in (
+            {"protocol": 17, "dst_ports": [53, 123]},
+            {"protocol": 6, "dst_ports": []},
+        ):
+            with self.subTest(rule=rule), self.assertRaisesRegex(AssertionError, "misses"):
+                check_udp_flood_coverage(rule, 80)
+
     def test_police_spelling(self):
         self.assertEqual(
             police("203.0.113.30", 5_000_000, proto=17, dst_ports=(53, 123)),

@@ -46,6 +46,27 @@ the protection; drain affected rules or accept that policy change explicitly.
   [mitigation origin mode](#mitigation-origin-mode).
 - **Always back up the database** before upgrading.
 
+## Detector events without destination ports
+
+UDP/TCP detector police rules no longer substitute a service's `allowed_ports`
+when the event contains no destination ports. New rules match the victim and
+protocol without a destination-port component. This includes bans from the
+bundled FastNetMon script and covers floods to ports outside the service list.
+It also rate-limits legitimate traffic of that protocol to the victim.
+
+Review police rates before upgrading. If portless policing is unacceptable,
+set the playbook's `require_top_ports: true` and use a detector that reports
+destination ports; portless events then match no playbook. UDP/TCP detector
+discard without destination ports is refused, so it cannot silently become a
+protocol-wide discard. Prefix TCP police still requires ports. Explicit
+manual rules, ICMP, blackholes and multi-rule source-port matches are unchanged.
+
+Stored rules retain their original matches until expiry or withdrawal. Review
+and withdraw an ineffective old service-port rule when replacing it; installing
+the new binary does not rewrite active rules. Reported event ports still
+intersect `allowed_ports`, and a nonempty event list with no allowed match is
+refused. See [allowed ports](../reference/configuration.md#allowed-ports).
+
 ## Unknown configuration keys
 
 The release that introduces this check ignores keys it does not recognize after
