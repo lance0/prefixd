@@ -4739,13 +4739,8 @@ mod tests {
 
             // A source outside blackhole.detector_sources is refused before any row.
             let before = refused();
-            let (status, body) = send(
-                &app,
-                "/v1/events",
-                None,
-                fastnetmon_ban("dashboard", victim),
-            )
-            .await;
+            let (status, body) =
+                send(&app, "/v1/events", None, fastnetmon_ban("radware", victim)).await;
             assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
             assert!(
                 body["error"].as_str().unwrap().contains("detector_sources"),
@@ -4803,13 +4798,8 @@ mod tests {
             assert!(extended.expires_at > cap - chrono::Duration::seconds(10));
 
             // Another source cannot extend it either.
-            let (status, _) = send(
-                &app,
-                "/v1/events",
-                None,
-                fastnetmon_ban("dashboard", victim),
-            )
-            .await;
+            let (status, _) =
+                send(&app, "/v1/events", None, fastnetmon_ban("radware", victim)).await;
             assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
             let unchanged = repo
                 .get_mitigation(id.parse().unwrap())

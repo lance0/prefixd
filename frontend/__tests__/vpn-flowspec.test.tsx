@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { fireEvent, screen, waitFor, within } from "@testing-library/react"
 import { FlowSpecRuleDialog, validateRule, toRequest, type RuleForm } from "@/components/dashboard/flowspec-rule-dialog"
-import { createSourceOnlyVpn, createVpnFlowSpec, parseFlowSpecAdmissionPreview, readAutomaticScope, type JsonValue, type VpnScopeSnapshot } from "@/lib/api"
+import { createSourceOnlyVpn, createVpnFlowSpec, parseFlowSpecAdmissionPreview, type JsonValue, type VpnScopeSnapshot } from "@/lib/api"
 import { formatFlowSpecRule } from "@/components/dashboard/flowspec-preview"
 import { json, renderApp, settle, useFakeController } from "./support/fake-controller"
 
@@ -45,12 +45,6 @@ afterEach(() => {
 })
 
 describe("VPN admission boundary", () => {
-  it("reports both configured automatic families without treating a scope map as global", () => {
-    expect(readAutomaticScope({ bgp: { default_scope: { ipv4: "TRANSIT", ipv6: "TRANSIT6" } } })).toBe("IPv4: TRANSIT · IPv6: TRANSIT6")
-    expect(readAutomaticScope({ bgp: { default_scope: "TRANSIT" } })).toBe("TRANSIT")
-    expect(readAutomaticScope({ bgp: { default_scope: { ipv4: 13 } } })).toBeNull()
-  })
-
   it.each(["ipv4", "ipv6"] as const)("keeps %s source-only identity distinct from explicit /0", family => {
     const selected = { ...scope, identity: { ...scope.identity, family } }
     const result = parseFlowSpecAdmissionPreview(preview(selected, true), 200)

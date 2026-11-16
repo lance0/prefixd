@@ -4,7 +4,7 @@ import React, { createContext, useContext, useState, useEffect, useRef, useCallb
 import useSWR, { useSWRConfig, type Arguments } from "swr"
 import { toast } from "sonner"
 import type { WsMessage, ConnectionState } from "@/hooks/use-websocket-types"
-import { getNotificationPreferences, type NotificationPreferences } from "@/lib/api"
+import { getHealth, getNotificationPreferences, type NotificationPreferences } from "@/lib/api"
 
 function getWsBase(): string {
   if (typeof window === "undefined") return "ws://127.0.0.1"
@@ -74,8 +74,12 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
   const connectionTimeoutRef = useRef<NodeJS.Timeout | null>(null)
   const { mutate } = useSWRConfig()
 
+  // Preferences belong to a signed-in session: `none` mode and mTLS clients get 403, so they
+  // use the defaults instead of an error and its retries. The shared "health" key is polled elsewhere.
+  const { data: health } = useSWR("health", getHealth, { refreshInterval: 0, revalidateOnFocus: false })
+
   const { data: notifPrefs } = useSWR<NotificationPreferences>(
-    "notification-preferences",
+    health?.auth_mode === "credentials" ? "notification-preferences" : null,
     getNotificationPreferences,
     { refreshInterval: 0, revalidateOnFocus: false }
   )

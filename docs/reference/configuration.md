@@ -628,9 +628,6 @@ sources:
   alertmanager:
     weight: 0.8
     type: telemetry
-  dashboard:
-    weight: 1.0
-    type: manual
 ```
 
 | Field | Type | Default | Description |
@@ -1005,9 +1002,10 @@ playbooks:
   `blackhole.detector_sources` reaches the step, for creation and for
   extension. Other sources get `422` and count under
   `prefixd_guardrail_rejections_total{reason="BlackholeSourceNotAllowed"}`.
-  The dashboard's mitigate-now dialog posts `source: "dashboard"`, so it stays
-  off this path unless listed. `source` is asserted by the caller: this is a
-  routing guard alongside detector credentials, not authorization.
+  The `source` is the one the event's credential is bound to
+  ([source binding](api.md#source-binding)), so the list is authorization: an
+  ingest token bound to a listed source, the HMAC adapter of that name or an
+  Admin reaches the step, and an Operator never does.
 - **Not with rules.** A blackhole drops all traffic to the victim, so it never
   combines with the narrowed rules of [ADR 028](../adr/028-amplification-matches.md).
   A blackhole step carries no `rules`, a rule cannot use `action: blackhole`,

@@ -128,6 +128,7 @@ describe("WebSocketProvider server frames", () => {
     fetches.clear()
     preferences = { muted_events: [], quiet_hours_start: null, quiet_hours_end: null }
     controller.route("GET", "/v1/preferences", () => json(preferences))
+    controller.route("GET", "/v1/health", () => json({ status: "ok", auth_mode: "credentials" }))
     vi.stubGlobal("WebSocket", FakeWebSocket)
   })
 
@@ -211,6 +212,17 @@ describe("WebSocketProvider server frames", () => {
     await act(async () => { await getHealth() })
     expect(screen.getByText("Live")).toBeVisible()
     expect(screen.getByRole("status")).toHaveAccessibleName(/HTTP polling also remains active/)
+  })
+
+  it.each(["none", "mtls"])("does not request session preferences in %s mode", async (mode) => {
+    controller.route("GET", "/v1/health", () => json({ status: "ok", auth_mode: mode }))
+    const app = appWrapper({ withoutAuth: true })
+    renderHook(() => useWebSocketContext(), {
+      wrapper: ({ children }: { children: ReactNode }) => <app.wrapper><WebSocketProvider>{children}</WebSocketProvider></app.wrapper>,
+    })
+    await waitFor(() => expect(controller.calls("GET", "/v1/health")).toHaveLength(1))
+    await settle()
+    expect(controller.calls("GET", "/v1/preferences")).toHaveLength(0)
   })
 
   it("stops retrying after ten failures until the tab is revisited", async () => {

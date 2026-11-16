@@ -87,8 +87,8 @@ describe("operator menu authentication mode", () => {
     expect(controller.calls("POST", "/v1/auth/logout")).toHaveLength(0)
   })
 
-  it.each(["credentials", "bearer"])("preserves named sign out in %s mode", async (mode) => {
-    session({ mode })
+  it("preserves named sign out in credentials mode", async () => {
+    session({ mode: "credentials" })
     const { router } = renderApp(<TimeZoneProvider><UserMenu /></TimeZoneProvider>)
     await openMenu()
     fireEvent.click(await screen.findByRole("menuitem", { name: "Sign out" }))
@@ -178,7 +178,7 @@ describe("operator menu authentication mode", () => {
     expect(screen.queryByText("alice")).not.toBeInTheDocument()
   })
 
-  it.each(["none", "bearer"])("offers browser preferences without an account in %s mode", async (mode) => {
+  it.each(["none", "mtls"])("offers browser preferences without an account in %s mode", async (mode) => {
     session({ mode, operator: false })
     renderApp(<TimeZoneProvider><UserMenu /></TimeZoneProvider>)
     const trigger = await screen.findByRole("button", { name: "Preferences" })

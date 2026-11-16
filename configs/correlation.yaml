@@ -3,10 +3,6 @@ window_seconds: 300
 min_sources: 1
 confidence_threshold: 0.5
 sources:
-  dashboard:
-    weight: 1.0
-    type: manual
-    confidence_mapping: {}
   fastnetmon:
     weight: 1.0
     type: detector

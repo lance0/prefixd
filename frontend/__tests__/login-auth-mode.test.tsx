@@ -49,8 +49,8 @@ describe("login authentication mode", () => {
     expect(controller.calls("POST", "/v1/auth/login")).toHaveLength(0)
   })
 
-  it.each(["credentials", "bearer"])("preserves password sign in for %s mode", async (mode) => {
-    session({ mode })
+  it("preserves password sign in for credentials mode", async () => {
+    session({ mode: "credentials" })
     const { router } = renderApp(<LoginPage />)
     fireEvent.change(await screen.findByRole("textbox", { name: "Username" }), { target: { value: "alice" } })
     fireEvent.change(screen.getByLabelText("Password"), { target: { value: "correct-password" } })
