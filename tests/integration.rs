@@ -5829,7 +5829,7 @@ async fn test_alertmanager_resolved_alerts_trigger_withdraw() {
     );
 }
 
-/// VAL-ADAPT-008: Fingerprint deduplication (same source + fingerprint = duplicate)
+/// VAL-ADAPT-008: The same fingerprint and startsAt firing deduplicates.
 #[tokio::test]
 async fn test_alertmanager_fingerprint_dedup() {
     let app = setup_app_correlation(true, 1, 0.5).await;
@@ -6655,6 +6655,15 @@ async fn test_openapi_includes_alertmanager() {
         schemas.contains_key("AlertmanagerAlertResult"),
         "OpenAPI spec should include AlertmanagerAlertResult schema"
     );
+    let required = schemas["AlertmanagerAlert"]["required"].as_array().unwrap();
+    assert!(required.contains(&serde_json::json!("fingerprint")));
+    assert!(required.contains(&serde_json::json!("startsAt")));
+    for field in ["fingerprint", "startsAt"] {
+        assert_eq!(
+            schemas["AlertmanagerAlert"]["properties"][field]["type"],
+            "string"
+        );
+    }
 }
 
 // ==========================================================================

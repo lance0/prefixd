@@ -219,17 +219,22 @@ pub trait RepositoryTrait: Send + Sync {
         source: &str,
         external_id: &str,
     ) -> Result<Option<AttackEvent>>;
-    /// Store a detector unban with its replay record, the POP and the
-    /// mitigations it withdraws, in one write before any withdrawal intent.
-    async fn insert_unban_event(
+    /// Seed the historical pre-atomic replay shape for regression tests only.
+    #[cfg(any(test, feature = "test-utils"))]
+    async fn insert_legacy_unban_for_test(
         &self,
         event: &AttackEvent,
         pop: &str,
         targets: &[Uuid],
     ) -> Result<()>;
-    /// Replace a stored unban's targets with those whose withdrawal intent
-    /// was recorded.
-    async fn set_unban_targets(&self, event_id: Uuid, targets: &[Uuid]) -> Result<()>;
+    /// Commit the unban and every accepted immutable intent atomically, before
+    /// any speaker call. Cancellation or failure cannot leave a partial set.
+    async fn begin_unban(
+        &self,
+        event: &AttackEvent,
+        pop: &str,
+        targets: &[crate::domain::PreparedDetectorWithdrawal],
+    ) -> Result<Vec<WithdrawalRequest>>;
     /// The first unban `source` sent on `pop` with this external ID that has
     /// a replay record: the targets a resend or replay of it reuses. Unbans
     /// stored without one are not returned.

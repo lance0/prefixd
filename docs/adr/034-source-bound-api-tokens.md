@@ -1287,3 +1287,52 @@ host-only token never reaches hostgroup ingestion.
   contract is not yet qualified (section 13's open checks). Until it is, a
   hostgroup shim posts prefix events with its own `fastnetmon-hostgroup` token,
   as the FastNetMon guide shows.
+
+## Amendment: Alertmanager firing identity
+
+Amended 2026-11-16.
+
+Alertmanager's fingerprint identifies a label set, so it repeats when the same
+alert fires again. Permanent deduplication on that fingerprint suppressed every
+firing after the first. Both firing and resolved notifications now use the
+fingerprint plus the parsed `startsAt` instant, formatted in UTC with nanosecond
+precision, as their external event ID. Equivalent timestamp offsets identify
+the same firing. A missing or blank fingerprint, or a missing or invalid
+`startsAt`, fails that alert before storage; there is no current-time fallback.
+Alertmanager supplies these fields in its
+[notification data](https://prometheus.io/docs/alerting/latest/notifications/).
+
+The native Alertmanager adapter explicitly selects an episode when resolving.
+Under the lifecycle mutex, the first resolve selects only live mitigations
+owned by its source on this POP, for its victim and vector, whose
+`last_event_id` is the matching firing's stored event. A newer firing or an
+extension by another source supersedes that event, so an older resolve cannot
+withdraw the extended mitigation. A resolve without a matching firing selects
+nothing. Stored unban target sets still govern retries and replays; they never
+select again. Generic events and FastNetMon retain the victim-based unban
+decision above.
+
+Before upgrading, drain or let expire active Alertmanager mitigations created
+with fingerprint-only IDs. New episode IDs do not pair with those historical
+events. No schema migration or fingerprint-only fallback is added.
+
+
+## Amendment: atomic detector unban intent
+
+Amended 2026-11-16.
+
+The unban event, POP, accepted targets and every initial immutable withdrawal
+request commit in one PostgreSQL transaction before any speaker call. A failed
+write rolls back all of them. Definitive ownership refusals stay outside the
+accepted set. Replay loads only stored pending requests; it never rebuilds a
+request from the current mitigation. An active historical target without an
+intent returns a conflict for operator review.
+
+The transaction locks target mitigation rows in UUID order and rechecks their
+revision, last event, route ownership and speaker binding. Detector extensions
+take the same row lock and check pending intent in a fresh READ COMMITTED
+statement. A cancelled COMMIT may still land, so an unban replay lookup takes
+the same transaction advisory lock as the unban write, keyed by POP, source
+and external event ID, before deciding that the record is absent. Lock and
+statement waits use the existing five-second storage bounds. This preserves
+immutable intent across a dropped HTTP future as well as an explicit error.

@@ -611,7 +611,8 @@ impl RepositoryTrait for MockRepository {
         Ok(())
     }
 
-    async fn insert_unban_event(
+    #[cfg(any(test, feature = "test-utils"))]
+    async fn insert_legacy_unban_for_test(
         &self,
         event: &AttackEvent,
         pop: &str,
@@ -632,17 +633,74 @@ impl RepositoryTrait for MockRepository {
         Ok(())
     }
 
-    async fn set_unban_targets(&self, event_id: Uuid, targets: &[Uuid]) -> Result<()> {
+    async fn begin_unban(
+        &self,
+        event: &AttackEvent,
+        pop: &str,
+        targets: &[crate::domain::PreparedDetectorWithdrawal],
+    ) -> Result<Vec<WithdrawalRequest>> {
         if self
             .fail_unban_records
             .load(std::sync::atomic::Ordering::SeqCst)
         {
             return Err(PrefixdError::Internal("seeded unban record failure".into()));
         }
-        if let Some((_, stored)) = self.unban_replays.lock().unwrap().get_mut(&event_id) {
-            *stored = targets.to_vec();
+        let bindings = self.speaker_bindings.lock().unwrap();
+        let mitigations = self.mitigations.lock().unwrap();
+        let mut withdrawals = self.withdrawals.lock().unwrap();
+        let mut prepared = withdrawals.clone();
+        let mut requests = Vec::with_capacity(targets.len());
+        for target in targets {
+            let request = &target.request;
+            if *self.fail_withdrawal_begin.lock().unwrap() == Some(request.mitigation_id) {
+                return Err(PrefixdError::Internal("seeded intent write failure".into()));
+            }
+            if bindings.pops.get(pop).copied() != request.target_id {
+                return Err(crate::domain::binding_mismatch());
+            }
+            let current = mitigations
+                .iter()
+                .find(|m| m.mitigation_id == request.mitigation_id)
+                .ok_or(PrefixdError::MitigationNotFound(request.mitigation_id))?;
+            if current != &target.expected
+                || request.pop != pop
+                || request.detector_source.as_deref() != Some(event.source.as_str())
+            {
+                return Err(PrefixdError::Conflict(
+                    "detector withdrawal target changed".into(),
+                ));
+            }
+            crate::domain::validate_withdrawal_owner(request, current, &mitigations)?;
+            if let Some(existing) = prepared
+                .iter()
+                .find(|r| r.mitigation_id == request.mitigation_id)
+            {
+                if existing.completed_at.is_some()
+                    || existing.pop != pop
+                    || existing.target_id != request.target_id
+                {
+                    return Err(PrefixdError::Conflict(
+                        "withdrawal already completed".into(),
+                    ));
+                }
+                requests.push(existing.clone());
+            } else {
+                prepared.push(request.clone());
+                requests.push(request.clone());
+            }
         }
-        Ok(())
+        let mut events = self.events.lock().unwrap();
+        let ids = requests
+            .iter()
+            .map(|request| request.mitigation_id)
+            .collect();
+        self.unban_replays
+            .lock()
+            .unwrap()
+            .insert(event.event_id, (pop.into(), ids));
+        events.push(event.clone());
+        *withdrawals = prepared;
+        Ok(requests)
     }
 
     async fn find_unban_replay(

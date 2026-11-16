@@ -151,9 +151,43 @@ pub struct Repository {
 }
 
 impl Repository {
+    async fn withdrawal_transaction(&self) -> Result<sqlx::Transaction<'static, sqlx::Postgres>> {
+        // A cancelled BEGIN must still produce a transaction whose drop rolls back.
+        let pool = self.pool.clone();
+        let mut tx = tokio::spawn(async move {
+            pool.begin_with("BEGIN ISOLATION LEVEL READ COMMITTED")
+                .await
+        })
+        .await
+        .map_err(|_| sqlx::Error::PoolTimedOut)??;
+        sqlx::query("SET LOCAL lock_timeout = '5s'")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("SET LOCAL statement_timeout = '5s'")
+            .execute(&mut *tx)
+            .await?;
+        Ok(tx)
+    }
+
+    async fn lock_unban_replay(
+        connection: &mut PgConnection,
+        pop: &str,
+        source: &str,
+        external_id: Option<&str>,
+    ) -> Result<()> {
+        if let Some(external_id) = external_id.filter(|id| !id.is_empty()) {
+            let key = serde_json::to_string(&("prefixd:unban", pop, source, external_id))?;
+            sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+                .bind(key)
+                .execute(connection)
+                .await?;
+        }
+        Ok(())
+    }
+
     /// One insert, so an unban's replay record exists exactly when its event does.
-    async fn insert_event_row(
-        &self,
+    async fn insert_event_on(
+        connection: &mut PgConnection,
         event: &AttackEvent,
         unban: Option<(&str, &[Uuid])>,
     ) -> Result<()> {
@@ -183,9 +217,57 @@ impl Repository {
         .bind(&event.raw_details)
         .bind(unban.map(|(pop, _)| pop))
         .bind(unban.map(|(_, targets)| targets))
-        .execute(&self.pool)
+        .execute(connection)
         .await?;
         Ok(())
+    }
+
+    async fn begin_withdrawal_on(
+        connection: &mut PgConnection,
+        request: &WithdrawalRequest,
+    ) -> Result<WithdrawalRequest> {
+        sqlx::query(
+            r#"INSERT INTO withdrawal_requests (
+                operation_id, mitigation_id, pop, nlri_hash, rule_json, mitigation_updated_at,
+                terminal_status, actor_type, actor, reason, requested_at, speaker_delete_required, target_id,
+                rule_kind, detector_source
+            ) SELECT $1, mitigation_id, pop, $4, $5, updated_at, $7, $8, $9, $10, $11, $12, $13, $14, $15
+              FROM mitigations WHERE mitigation_id = $2 AND pop = $3 AND updated_at = $6
+                AND status IN ('active', 'escalated')
+                AND (($13::uuid IS NULL AND NOT EXISTS (SELECT 1 FROM speaker_pop_bindings WHERE pop = $3))
+                  OR EXISTS (SELECT 1 FROM speaker_pop_bindings WHERE pop = $3 AND target_id = $13))
+              ON CONFLICT (mitigation_id) DO NOTHING"#,
+        )
+        .bind(request.operation_id)
+        .bind(request.mitigation_id)
+        .bind(&request.pop)
+        .bind(&request.nlri_hash)
+        .bind(&request.rule_json)
+        .bind(request.mitigation_updated_at)
+        .bind(&request.terminal_status)
+        .bind(&request.actor_type)
+        .bind(&request.actor)
+        .bind(&request.reason)
+        .bind(request.requested_at)
+        .bind(request.speaker_delete_required)
+        .bind(request.target_id)
+        .bind(&request.rule_kind)
+        .bind(&request.detector_source)
+        .execute(&mut *connection)
+        .await?;
+        sqlx::query_as::<_, WithdrawalRequest>(
+            "SELECT * FROM withdrawal_requests WHERE mitigation_id = $1 AND completed_at IS NULL AND pop = $2 AND target_id IS NOT DISTINCT FROM $3",
+        )
+        .bind(request.mitigation_id)
+        .bind(&request.pop)
+        .bind(request.target_id)
+        .fetch_optional(connection)
+        .await?
+        .ok_or_else(|| {
+            crate::error::PrefixdError::Conflict(
+                "mitigation changed before withdrawal was persisted".into(),
+            )
+        })
     }
 
     pub fn new(pool: PgPool) -> Self {
@@ -560,27 +642,93 @@ impl RepositoryTrait for Repository {
     }
 
     async fn insert_event(&self, event: &AttackEvent) -> Result<()> {
-        self.insert_event_row(event, None).await
+        Self::insert_event_on(&mut *self.pool.acquire().await?, event, None).await
     }
 
-    async fn insert_unban_event(
+    #[cfg(any(test, feature = "test-utils"))]
+    async fn insert_legacy_unban_for_test(
         &self,
         event: &AttackEvent,
         pop: &str,
         targets: &[Uuid],
     ) -> Result<()> {
-        self.insert_event_row(event, Some((pop, targets))).await
+        Self::insert_event_on(
+            &mut *self.pool.acquire().await?,
+            event,
+            Some((pop, targets)),
+        )
+        .await
     }
 
-    async fn set_unban_targets(&self, event_id: Uuid, targets: &[Uuid]) -> Result<()> {
-        sqlx::query(
-            "UPDATE events SET unban_target_ids = $2 WHERE event_id = $1 AND unban_pop IS NOT NULL",
+    async fn begin_unban(
+        &self,
+        event: &AttackEvent,
+        pop: &str,
+        targets: &[crate::domain::PreparedDetectorWithdrawal],
+    ) -> Result<Vec<WithdrawalRequest>> {
+        let mut tx = self.withdrawal_transaction().await?;
+        Self::lock_unban_replay(
+            &mut tx,
+            pop,
+            &event.source,
+            event.external_event_id.as_deref(),
         )
-        .bind(event_id)
-        .bind(targets)
-        .execute(&self.pool)
         .await?;
-        Ok(())
+        let mut ordered: Vec<_> = targets.iter().collect();
+        ordered.sort_unstable_by_key(|target| target.request.mitigation_id);
+        let mut locked = Vec::with_capacity(targets.len());
+        for target in &ordered {
+            let request = &target.request;
+            let row = sqlx::query_as::<_, MitigationRow>(
+                "SELECT * FROM mitigations WHERE mitigation_id = $1 FOR UPDATE",
+            )
+            .bind(request.mitigation_id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or(PrefixdError::MitigationNotFound(request.mitigation_id))?;
+            locked.push(Mitigation::from_row(row)?);
+        }
+        let binding: Option<Uuid> =
+            sqlx::query_scalar("SELECT target_id FROM speaker_pop_bindings WHERE pop = $1")
+                .bind(pop)
+                .fetch_optional(&mut *tx)
+                .await?;
+        let rows = sqlx::query_as::<_, MitigationRow>(
+            "SELECT * FROM mitigations WHERE pop = $1 AND status IN ('active', 'escalated')",
+        )
+        .bind(pop)
+        .fetch_all(&mut *tx)
+        .await?;
+        let owners = rows
+            .into_iter()
+            .map(Mitigation::from_row)
+            .collect::<Result<Vec<_>>>()?;
+        for (target, current) in ordered.iter().zip(&locked) {
+            let request = &target.request;
+            if request.target_id != binding {
+                return Err(crate::domain::binding_mismatch());
+            }
+            if current != &target.expected
+                || request.pop != pop
+                || request.detector_source.as_deref() != Some(event.source.as_str())
+            {
+                return Err(PrefixdError::Conflict(
+                    "detector withdrawal target changed".into(),
+                ));
+            }
+            crate::domain::validate_withdrawal_owner(request, current, &owners)?;
+        }
+        let mut requests = Vec::with_capacity(targets.len());
+        for target in targets {
+            requests.push(Self::begin_withdrawal_on(&mut tx, &target.request).await?);
+        }
+        let ids: Vec<_> = requests
+            .iter()
+            .map(|request| request.mitigation_id)
+            .collect();
+        Self::insert_event_on(&mut tx, event, Some((pop, &ids))).await?;
+        tx.commit().await?;
+        Ok(requests)
     }
 
     async fn find_unban_replay(
@@ -589,6 +737,10 @@ impl RepositoryTrait for Repository {
         source: &str,
         external_id: &str,
     ) -> Result<Option<UnbanReplay>> {
+        // A dropped COMMIT can still land. Wait for that entire unban before
+        // deciding that its replay record is absent.
+        let mut tx = self.withdrawal_transaction().await?;
+        Self::lock_unban_replay(&mut tx, pop, source, Some(external_id)).await?;
         let row: Option<(Uuid, Option<String>, String, Vec<Uuid>)> = sqlx::query_as(
             r#"
             SELECT event_id, external_event_id, victim_ip, unban_target_ids
@@ -602,8 +754,9 @@ impl RepositoryTrait for Repository {
         .bind(pop)
         .bind(source)
         .bind(external_id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await?;
+        tx.commit().await?;
         Ok(row.map(
             |(event_id, external_event_id, victim_ip, target_ids)| UnbanReplay {
                 event_id,
@@ -750,48 +903,16 @@ impl RepositoryTrait for Repository {
     }
 
     async fn begin_withdrawal(&self, request: &WithdrawalRequest) -> Result<WithdrawalRequest> {
-        sqlx::query(
-            r#"INSERT INTO withdrawal_requests (
-                operation_id, mitigation_id, pop, nlri_hash, rule_json, mitigation_updated_at,
-                terminal_status, actor_type, actor, reason, requested_at, speaker_delete_required, target_id,
-                rule_kind, detector_source
-            ) SELECT $1, mitigation_id, pop, $4, $5, updated_at, $7, $8, $9, $10, $11, $12, $13, $14, $15
-              FROM mitigations WHERE mitigation_id = $2 AND pop = $3 AND updated_at = $6
-                AND status IN ('active', 'escalated')
-                AND (($13::uuid IS NULL AND NOT EXISTS (SELECT 1 FROM speaker_pop_bindings WHERE pop = $3))
-                  OR EXISTS (SELECT 1 FROM speaker_pop_bindings WHERE pop = $3 AND target_id = $13))
-              ON CONFLICT (mitigation_id) DO NOTHING"#,
-        )
-        .bind(request.operation_id)
-        .bind(request.mitigation_id)
-        .bind(&request.pop)
-        .bind(&request.nlri_hash)
-        .bind(&request.rule_json)
-        .bind(request.mitigation_updated_at)
-        .bind(&request.terminal_status)
-        .bind(&request.actor_type)
-        .bind(&request.actor)
-        .bind(&request.reason)
-        .bind(request.requested_at)
-        .bind(request.speaker_delete_required)
-        .bind(request.target_id)
-        .bind(&request.rule_kind)
-        .bind(&request.detector_source)
-        .execute(&self.pool)
-        .await?;
-        sqlx::query_as::<_, WithdrawalRequest>(
-            "SELECT * FROM withdrawal_requests WHERE mitigation_id = $1 AND completed_at IS NULL AND pop = $2 AND target_id IS NOT DISTINCT FROM $3",
-        )
-        .bind(request.mitigation_id)
-        .bind(&request.pop)
-        .bind(request.target_id)
-        .fetch_optional(&self.pool)
-        .await?
-        .ok_or_else(|| {
-            crate::error::PrefixdError::Conflict(
-                "mitigation changed before withdrawal was persisted".into(),
-            )
-        })
+        let mut tx = self.withdrawal_transaction().await?;
+        // Operator and scheduler withdrawals obey the same lock protocol as
+        // detector unbans and extensions, including when COMMIT outlives a caller.
+        sqlx::query("SELECT mitigation_id FROM mitigations WHERE mitigation_id = $1 FOR UPDATE")
+            .bind(request.mitigation_id)
+            .execute(&mut *tx)
+            .await?;
+        let stored = Self::begin_withdrawal_on(&mut tx, request).await?;
+        tx.commit().await?;
+        Ok(stored)
     }
 
     async fn pending_withdrawals(&self, pop: Option<&str>) -> Result<Vec<WithdrawalRequest>> {

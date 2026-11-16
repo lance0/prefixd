@@ -170,8 +170,8 @@ What changes:
   unban with a vector other than `unknown` withdraws only that vector's
   mitigations, with UDP floods and amplification as one family; `unknown`,
   which FastNetMon unbans send, withdraws them all. The unban is stored with
-  its POP and selected targets before anything else, and gets `503`, touching
-  nothing, if that write fails. A resend of an unban event ID the source
+  its POP, accepted targets and every immutable withdrawal intent in one
+  transaction before any delete, and gets `503`, touching nothing, if it fails. A resend of an unban event ID the source
   already sent on that POP reuses those targets, so a replay cannot withdraw
   a later ban's mitigation; a resend naming another victim gets `409`. With
   correlation, only the source whose event met the threshold withdraws the
@@ -408,6 +408,35 @@ Rotation afterward needs no window: create a token under a new name, update the
 client, confirm its last use advances, then revoke the old token. If a token leaked, revoke it first, then review `GET /v1/audit` for actor `token:<name>` to find what it did, including configuration changes such as alerting destinations, playbooks and correlation settings, and undo them. Deleting or
 demoting an operator does not revoke the tokens they created; list them with
 `prefixdctl tokens list --created-by <username>` and revoke or rotate each one.
+
+## Alertmanager firing identity
+
+Before upgrading from 0.27.0, drain or let expire active Alertmanager
+mitigations. Historical bans used the fingerprint alone; new firing and
+resolved notifications use the fingerprint plus `startsAt`, and do not pair
+with fingerprint-only events. After the upgrade, let Alertmanager resend its
+still-firing alerts or send a fresh notification through its normal receiver.
+
+The native webhook requires a nonblank `fingerprint` and valid RFC3339
+`startsAt` on both firing and resolved alerts. Standard Alertmanager webhooks
+include them; update custom payload builders before the maintenance window.
+Keep the same `startsAt` for every resend and resolution of one firing.
+Timestamp offsets are normalized to UTC without dropping fractional precision.
+A later firing must have a new `startsAt`.
+
+A resolve only selects source-owned rules whose last creating or extending
+event belongs to its firing. A newer firing or another source's extension
+supersedes the old episode; the old resolve leaves that rule active. Its current
+episode can resolve it, or an operator can withdraw it before TTL expiry.
+Generic events and FastNetMon still unban by victim. See the
+[Alertmanager API](../reference/api.md#alertmanager-webhook).
+
+A historical unban can have saved target IDs without a saved withdrawal intent
+if its intent write failed before this upgrade. Replaying one whose target is
+still active now returns `409` and requires operator review. Inspect the current
+mitigation, then use the normal confirmed operator withdrawal if it should end;
+do not assume the old resolve still describes the current rule. Existing pending
+intents retain their original operation, actor, rule and target.
 
 ## Canonical victims
 

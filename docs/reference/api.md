@@ -373,14 +373,18 @@ configured, the event is evaluated exactly as `udp_flood`: the mitigation's
 vector is `udp_flood` and its reason ends with
 `[udp_amplification fallback: ...]`.
 
-An unban names its victim. It withdraws every live mitigation for that victim
-on the controller's POP whose triggering event came from the granted source,
+An unban on this events endpoint names its victim. It withdraws every live
+mitigation for that victim on the controller's POP whose triggering event came
+from the granted source,
 comparing the address in canonical form, so a zero-padded IPv6 unban matches a
 canonically stored mitigation. Mitigations other sources created for the same
 victim, and manual mitigations, are never touched. A re-ban that extended a
 mitigation and an unban after a lost earlier unban both pair, and the detector
 keeps no state.
 
+- **Native Alertmanager.** Its [resolved notifications](#alertmanager-webhook)
+  additionally select their firing, leaving a rule extended by a newer event
+  untouched. Generic events and FastNetMon retain the victim selection here.
 - **Vector.** An unban with a vector other than `unknown` withdraws only that
   vector's mitigations, so a resolved alert for one attack leaves the
   source's others; `udp_flood` and `udp_amplification` count as one family,
@@ -394,14 +398,10 @@ keeps no state.
   whichever event met the group's threshold, so only that event's source
   withdraws the mitigation by unban; the others use their own mitigations, or
   an operator withdraws it.
-- **Partial failure.** The unban is stored first, with the POP and the
-  mitigations it selected. If that write, or a storage read before it,
-  fails, the answer is `503` and nothing is touched. Withdrawal intent is
-  then recorded for every selected mitigation before any delete is
-  attempted. The stored set drops only the mitigations whose intent was
-  definitively refused; an intent that could not be recorded for another
-  reason, such as a storage error, keeps its mitigation in the set, and the
-  unban answers `503` without deleting anything, so a resend retries it. The first delete that fails,
+- **Partial failure.** The unban event, POP, accepted targets and their immutable
+  withdrawal intents commit together before any delete. A storage read or write
+  failure returns `503` and leaves no partial unban. Definitive refusals, such
+  as another live owner, stay outside the accepted set. The first delete that fails,
   whether the speaker refused it, it timed out or its outcome is otherwise
   unknown, stops the unban, so a failing or wedged speaker holds the
   lifecycle lock for one bounded attempt. The answer is then `503`, and every
@@ -412,10 +412,13 @@ keeps no state.
   and the bundled script treats it as final.
 - **Resends and replays.** An unban `event_id` the source already sent on
   this POP reuses that unban's stored targets and never selects again: a
-  resend after a `503` or a dropped request completes the original set
-  without a second request, and a replayed unban cannot withdraw a mitigation
+  resend after a committed `503` or a dropped request completes the original
+  persisted intents, preserving their operation, actor, rule and speaker target, and a replayed unban cannot withdraw a mitigation
   a later ban created. A resend that names another victim gets `409`. The
-  same `event_id` on another POP is that POP's own unban. An unban without an
+  same `event_id` on another POP is that POP's own unban. If storage rolled
+  back before commit, the resend selects against current state. An active
+  historical target without a saved withdrawal intent returns `409` for
+  operator review; a resend never constructs a new withdrawal snapshot. An unban without an
   `event_id` selects each time. An HMAC webhook adapter's unban needs an
   event ID. A `mode: corroborating` source's unban is refused on every
   route, as its bans are, and stores nothing.
@@ -1789,8 +1792,22 @@ Accepts an [Alertmanager v4 webhook payload](https://prometheus.io/docs/alerting
 | `top_src_ports` | `annotations.top_src_ports`, comma-separated ports such as `"123, 11211"`; read for firing alerts only | None |
 | `confidence` | `labels.severity` → `critical`=0.9, `warning`=0.7, `info`=0.5 | 0.5 |
 | `action` | `alerts[].status` ("resolved" → "unban", else "ban") | "ban" |
-| `event_id` (dedup) | `alerts[].fingerprint` | None |
+| `timestamp` | `alerts[].startsAt`, parsed as RFC3339 | Required |
+| `event_id` (dedup) | `alerts[].fingerprint` plus canonical UTC `startsAt` with nanosecond precision | Both required |
 | `source` | hardcoded `"alertmanager"` | — |
+
+Both firing and resolved notifications use the same ID for one firing. A later
+`startsAt` identifies a new firing even when the fingerprint is unchanged.
+Equivalent timestamp offsets identify the same instant. Missing or blank
+fingerprints and missing or invalid `startsAt` values fail that alert with
+`status: "error"` before storing an event.
+
+A resolved notification selects only live mitigations owned by `alertmanager`
+for its victim and vector whose last creating or extending event is that
+firing. A later firing or another source's extension supersedes it, so a delayed
+resolve cannot withdraw the extended rule. A resolve without a matching firing
+selects nothing. Retries reuse the resolve's original target set, including
+when that set was empty.
 
 For UDP reflection, set `labels.vector` to `udp_amplification` and list the
 reflector source ports in `annotations.top_src_ports`. prefixd keeps only ports
@@ -1825,8 +1842,8 @@ it the same way. Resolved alerts ignore the annotation.
 | `extended` | Existing mitigation TTL extended |
 | `accepted_no_mitigation` | Victim outside the effective inventory; no mitigation |
 | `accepted_no_playbook` | Policy produced no action |
-| `duplicate` | Fingerprint already seen (dedup) |
-| `withdrawn` | A resolved alert withdrew the live mitigations `alertmanager` created for the victim and vector; `mitigation_id` is the first |
+| `duplicate` | This fingerprint and `startsAt` firing was already processed |
+| `withdrawn` | A resolved alert withdrew its firing's live mitigations; `mitigation_id` is the first |
 | `no_active_mitigation` | A resolved alert found nothing live to withdraw |
 | `error` | Processing failed for this alert (see `error` field), and it counts in `failed` |
 

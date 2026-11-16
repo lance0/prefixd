@@ -234,6 +234,388 @@ fn alertmanager(victim: &str, fingerprint: &str) -> Value {
     })
 }
 
+#[tokio::test]
+async fn alertmanager_episodes_refire_and_keep_replay_targets() {
+    let f = fixture(AuthMode::Credentials).await;
+    let am = bearer(
+        &f.repo
+            .mint_token_for_test("am", TokenScope::Ingest, Some("alertmanager")),
+    );
+    let mut firing = alertmanager("203.0.113.80", "episode");
+    let mut previous_resolve = None;
+    let mut ids = Vec::new();
+    for starts_at in [
+        "2026-11-16T00:00:00.000000001Z",
+        "2026-11-16T00:00:00.000000002Z",
+    ] {
+        firing["alerts"][0]["startsAt"] = starts_at.into();
+        let (status, body) = send(
+            &f.app,
+            "/v1/signals/alertmanager",
+            Some(("authorization", &am)),
+            &firing,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["results"][0]["status"], "accepted", "{body}");
+        let id: uuid::Uuid = body["results"][0]["mitigation_id"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        ids.push(id);
+
+        let (_, duplicate) = send(
+            &f.app,
+            "/v1/signals/alertmanager",
+            Some(("authorization", &am)),
+            &firing,
+        )
+        .await;
+        assert_eq!(
+            duplicate["results"][0]["status"], "duplicate",
+            "{duplicate}"
+        );
+        if let Some(resolve) = previous_resolve.as_ref() {
+            let (_, replay) = send(
+                &f.app,
+                "/v1/signals/alertmanager",
+                Some(("authorization", &am)),
+                resolve,
+            )
+            .await;
+            assert_eq!(
+                replay["results"][0]["mitigation_id"],
+                ids[0].to_string(),
+                "{replay}"
+            );
+            assert_eq!(
+                f.repo.get_mitigation(id).await.unwrap().unwrap().status,
+                MitigationStatus::Active
+            );
+        }
+
+        let mut resolved = firing.clone();
+        resolved["alerts"][0]["status"] = "resolved".into();
+        let (_, body) = send(
+            &f.app,
+            "/v1/signals/alertmanager",
+            Some(("authorization", &am)),
+            &resolved,
+        )
+        .await;
+        assert_eq!(body["results"][0]["status"], "withdrawn", "{body}");
+        assert_eq!(
+            body["results"][0]["mitigation_id"],
+            id.to_string(),
+            "{body}"
+        );
+        assert_eq!(
+            f.repo.get_mitigation(id).await.unwrap().unwrap().status,
+            MitigationStatus::Withdrawn
+        );
+        previous_resolve = Some(resolved);
+    }
+    assert_ne!(ids[0], ids[1]);
+    assert_eq!(written(&f.repo).await.1, 2);
+}
+
+#[tokio::test]
+async fn alertmanager_old_resolve_cannot_withdraw_an_extended_episode() {
+    let f = fixture(AuthMode::Credentials).await;
+    let am = bearer(
+        &f.repo
+            .mint_token_for_test("am", TokenScope::Ingest, Some("alertmanager")),
+    );
+    let first = alertmanager("203.0.113.81", "overlap");
+    let (_, body) = send(
+        &f.app,
+        "/v1/signals/alertmanager",
+        Some(("authorization", &am)),
+        &first,
+    )
+    .await;
+    let id: uuid::Uuid = body["results"][0]["mitigation_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let mut next = first.clone();
+    next["alerts"][0]["startsAt"] = "2026-11-16T00:01:00Z".into();
+    let (_, body) = send(
+        &f.app,
+        "/v1/signals/alertmanager",
+        Some(("authorization", &am)),
+        &next,
+    )
+    .await;
+    assert_eq!(body["results"][0]["status"], "extended", "{body}");
+    assert_eq!(body["results"][0]["mitigation_id"], id.to_string());
+    let mut old_resolve = first;
+    old_resolve["alerts"][0]["status"] = "resolved".into();
+    for _ in 0..2 {
+        let (_, body) = send(
+            &f.app,
+            "/v1/signals/alertmanager",
+            Some(("authorization", &am)),
+            &old_resolve,
+        )
+        .await;
+        assert_eq!(
+            body["results"][0]["status"], "no_active_mitigation",
+            "{body}"
+        );
+        assert_eq!(
+            f.repo.get_mitigation(id).await.unwrap().unwrap().status,
+            MitigationStatus::Active
+        );
+    }
+    next["alerts"][0]["status"] = "resolved".into();
+    let (_, body) = send(
+        &f.app,
+        "/v1/signals/alertmanager",
+        Some(("authorization", &am)),
+        &next,
+    )
+    .await;
+    assert_eq!(body["results"][0]["status"], "withdrawn", "{body}");
+    assert_eq!(
+        f.repo.get_mitigation(id).await.unwrap().unwrap().status,
+        MitigationStatus::Withdrawn
+    );
+}
+
+#[tokio::test]
+async fn alertmanager_requires_stable_firing_identity_before_mutation() {
+    let f = fixture(AuthMode::Credentials).await;
+    let am = bearer(
+        &f.repo
+            .mint_token_for_test("am", TokenScope::Ingest, Some("alertmanager")),
+    );
+    for status in ["firing", "resolved"] {
+        for (field, value) in [
+            ("fingerprint", None),
+            ("fingerprint", Some("")),
+            ("fingerprint", Some(" \t")),
+            ("startsAt", None),
+            ("startsAt", Some("")),
+            ("startsAt", Some("not-a-timestamp")),
+        ] {
+            let mut payload = alertmanager("203.0.113.82", "invalid");
+            payload["alerts"][0]["status"] = status.into();
+            match value {
+                Some(value) => payload["alerts"][0][field] = value.into(),
+                None => {
+                    payload["alerts"][0].as_object_mut().unwrap().remove(field);
+                }
+            }
+            let (_, body) = send(
+                &f.app,
+                "/v1/signals/alertmanager",
+                Some(("authorization", &am)),
+                &payload,
+            )
+            .await;
+            assert_eq!(body["failed"], 1, "{field}: {value:?}: {body}");
+            assert_eq!(body["results"][0]["status"], "error", "{body}");
+            assert_eq!(written(&f.repo).await, (0, 0, 0));
+        }
+    }
+    let mut payload = alertmanager("203.0.113.82", "offset");
+    let (_, first) = send(
+        &f.app,
+        "/v1/signals/alertmanager",
+        Some(("authorization", &am)),
+        &payload,
+    )
+    .await;
+    assert_eq!(first["results"][0]["status"], "accepted", "{first}");
+    payload["alerts"][0]["startsAt"] = "2026-11-15T19:00:00.000000000-05:00".into();
+    let (_, same) = send(
+        &f.app,
+        "/v1/signals/alertmanager",
+        Some(("authorization", &am)),
+        &payload,
+    )
+    .await;
+    assert_eq!(same["results"][0]["status"], "duplicate", "{same}");
+    assert_eq!(written(&f.repo).await.1, 1);
+}
+
+#[tokio::test]
+async fn alertmanager_resolve_preserves_another_sources_extension() {
+    let f = fixture(AuthMode::Credentials).await;
+    let am = bearer(
+        &f.repo
+            .mint_token_for_test("am", TokenScope::Ingest, Some("alertmanager")),
+    );
+    let fnm = bearer(
+        &f.repo
+            .mint_token_for_test("fnm", TokenScope::Ingest, Some("fastnetmon")),
+    );
+    let mut payload = alertmanager("203.0.113.83", "shared-rule");
+    let (_, body) = send(
+        &f.app,
+        "/v1/signals/alertmanager",
+        Some(("authorization", &am)),
+        &payload,
+    )
+    .await;
+    let id: uuid::Uuid = body["results"][0]["mitigation_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let (_, body) = send(
+        &f.app,
+        "/v1/events",
+        Some(("authorization", &fnm)),
+        &event("fastnetmon", "203.0.113.83", "new-signal"),
+    )
+    .await;
+    assert_eq!(body["status"], "extended", "{body}");
+    assert_eq!(body["mitigation_id"], id.to_string());
+    payload["alerts"][0]["status"] = "resolved".into();
+    let (_, body) = send(
+        &f.app,
+        "/v1/signals/alertmanager",
+        Some(("authorization", &am)),
+        &payload,
+    )
+    .await;
+    assert_eq!(
+        body["results"][0]["status"], "no_active_mitigation",
+        "{body}"
+    );
+    assert_eq!(
+        f.repo.get_mitigation(id).await.unwrap().unwrap().status,
+        MitigationStatus::Active
+    );
+}
+
+#[tokio::test]
+async fn alertmanager_failed_resolve_cannot_later_delete_a_new_extension() {
+    for extender in ["alertmanager", "fastnetmon"] {
+        let f = fixture(AuthMode::Credentials).await;
+        let am = bearer(&f.repo.mint_token_for_test(
+            "am",
+            TokenScope::Ingest,
+            Some("alertmanager"),
+        ));
+        let mut first = alertmanager("203.0.113.84", "failed-resolve");
+        let (_, body) = send(
+            &f.app,
+            "/v1/signals/alertmanager",
+            Some(("authorization", &am)),
+            &first,
+        )
+        .await;
+        let id = body["results"][0]["mitigation_id"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        *f.repo.fail_withdrawal_begin.lock().unwrap() = Some(id);
+        first["alerts"][0]["status"] = "resolved".into();
+        let (status, body) = send(
+            &f.app,
+            "/v1/signals/alertmanager",
+            Some(("authorization", &am)),
+            &first,
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        assert!(f.repo.pending_withdrawals(None).await.unwrap().is_empty());
+        assert_eq!(written(&f.repo).await.0, 1, "the failed unban rolled back");
+        *f.repo.fail_withdrawal_begin.lock().unwrap() = None;
+        if extender == "alertmanager" {
+            let mut next = first.clone();
+            next["alerts"][0]["status"] = "firing".into();
+            next["alerts"][0]["startsAt"] = "2026-11-16T00:01:00Z".into();
+            let (_, body) = send(
+                &f.app,
+                "/v1/signals/alertmanager",
+                Some(("authorization", &am)),
+                &next,
+            )
+            .await;
+            assert_eq!(body["results"][0]["status"], "extended", "{body}");
+        } else {
+            let fnm = bearer(&f.repo.mint_token_for_test(
+                "fnm",
+                TokenScope::Ingest,
+                Some("fastnetmon"),
+            ));
+            let (_, body) = send(
+                &f.app,
+                "/v1/events",
+                Some(("authorization", &fnm)),
+                &event("fastnetmon", "203.0.113.84", "later"),
+            )
+            .await;
+            assert_eq!(body["status"], "extended", "{body}");
+        }
+        let (_, body) = send(
+            &f.app,
+            "/v1/signals/alertmanager",
+            Some(("authorization", &am)),
+            &first,
+        )
+        .await;
+        assert_eq!(
+            body["results"][0]["status"], "no_active_mitigation",
+            "{extender}: {body}"
+        );
+        assert!(
+            f.repo
+                .get_mitigation(id)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_active()
+        );
+    }
+}
+
+#[cfg(feature = "test-utils")]
+#[tokio::test]
+async fn a_legacy_unban_without_intent_never_builds_a_new_snapshot() {
+    let f = fixture(AuthMode::Credentials).await;
+    let fnm = bearer(
+        &f.repo
+            .mint_token_for_test("fnm", TokenScope::Ingest, Some("fastnetmon")),
+    );
+    let auth = Some(("authorization", fnm.as_str()));
+    let victim = "203.0.113.85";
+    let ids = ban_vectors(&f, auth, victim, &[("original", "udp_flood")]).await;
+    let input = unban("fastnetmon", victim, "legacy-unban");
+    let legacy =
+        prefixd::domain::AttackEvent::from_input(serde_json::from_value(input.clone()).unwrap());
+    f.repo
+        .insert_legacy_unban_for_test(&legacy, "test-pop", &ids)
+        .await
+        .unwrap();
+    let (_, body) = send(
+        &f.app,
+        "/v1/events",
+        auth,
+        &event("fastnetmon", victim, "newer"),
+    )
+    .await;
+    assert_eq!(body["status"], "extended", "{body}");
+    let (status, body) = send(&f.app, "/v1/events", auth, &input).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(f.repo.pending_withdrawals(None).await.unwrap().is_empty());
+    assert!(
+        f.repo
+            .get_mitigation(ids[0])
+            .await
+            .unwrap()
+            .unwrap()
+            .is_active()
+    );
+}
+
 /// What an ingest request left behind: events, mitigations and audit rows.
 async fn written(repo: &MockRepository) -> (usize, usize, usize) {
     let all = ListParams {
@@ -658,7 +1040,12 @@ async fn detector_unban_withdraws_only_its_own_sources_mitigations() {
     // for the vector it names: a resolved udp_flood alert leaves its
     // syn_flood mitigation.
     let resolved = |vector: &str| {
-        let mut resolved = alertmanager(victim, &format!("fp-{vector}"));
+        let fingerprint = if vector == "syn_flood" {
+            "fp-1"
+        } else {
+            "fp-udp"
+        };
+        let mut resolved = alertmanager(victim, fingerprint);
         resolved["alerts"][0]["status"] = "resolved".into();
         resolved["alerts"][0]["labels"]["vector"] = vector.into();
         resolved
@@ -2695,14 +3082,12 @@ async fn a_resent_unban_for_another_victim_is_a_conflict() {
     assert_eq!(body["mitigation_ids"], json!(first), "{body}");
 }
 
-/// An intent that could not be recorded for a reason other than a definitive
-/// refusal, such as a storage error, keeps its target in the replay record
-/// and deletes nothing: the unban answers 503 and a resend records the intent
-/// and withdraws both targets. Negative control: narrowing out every failed
-/// intent drops the target, and the resend leaves it live.
+/// A failed intent write rolls back the entire unban, including its replay
+/// record and any earlier targets. A retry selects against current state.
 #[tokio::test]
-async fn an_unrecorded_intent_keeps_its_target_for_the_resend() {
-    let f = fixture(AuthMode::Credentials).await;
+async fn an_unrecorded_intent_rolls_back_the_entire_unban() {
+    let (f, speaker) = failing_fixture("atomic-unban-pop").await;
+    *speaker.failure.lock().unwrap() = None;
     let fnm = bearer(
         &f.repo
             .mint_token_for_test("fnm", TokenScope::Ingest, Some("fastnetmon")),
@@ -2716,20 +3101,38 @@ async fn an_unrecorded_intent_keeps_its_target_for_the_resend() {
         &[("s1", "syn_flood"), ("u1", "udp_flood")],
     )
     .await;
+    assert!(!f.state.is_dry_run());
+    assert_eq!(
+        prefixd::bgp::FlowSpecReader::list_active(speaker.as_ref())
+            .await
+            .unwrap()
+            .len(),
+        2,
+        "both bans reached the enforced mock speaker before the storage failure",
+    );
     *f.repo.fail_withdrawal_begin.lock().unwrap() = Some(ids[1]);
 
     let unban = with_vector(unban("fastnetmon", victim, "store-unban"), "unknown");
     let (status, body) = send(&f.app, "/v1/events", auth, &unban).await;
+    assert_eq!(
+        speaker.deletes.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "no speaker call precedes the complete intent transaction"
+    );
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
     let record = f
         .repo
-        .find_unban_replay("test-pop", "fastnetmon", "store-unban")
+        .find_unban_replay("atomic-unban-pop", "fastnetmon", "store-unban")
         .await
-        .unwrap()
         .unwrap();
-    assert_eq!(record.target_ids, ids);
+    assert!(record.is_none(), "a partial unban is never committed");
+    assert!(f.repo.pending_withdrawals(None).await.unwrap().is_empty());
     assert_eq!(
-        live_for(&f.repo, victim).await.len(),
+        f.repo
+            .list_live_by_victim_and_source(victim, "atomic-unban-pop", "fastnetmon")
+            .await
+            .unwrap()
+            .len(),
         2,
         "nothing was deleted"
     );
@@ -2738,8 +3141,15 @@ async fn an_unrecorded_intent_keeps_its_target_for_the_resend() {
     let (status, body) = send(&f.app, "/v1/events", auth, &unban).await;
     assert_eq!(status, StatusCode::ACCEPTED, "{body}");
     assert_eq!(body["mitigation_ids"], json!(ids), "{body}");
-    assert!(live_for(&f.repo, victim).await.is_empty());
+    assert!(
+        f.repo
+            .list_live_by_victim_and_source(victim, "atomic-unban-pop", "fastnetmon")
+            .await
+            .unwrap()
+            .is_empty()
+    );
     assert!(f.repo.pending_withdrawals(None).await.unwrap().is_empty());
+    assert_eq!(speaker.deletes.load(std::sync::atomic::Ordering::SeqCst), 2);
 }
 
 /// A failed storage read on the unban path is a 503 the script and adapters

@@ -23,8 +23,9 @@ use crate::domain::{AttackEventInput, AttackVector, validate_confidence};
 use crate::error::PrefixdError;
 
 use super::{
-    AnnouncementOutcome, AppError, ErrorResponse, EventResponse, clamp_limit, decode_list_cursor,
-    default_limit, encode_list_cursor, handle_ban, handle_unban, parse_date_range,
+    AnnouncementOutcome, AppError, ErrorResponse, EventResponse, UnbanSelection, clamp_limit,
+    decode_list_cursor, default_limit, encode_list_cursor, handle_ban, handle_unban,
+    handle_unban_with_selection, parse_date_range,
 };
 
 // ── Signal Groups API ──────────────────────────────────────────────────
@@ -249,8 +250,9 @@ pub struct AlertmanagerAlert {
     /// Alert annotations
     #[serde(default)]
     pub annotations: HashMap<String, String>,
-    /// Start time of the alert
+    /// Required RFC3339 start time, shared by every notification for one firing
     #[serde(default)]
+    #[schema(required = true, nullable = false)]
     pub starts_at: Option<String>,
     /// End time of the alert (present when resolved)
     #[serde(default)]
@@ -258,8 +260,9 @@ pub struct AlertmanagerAlert {
     /// URL for the alert in the generator
     #[serde(default)]
     pub generator_url: Option<String>,
-    /// Unique fingerprint for the alert (used for dedup)
+    /// Required nonblank fingerprint; combined with startsAt to identify one firing
     #[serde(default)]
+    #[schema(required = true, nullable = false)]
     pub fingerprint: Option<String>,
 }
 
@@ -551,18 +554,33 @@ async fn process_alertmanager_alert(
         _ => None,
     };
 
-    // Use fingerprint as external_event_id for dedup
-    let external_event_id = alert.fingerprint.clone();
-
-    // Parse timestamp
+    let invalid_identity = |message: &str| AlertmanagerAlertResult {
+        announcement_outcome: None,
+        index,
+        status: "error".into(),
+        event_id: None,
+        mitigation_id: None,
+        error: Some(message.into()),
+    };
+    let fingerprint = alert
+        .fingerprint
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| invalid_identity("fingerprint is required and must not be blank"))?;
     let timestamp = alert
         .starts_at
         .as_deref()
-        .and_then(|s| s.parse::<DateTime<Utc>>().ok())
-        .unwrap_or_else(Utc::now);
+        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+        .map(|timestamp| timestamp.with_timezone(&Utc))
+        .ok_or_else(|| invalid_identity("startsAt is required and must be an RFC3339 timestamp"))?;
+    // One identity for firing/resolved, independent of timestamp spelling.
+    let external_event_id = format!(
+        "{fingerprint}:{}",
+        timestamp.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)
+    );
 
     let input = AttackEventInput {
-        event_id: external_event_id,
+        event_id: Some(external_event_id),
         timestamp,
         source: "alertmanager".to_string(),
         victim_ip,
@@ -578,28 +596,32 @@ async fn process_alertmanager_alert(
 
     // Delegate to the existing event ingestion pipeline
     match input.action.as_str() {
-        "unban" => match handle_unban(state.clone(), grant, input).await {
-            // `withdrawn` or `no_active_mitigation`, as the unban answered.
-            Ok((_status, Json(resp))) => Ok(AlertmanagerAlertResult {
-                announcement_outcome: resp.announcement_outcome,
-                index,
-                status: resp.status,
-                event_id: Some(resp.event_id),
-                mitigation_id: resp.mitigation_id,
-                error: None,
-            }),
-            Err(AppError(e)) => {
-                *retry |= e.status_code().is_server_error();
-                Err(AlertmanagerAlertResult {
-                    announcement_outcome: None,
+        "unban" => {
+            match handle_unban_with_selection(state.clone(), grant, input, UnbanSelection::Episode)
+                .await
+            {
+                // `withdrawn` or `no_active_mitigation`, as the unban answered.
+                Ok((_status, Json(resp))) => Ok(AlertmanagerAlertResult {
+                    announcement_outcome: resp.announcement_outcome,
                     index,
-                    status: "error".to_string(),
-                    event_id: None,
-                    mitigation_id: None,
-                    error: Some(e.to_string()),
-                })
+                    status: resp.status,
+                    event_id: Some(resp.event_id),
+                    mitigation_id: resp.mitigation_id,
+                    error: None,
+                }),
+                Err(AppError(e)) => {
+                    *retry |= e.status_code().is_server_error();
+                    Err(AlertmanagerAlertResult {
+                        announcement_outcome: None,
+                        index,
+                        status: "error".to_string(),
+                        event_id: None,
+                        mitigation_id: None,
+                        error: Some(e.to_string()),
+                    })
+                }
             }
-        },
+        }
         _ => match handle_ban(state.clone(), grant, input).await {
             Ok((_status, Json(resp))) => Ok(AlertmanagerAlertResult {
                 announcement_outcome: resp.announcement_outcome,

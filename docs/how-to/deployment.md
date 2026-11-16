@@ -364,9 +364,12 @@ The adapter maps Alertmanager fields to prefixd events:
 | `labels.vector` or `annotations.vector` | `vector` | Falls back to `unknown` |
 | `labels.severity` | `confidence` | critical=0.9, warning=0.7, info=0.5 |
 | `annotations.bps`, `annotations.pps` | Traffic metrics | Optional |
-| `fingerprint` | Dedup key | Prevents duplicate events |
+| `fingerprint` and `startsAt` | Dedup key | Both required; one key per firing, shared by firing and resolved notifications |
 
-Resolved alerts (status=`resolved`) automatically withdraw the corresponding mitigation.
+Resolved alerts (status=`resolved`) withdraw mitigations whose last creating or
+extending event belongs to that firing. A delayed resolve leaves a newer
+firing's mitigation intact. See the [API reference](../reference/api.md#alertmanager-webhook)
+for validation and replay behavior.
 
 ### FastNetMon Setup
 

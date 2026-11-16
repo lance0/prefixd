@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrade notes
 
+- **Alertmanager notifications identify a firing.** Both firing and resolved
+  alerts require a nonblank `fingerprint` and valid RFC3339 `startsAt`; their
+  shared event ID combines both. Drain or let expire existing Alertmanager
+  mitigations before upgrading, because new episode IDs do not pair with
+  historical fingerprint-only bans. Standard Alertmanager webhooks already
+  supply both fields. Historical unban replays with an active target but no
+  saved withdrawal intent now return `409` for operator review. See [the upgrade guide](docs/how-to/upgrading.md#alertmanager-firing-identity).
 - **Compose needs `POSTGRES_PASSWORD`.** `docker-compose.yml` no longer falls
   back to the published `prefixd_secret`; every Compose command refuses to run
   until the variable is set. Before upgrading an existing Compose stack, put
@@ -53,7 +60,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   gone. An unban with a vector other than `unknown` withdraws only that
   vector's mitigations, with UDP floods and amplification as one family;
   FastNetMon unbans send `unknown`. The unban is stored with its POP and
-  targets first and answers `503`, touching nothing, if that write fails. A
+  targets and all immutable withdrawal intents atomically before any delete;
+  it answers `503`, touching nothing, if that transaction fails. A
   resend of an unban event ID on the same POP reuses those targets, and one
   naming another victim gets `409`. With correlation, only the source whose
   event met the threshold withdraws the mitigation by unban. The first failed
@@ -515,6 +523,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Alertmanager can mitigate a new firing after the same alert resolves.
+  Resends still deduplicate within one firing, and delayed or replayed resolves
+  cannot withdraw a rule created or extended by a newer episode. An older
+  resolved alert also leaves a rule another source extended in place.
 - `prefixdctl` works in the Compose controller. Both controller services set
   `PREFIXD_API=http://127.0.0.1:8080`, so `docker compose exec` runs no longer
   fail against the CLI's default port 80.
