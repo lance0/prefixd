@@ -919,3 +919,29 @@ async fn script_ban_and_unban_pair_on_the_controller() {
     );
     assert_eq!(repo.count_active_global().await.unwrap(), 0);
 }
+
+/// curl reads a zero timeout as no limit, so a zero connect or total timeout
+/// is refused before any request; a zero retry delay is fine.
+#[test]
+fn a_zero_timeout_is_refused_but_a_zero_delay_is_not() {
+    for setting in ["EVENT_CONNECT_TIMEOUT_SECONDS", "EVENT_MAX_TIME_SECONDS"] {
+        let run = run_script("ban", "203.0.113.10", "", &["202"], &[(setting, "0")]);
+        assert!(!run.ok, "{setting}");
+        assert!(run.calls.is_empty(), "{setting} sent a request");
+        assert!(
+            run.log
+                .contains(&format!("ERROR: {setting} must be at least 1")),
+            "{}",
+            run.log
+        );
+    }
+    let run = run_script(
+        "ban",
+        "203.0.113.10",
+        "",
+        &["503", &created("accepted")],
+        &[("EVENT_POST_DELAY_SECONDS", "0")],
+    );
+    assert!(run.ok, "{}", run.log);
+    assert_eq!(run.calls.len(), 2);
+}

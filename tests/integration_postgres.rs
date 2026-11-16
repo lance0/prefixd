@@ -1266,10 +1266,12 @@ async fn test_detector_unban_is_recorded_beside_its_ban() {
     assert_eq!(actions(rows.clone()), ["ban", "unban"]);
     assert_eq!(rows[1].0.to_string(), unban["event_id"].as_str().unwrap());
 
-    // A repeated unban is idempotent: no error, withdrawal or extra row.
+    // A repeated unban is idempotent: it answers as the original, reusing its
+    // targets, with no error, withdrawal or extra row.
     let (status, repeat) = post("fnm-1", "unban").await;
     assert_eq!(status, StatusCode::ACCEPTED);
-    assert_eq!(repeat["status"], "no_active_mitigation");
+    assert_eq!(repeat["status"], "withdrawn");
+    assert_eq!(repeat["event_id"], unban["event_id"]);
     assert_eq!(actions(stored("fnm-1").await), ["ban", "unban"]);
 
     // Repeated identical bans stay deduplicated after the unban.
@@ -4067,6 +4069,12 @@ impl FlowSpecWriter for CreationSpeaker {
     async fn withdraw(&self, rule: &prefixd::domain::FlowSpecRule) -> prefixd::error::Result<()> {
         self.deletes
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        // Mode 4: every delete fails.
+        if self.mode.load(std::sync::atomic::Ordering::SeqCst) == 4 {
+            return Err(prefixd::error::PrefixdError::BgpWithdrawalFailed(
+                "seeded delete failure".into(),
+            ));
+        }
         self.inner.withdraw(rule).await
     }
 }
@@ -8894,4 +8902,99 @@ async fn an_extending_source_cannot_unban_the_creators_mitigation_on_postgres() 
     let (_, body) = send(app, event("fastnetmon", "a-2", "unban"), None).await;
     assert_eq!(body["status"], "withdrawn", "{body}");
     assert_eq!(body["mitigation_ids"], serde_json::json!([id]));
+}
+
+/// On PostgreSQL, a detector unban whose delete fails leaves one pending
+/// withdrawal row with `detector_source`, a resend of the same unban leaves
+/// exactly one row, and the reconciliation that completes it audits the
+/// source.
+#[tokio::test]
+async fn a_pending_detector_withdrawal_keeps_its_source_on_postgres() {
+    use std::sync::atomic::Ordering::SeqCst;
+
+    let ctx = TestContext::new().await;
+    // A registered speaker target, as reconciliation requires.
+    let (state, speaker) = quota_state_in(
+        &ctx,
+        "source-pop",
+        common::test_settings().quotas,
+        prefixd::config::OperationMode::Enforced,
+    )
+    .await;
+    let app = prefixd::api::create_test_router(state.clone());
+    let post = |body: serde_json::Value| {
+        let app = app.clone();
+        async move {
+            let response = app
+                .oneshot(
+                    Request::post("/v1/events")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = response.status();
+            let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+                .await
+                .unwrap();
+            (
+                status,
+                serde_json::from_slice::<serde_json::Value>(&bytes).unwrap_or_default(),
+            )
+        }
+    };
+    let event = |id: &str, action: &str| {
+        serde_json::json!({
+            "event_id": id, "timestamp": chrono::Utc::now(), "source": "fastnetmon",
+            "victim_ip": "203.0.113.10", "vector": "udp_flood", "confidence": 0.9,
+            "action": action,
+        })
+    };
+    let (status, body) = post(event("pg-ban", "ban")).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    let id: uuid::Uuid = body["mitigation_id"].as_str().unwrap().parse().unwrap();
+
+    speaker.mode.store(4, SeqCst);
+    let rows = || async {
+        sqlx::query_as::<_, (Option<String>, bool)>(
+            "SELECT detector_source, completed_at IS NULL FROM withdrawal_requests WHERE mitigation_id = $1",
+        )
+        .bind(id)
+        .fetch_all(&ctx.pool)
+        .await
+        .unwrap()
+    };
+    for attempt in 0..2 {
+        let (status, body) = post(event("pg-unban", "unban")).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{attempt}: {body}");
+        assert_eq!(
+            rows().await,
+            [(Some("fastnetmon".to_string()), true)],
+            "{attempt}"
+        );
+    }
+
+    speaker.mode.store(0, SeqCst);
+    let reconciler =
+        prefixd::scheduler::ReconciliationLoop::new(ctx.repo.clone(), speaker.clone(), 30, false)
+            .with_app_state(state.clone());
+    reconciler.reconcile().await.unwrap();
+    assert_eq!(rows().await, [(Some("fastnetmon".to_string()), false)]);
+    let audit = ctx
+        .repo
+        .list_audit(&prefixd::db::ListParams {
+            limit: 100,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let withdraw = audit
+        .iter()
+        .find(|entry| {
+            entry.action == "withdraw"
+                && entry.target_id.as_deref() == Some(id.to_string().as_str())
+        })
+        .unwrap_or_else(|| panic!("{audit:?}"));
+    assert_eq!(withdraw.details["source"], "fastnetmon");
 }

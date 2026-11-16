@@ -129,8 +129,11 @@ What changes:
   statuses `not_found` and `ignored_no_event_id` are gone. Another source's
   mitigation for the same victim and manual mitigations are never touched. An
   unban with a vector other than `unknown` withdraws only that vector's
-  mitigations; `unknown`, which the FastNetMon script sends, withdraws them
-  all. With correlation, only the source whose event met the threshold
+  mitigations, with UDP floods and amplification as one family; `unknown`,
+  which FastNetMon unbans send, withdraws them all. A resend of an unban event
+  ID the source already sent reuses that unban's targets, so a replay cannot
+  withdraw a later ban's mitigation, and every HMAC adapter's unban needs an
+  event ID. With correlation, only the source whose event met the threshold
   withdraws the mitigation by unban. If any delete fails or its outcome is
   unknown, the unban gets `503` with every intent recorded and pending; a
   resend reuses them. Alertmanager and webhook adapters report each unban as

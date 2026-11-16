@@ -1047,9 +1047,15 @@ async fn complete_withdrawal(
 
 /// A detector unban withdraws the live mitigations for its victim on this POP
 /// that the grant's source created (ADR 034, 2026-11-16 amendment). The victim
-/// is compared in canonical form. Mitigations other sources created and manual
-/// mitigations are never touched, and nothing to withdraw is the definitive
+/// is compared in canonical form, and a vector other than `unknown` narrows
+/// the set. Mitigations other sources created and manual mitigations are
+/// never touched, and nothing to withdraw is the definitive
 /// `no_active_mitigation`, so a detector needs no state to pair its unban.
+///
+/// An unban whose event ID the source already sent reuses that unban's
+/// targets and never selects again: a resend after a 503 completes the
+/// original set, and a replayed unban cannot withdraw a mitigation a later
+/// ban created.
 pub(crate) async fn handle_unban(
     state: Arc<AppState>,
     grant: &crate::api::auth::SourceGrant,
@@ -1064,47 +1070,74 @@ pub(crate) async fn handle_unban(
 
     let _mitigation_guard = state.mitigation_lock.lock().await;
     state.verified_speaker_binding().map_err(AppError)?;
+    let reason = format!("Detector unban: {}", grant.source());
+
+    if let Some(external_id) = input.event_id.as_deref().filter(|id| !id.is_empty())
+        && let Some(original) = state
+            .repo
+            .find_unban_event_by_external_id(grant.source(), external_id)
+            .await
+            .map_err(AppError)?
+    {
+        let ids = original.outcome.outcome_mitigation_ids.clone();
+        let mut live = Vec::new();
+        for id in &ids {
+            if let Some(mitigation) = state.repo.get_mitigation(*id).await.map_err(AppError)?
+                && mitigation.is_active()
+                && mitigation.pop == state.settings.pop
+            {
+                live.push(mitigation);
+            }
+        }
+        tracing::debug!(source = %grant.source(), external_id, targets = ids.len(),
+            live = live.len(), "detector unban resent; reusing its original targets");
+        let (_, failure) = withdraw_detector_targets(&state, grant, &reason, &live).await;
+        if let Some(error) = failure {
+            return Err(AppError(error));
+        }
+        let mut response = EventResponse::new(
+            original.event_id,
+            original.external_event_id,
+            if ids.is_empty() {
+                "no_active_mitigation"
+            } else {
+                "withdrawn"
+            },
+            ids.first().copied(),
+        );
+        response.mitigation_ids = ids;
+        return Ok((StatusCode::ACCEPTED, Json(response)));
+    }
 
     // Every live rule the source created for the victim: one ban can create
-    // several (ADR 028), and a re-ban extends rather than adds.
-    // A real vector narrows the unban to that attack, so a resolved alert for
-    // one vector leaves the source's other mitigations for the victim; an
-    // amplification unban also covers the udp_flood fallback its ban may have
-    // produced. `unknown` keeps the whole victim, as the FastNetMon script's
-    // unban, which carries no attack details, needs.
+    // several (ADR 028), and a re-ban extends rather than adds. A real vector
+    // narrows the unban to that attack, so a resolved alert for one vector
+    // leaves the source's other mitigations for the victim. UDP floods and
+    // amplification are one family either way, because a ban's vector can
+    // fall back between them. `unknown` keeps the whole victim, as the
+    // FastNetMon unbans, which carry no reliable attack details, need.
     let vector = input.vector;
+    let udp = |vector: crate::domain::AttackVector| {
+        matches!(
+            vector,
+            crate::domain::AttackVector::UdpFlood | crate::domain::AttackVector::UdpAmplification
+        )
+    };
     let mitigations: Vec<_> = state
         .repo
         .list_live_by_victim_and_source(&victim, &state.settings.pop, grant.source())
         .await
         .map_err(AppError)?
         .into_iter()
-        .filter(|mitigation| match vector {
-            crate::domain::AttackVector::Unknown => true,
-            crate::domain::AttackVector::UdpAmplification => matches!(
-                mitigation.vector,
-                crate::domain::AttackVector::UdpAmplification
-                    | crate::domain::AttackVector::UdpFlood
-            ),
-            vector => mitigation.vector == vector,
+        .filter(|mitigation| {
+            vector == crate::domain::AttackVector::Unknown
+                || mitigation.vector == vector
+                || (udp(vector) && udp(mitigation.vector))
         })
         .collect();
-    if mitigations.is_empty() {
-        tracing::debug!(source = %grant.source(), victim_ip = %victim,
-            "detector unban found no live mitigation");
-        return Ok((
-            StatusCode::ACCEPTED,
-            Json(EventResponse::new(
-                Uuid::new_v4(),
-                input.event_id,
-                "no_active_mitigation",
-                None,
-            )),
-        ));
-    }
 
-    // Store the unban event
-    let source = input.source.clone();
+    // The unban is stored even when nothing matches, so a resend or a replay
+    // of its event ID finds its (empty) target set instead of selecting anew.
     let unban_event = AttackEvent::from_input(input);
     let stored = match state.repo.insert_event(&unban_event).await {
         Ok(()) => true,
@@ -1113,79 +1146,44 @@ pub(crate) async fn handle_unban(
             false
         }
     };
+    if mitigations.is_empty() {
+        tracing::debug!(source = %grant.source(), victim_ip = %victim,
+            "detector unban found no live mitigation");
+        if stored {
+            let record = EventOutcomeRecord::new(
+                EventOutcome::Withdrawn,
+                Some("no active mitigation".into()),
+                Vec::new(),
+            );
+            record_event_outcome(&state, unban_event.event_id, &record).await;
+        }
+        return Ok((
+            StatusCode::ACCEPTED,
+            Json(EventResponse::new(
+                unban_event.event_id,
+                unban_event.external_event_id,
+                "no_active_mitigation",
+                None,
+            )),
+        ));
+    }
 
-    // Record withdrawal intent for every selected mitigation before any
-    // delete, so one failed delete cannot leave the others unrecorded. A
-    // retry finds each intent already pending and reuses it.
-    let binding = state.verified_speaker_binding().map_err(AppError)?;
-    let mut requests = Vec::with_capacity(mitigations.len());
-    let mut refused = None;
-    for mitigation in &mitigations {
-        match crate::domain::request_detector_withdrawal(
-            state.repo.as_ref(),
-            mitigation,
-            grant.source(),
-            grant.actor_type().as_str(),
-            grant.actor_id(),
-            format!("Detector unban: {}", source),
-            !state.is_dry_run(),
-            binding,
-        )
-        .await
-        {
-            Ok(request) => requests.push(request),
-            Err(error) => {
-                refused.get_or_insert(error);
-            }
-        }
-    }
-    // Then attempt every recorded delete, and report the combined outcome.
-    let mut withdrawn = Vec::with_capacity(requests.len());
-    let mut incomplete = Vec::new();
-    for request in &requests {
-        match complete_withdrawal(&state, request).await {
-            Ok(mitigation) => {
-                tracing::info!(
-                    mitigation_id = %mitigation.mitigation_id,
-                    victim_ip = %mitigation.victim_ip,
-                    "withdrew mitigation via detector unban"
-                );
-                withdrawn.push(mitigation.mitigation_id);
-            }
-            Err(error) => {
-                tracing::warn!(mitigation_id = %request.mitigation_id, %error,
-                    "detector unban delete failed; the intent stays pending");
-                incomplete.push((request.mitigation_id, error));
-            }
-        }
-    }
-    // A failed or ambiguous delete is retryable (503); otherwise a refused
-    // intent is reported as itself. Every selected mitigation is linked: its
-    // status, not this outcome, says whether intent was retained.
-    let failure = if let Some((_, first)) = incomplete.first() {
-        Some(PrefixdError::WithdrawalIncomplete(format!(
-            "{} of {} deletes did not complete: {first}",
-            incomplete.len(),
-            mitigations.len()
-        )))
-    } else {
-        refused
-    }
-    .map(|error| {
-        let ids = mitigations
-            .iter()
-            .map(|m| m.mitigation_id)
-            .collect::<Vec<_>>();
-        (ids, error)
-    });
+    let (withdrawn, failure) =
+        withdraw_detector_targets(&state, grant, &reason, &mitigations).await;
+    // Every selected mitigation is linked on failure: its status, not this
+    // outcome, says whether intent was retained, and a resend reuses the set.
+    let ids = mitigations
+        .iter()
+        .map(|m| m.mitigation_id)
+        .collect::<Vec<_>>();
     if stored {
         let record = match &failure {
-            None => EventOutcomeRecord::new(EventOutcome::Withdrawn, None, withdrawn.clone()),
-            Some((ids, error)) => EventOutcomeRecord::from_error(error, ids.clone()),
+            None => EventOutcomeRecord::new(EventOutcome::Withdrawn, None, ids.clone()),
+            Some(error) => EventOutcomeRecord::from_error(error, ids.clone()),
         };
         record_event_outcome(&state, unban_event.event_id, &record).await;
     }
-    if let Some((_, error)) = failure {
+    if let Some(error) = failure {
         audit_refusal(&state, grant, &unban_event, &error, None, stored).await;
         return Err(AppError(error));
     }
@@ -1198,6 +1196,79 @@ pub(crate) async fn handle_unban(
     );
     response.mitigation_ids = withdrawn;
     Ok((StatusCode::ACCEPTED, Json(response)))
+}
+
+/// Caller holds the lifecycle mutex. Record withdrawal intent for every
+/// target before any delete, so a failed delete cannot leave the others
+/// unrecorded; a resend finds each intent pending and reuses it. Then attempt
+/// the deletes. A definite failure moves on to the next; a timeout or other
+/// ambiguous result stops, so a wedged speaker holds the mutex for one
+/// bounded attempt, not one per target, and the rest stay pending for
+/// reconciliation and the resend. Any failed delete is a 503; otherwise a
+/// refused intent is reported as itself.
+async fn withdraw_detector_targets(
+    state: &AppState,
+    grant: &crate::api::auth::SourceGrant,
+    reason: &str,
+    targets: &[Mitigation],
+) -> (Vec<Uuid>, Option<PrefixdError>) {
+    let binding = match state.verified_speaker_binding() {
+        Ok(binding) => binding,
+        Err(error) => return (Vec::new(), Some(error)),
+    };
+    let mut requests = Vec::with_capacity(targets.len());
+    let mut refused = None;
+    for mitigation in targets {
+        match crate::domain::request_detector_withdrawal(
+            state.repo.as_ref(),
+            mitigation,
+            grant.source(),
+            grant.actor_type().as_str(),
+            grant.actor_id(),
+            reason.to_string(),
+            !state.is_dry_run(),
+            binding,
+        )
+        .await
+        {
+            Ok(request) => requests.push(request),
+            Err(error) => {
+                refused.get_or_insert(error);
+            }
+        }
+    }
+    let mut withdrawn = Vec::with_capacity(requests.len());
+    let mut incomplete = None;
+    for request in &requests {
+        match complete_withdrawal(state, request).await {
+            Ok(mitigation) => {
+                tracing::info!(
+                    mitigation_id = %mitigation.mitigation_id,
+                    victim_ip = %mitigation.victim_ip,
+                    "withdrew mitigation via detector unban"
+                );
+                withdrawn.push(mitigation.mitigation_id);
+            }
+            Err(error) => {
+                tracing::warn!(mitigation_id = %request.mitigation_id, %error,
+                    "detector unban delete failed; the intent stays pending");
+                let ambiguous = matches!(error, PrefixdError::BgpWithdrawalFailed(_));
+                incomplete.get_or_insert(error);
+                if ambiguous {
+                    break;
+                }
+            }
+        }
+    }
+    let failure = match incomplete {
+        Some(first) => Some(PrefixdError::WithdrawalIncomplete(format!(
+            "{} of {} deletes completed; the rest are pending: {first}",
+            withdrawn.len(),
+            requests.len()
+        ))),
+        None => refused,
+    };
+    (withdrawn, failure)
 }
 
 /// A `mode: corroborating` source must never create a mitigation by itself (ADR 021).

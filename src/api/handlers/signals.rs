@@ -888,7 +888,15 @@ async fn ingest_fastnetmon_inner(
         )));
     }
 
-    let (vector, top_src_ports) = classify_fastnetmon(&payload, &state.settings.amplification);
+    // FastNetMon bans and unbans a host, not an attack: an unban's counters
+    // describe the end of the attack and its dump may be gone, so classifying
+    // it could name another vector than the ban's and miss its rules. An
+    // unban withdraws everything the source created for the victim.
+    let (vector, top_src_ports) = if payload.action == "unban" {
+        (AttackVector::Unknown, None)
+    } else {
+        classify_fastnetmon(&payload, &state.settings.amplification)
+    };
 
     // Compute confidence from action type via configurable mapping
     let correlation_config = state.correlation_config.read().await;
@@ -1086,12 +1094,14 @@ async fn ingest_webhook_inner(
         )));
     }
 
-    // An adapter on an allowlist reaches blackholes or prefix rules, and a
-    // signed body carries no nonce: only its event ID makes a replay a
-    // duplicate. Refuse the payload before admission if any ban in it has no
-    // ID, whatever made `fields.source_id` miss (absent, null, wrong type or
+    // A signed body carries no nonce: only its event ID makes a replay a
+    // duplicate. An adapter on an allowlist reaches blackholes or prefix
+    // rules, so its bans need an ID; every HMAC adapter's unbans need one, so
+    // a replayed unban reuses its original targets instead of withdrawing a
+    // later ban's mitigation. Refuse the payload before admission otherwise,
+    // whatever made `fields.source_id` miss (absent, null, wrong type or
     // ambiguous).
-    if state
+    let allowlisted = state
         .settings
         .blackhole
         .detector_sources
@@ -1100,19 +1110,24 @@ async fn ingest_webhook_inner(
             .settings
             .guardrails
             .detector_prefix_sources
-            .contains(&adapter.name)
-    {
-        let unidentified = mapped.iter().position(|event| {
-            event.as_ref().is_ok_and(|input| {
-                input.action != "unban" && input.event_id.as_deref().is_none_or(str::is_empty)
-            })
-        });
-        if let Some(index) = unidentified {
-            return Err(AppError(PrefixdError::InvalidRequest(format!(
-                "event {index}: adapter '{}' is on a detector allowlist, so every ban needs fields.source_id to resolve to an ID",
-                adapter.name
-            ))));
-        }
+            .contains(&adapter.name);
+    let signed = matches!(adapter.auth, crate::correlation::WebhookAuth::Hmac { .. });
+    let unidentified = mapped.iter().enumerate().find_map(|(index, event)| {
+        let input = event.as_ref().ok()?;
+        let unban = input.action == "unban";
+        let needs_id = if unban { signed } else { allowlisted };
+        (needs_id && input.event_id.as_deref().is_none_or(str::is_empty)).then_some((index, unban))
+    });
+    if let Some((index, unban)) = unidentified {
+        let why = if unban {
+            "every unban from an HMAC adapter"
+        } else {
+            "the adapter is on a detector allowlist, so every ban"
+        };
+        return Err(AppError(PrefixdError::InvalidRequest(format!(
+            "event {index}: adapter '{}': {why} needs fields.source_id to resolve to an ID",
+            adapter.name
+        ))));
     }
 
     let mut results = Vec::with_capacity(mapped.len());

@@ -197,7 +197,7 @@ PREFIXD_LOG="/var/log/prefixd-fastnetmon.log"
 EVENT_POST_ATTEMPTS="3"
 EVENT_POST_DELAY_SECONDS="1"
 
-# Per-attempt bounds in seconds (optional)
+# Per-attempt bounds in seconds, at least 1 (optional)
 EVENT_CONNECT_TIMEOUT_SECONDS="5"
 EVENT_MAX_TIME_SECONDS="15"
 ```

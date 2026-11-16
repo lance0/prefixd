@@ -209,6 +209,13 @@ pub trait RepositoryTrait: Send + Sync {
         source: &str,
         external_id: &str,
     ) -> Result<Option<AttackEvent>>;
+    /// The first unban event `source` sent with this external ID, whose
+    /// outcome names the targets a resend or replay of it reuses.
+    async fn find_unban_event_by_external_id(
+        &self,
+        source: &str,
+        external_id: &str,
+    ) -> Result<Option<AttackEvent>>;
     async fn list_events(&self, params: &ListParams) -> Result<Vec<AttackEvent>> {
         self.list_events_filtered(&EventListParams {
             pagination: params.clone(),

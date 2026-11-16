@@ -198,7 +198,7 @@ Content-Type: application/json
 | `top_dst_ports` | array | no | Destination ports involved (max 8) |
 | `top_src_ports` | array | no | UDP source ports, ranked by descending share by the detector; at most 64, otherwise 400. Used by `udp_amplification` playbooks |
 | `action` | string | no | `"ban"` (default) or `"unban"` |
-| `event_id` | string | no | External event ID; a ban's ID deduplicates retries and replays per source. An unban's ID is stored but selects nothing |
+| `event_id` | string | no | External event ID. A ban's ID deduplicates retries and replays per source. An unban's ID identifies the unban: a resend of an ID the source already sent reuses that unban's targets |
 | `raw_details` | object | no | Raw detector payload for forensics |
 
 Confidence validation applies to ban and unban events, including adapter-mapped
@@ -383,9 +383,11 @@ keeps no state.
 
 - **Vector.** An unban with a vector other than `unknown` withdraws only that
   vector's mitigations, so a resolved alert for one attack leaves the
-  source's others; `udp_amplification` also covers the `udp_flood` fallback
-  its ban may have produced. `unknown` withdraws every one for the victim, as
-  the FastNetMon script's unban, which carries no attack details, does.
+  source's others; `udp_flood` and `udp_amplification` count as one family,
+  since a ban may fall back from one to the other. `unknown` withdraws every
+  one for the victim. FastNetMon unbans, from the bundled script and from
+  `/v1/signals/fastnetmon`, always send `unknown`: FastNetMon bans and unbans a
+  host, and an unban's counters can classify as another vector.
 - **Creating source.** The source is the triggering event's: a source that
   only extended another source's mitigation gets `no_active_mitigation`, and
   the creator's unban withdraws it. With correlation, the triggering event is
@@ -393,14 +395,26 @@ keeps no state.
   withdraws the mitigation by unban; the others use their own mitigations, or
   an operator withdraws it.
 - **Partial failure.** Withdrawal intent is recorded for every selected
-  mitigation before any delete is attempted. If any delete fails or its
-  outcome is unknown, the answer is `503` and the intent stays pending for
-  reconciliation; a resend reuses it and never creates a second request.
+  mitigation before any delete is attempted. A delete the speaker refuses
+  moves on to the next; one that times out or whose outcome is otherwise
+  unknown stops there, so a wedged speaker holds the lifecycle lock for one
+  bounded attempt. If any delete did not complete, the answer is `503` and
+  every unfinished intent stays pending for reconciliation. If every delete
+  completed but an intent could not be recorded (`409`, for example because
+  another live mitigation owns the same rule), the answer is that `409`,
+  although the others were withdrawn; the conflict needs an operator, and
+  the bundled script treats it as final.
+- **Resends and replays.** An unban `event_id` the source already sent
+  reuses that unban's targets, the mitigations its outcome links, and never
+  selects again: a resend after a `503` completes the original set without a
+  second request, and a replayed unban cannot withdraw a mitigation a later
+  ban created. An unban without an `event_id` selects each time. Every HMAC
+  webhook adapter's unban needs an event ID.
 
-The unban's `event_id` selects nothing. The unban is stored as its own event
-with `"action": "unban"`; the response's `event_id` is that unban event, and
-`mitigation_ids` lists what it withdrew. With nothing to withdraw the answer is
-the definitive `"no_active_mitigation"` and nothing is stored. The
+The unban is stored as its own event with `"action": "unban"`, even when
+nothing matched, so a resend finds its empty set; the response's `event_id` is
+that unban event, and `mitigation_ids` lists what it withdrew. With nothing to
+withdraw the answer is the definitive `"no_active_mitigation"`. The
 withdrawal's audit actor is the credential, its details carry the bound
 `source` whether the request or reconciliation completes it, its reason is
 `Detector unban: <source>`, and it counts as
@@ -2022,7 +2036,9 @@ An adapter named in `blackhole.detector_sources` or
 `guardrails.detector_prefix_sources` refuses a payload with `400` before
 admission when any ban in it has no event ID, because `fields.source_id` is
 absent, null, the wrong type or ambiguous in the body: a signed body has no
-nonce, and only the event ID makes a replay a duplicate. An unban reports
+nonce, and only the event ID makes a replay a duplicate. Every HMAC adapter
+refuses a payload in which an unban has no event ID, so a replayed unban reuses
+its original targets. An unban reports
 `withdrawn` or `no_active_mitigation`; one that failed on the controller's side
 is an `error` counted in `failed`, and the response is `503` so the sender
 resends.

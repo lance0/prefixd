@@ -72,6 +72,14 @@ for setting in EVENT_POST_ATTEMPTS EVENT_POST_DELAY_SECONDS EVENT_CONNECT_TIMEOU
         exit 1
     fi
 done
+# curl reads 0 as "no limit", which would leave an attempt unbounded; a zero
+# retry delay is fine.
+for setting in EVENT_CONNECT_TIMEOUT_SECONDS EVENT_MAX_TIME_SECONDS; do
+    if [[ "${!setting}" =~ ^0+$ ]]; then
+        log "ERROR: $setting must be at least 1"
+        exit 1
+    fi
+done
 
 # The token file wins over the variable. Its value is never logged.
 TOKEN="$PREFIXD_TOKEN"

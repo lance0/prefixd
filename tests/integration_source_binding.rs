@@ -658,7 +658,7 @@ async fn detector_unban_withdraws_only_its_own_sources_mitigations() {
     // for the vector it names: a resolved udp_flood alert leaves its
     // syn_flood mitigation.
     let resolved = |vector: &str| {
-        let mut resolved = alertmanager(victim, "fp-1");
+        let mut resolved = alertmanager(victim, &format!("fp-{vector}"));
         resolved["alerts"][0]["status"] = "resolved".into();
         resolved["alerts"][0]["labels"]["vector"] = vector.into();
         resolved
@@ -1184,8 +1184,8 @@ async fn the_prefix_allowlist_admits_only_its_bound_source_and_an_admin() {
     }
 }
 
-/// A speaker whose deletes of TCP rules fail while `failing` is set, after the
-/// delete may have reached it: an ambiguous outcome, as a timeout leaves.
+/// A speaker that refuses deletes of TCP rules while `failing` is set: a
+/// definite failure, so the unban carries on with the other deletes.
 struct FailingTcpWithdrawals {
     inner: MockAnnouncer,
     failing: std::sync::atomic::AtomicBool,
@@ -1210,9 +1210,10 @@ impl prefixd::bgp::FlowSpecWriter for FailingTcpWithdrawals {
     }
     async fn withdraw(&self, rule: &prefixd::domain::FlowSpecRule) -> prefixd::error::Result<()> {
         if rule.nlri.protocol == Some(6) && self.failing.load(std::sync::atomic::Ordering::SeqCst) {
-            return Err(prefixd::error::PrefixdError::BgpWithdrawalFailed(
-                "seeded delete failure".into(),
-            ));
+            return Err(prefixd::error::PrefixdError::InjectionOwnerMismatch {
+                reason: prefixd::error::InjectionRefusalReason::OwnerMismatch,
+                message: "seeded delete refusal".into(),
+            });
         }
         self.inner.withdraw(rule).await
     }
@@ -1457,8 +1458,8 @@ async fn adapter_unbans_report_their_outcome_and_retry_failures() {
         &f.repo
             .mint_token_for_test("rw", TokenScope::Ingest, Some("radware")),
     );
-    let resolved = |victim: &str| {
-        let mut alert = alertmanager(victim, "fp-r");
+    let resolved = |victim: &str, fingerprint: &str| {
+        let mut alert = alertmanager(victim, fingerprint);
         alert["alerts"][0]["status"] = "resolved".into();
         alert["alerts"][0]["labels"]["vector"] = "syn_flood".into();
         alert
@@ -1469,7 +1470,7 @@ async fn adapter_unbans_report_their_outcome_and_retry_failures() {
         &f.app,
         "/v1/signals/alertmanager",
         Some(("authorization", &am)),
-        &resolved("203.0.113.72"),
+        &resolved("203.0.113.72", "fp-none"),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -1493,7 +1494,7 @@ async fn adapter_unbans_report_their_outcome_and_retry_failures() {
         &f.app,
         "/v1/signals/alertmanager",
         Some(("authorization", &am)),
-        &resolved("203.0.113.72"),
+        &resolved("203.0.113.72", "fp-r"),
     )
     .await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
@@ -1791,4 +1792,458 @@ async fn an_admin_claimed_unban_counts_as_a_detector_unban() {
     assert_eq!(body["status"], "withdrawn", "{body}");
     assert_eq!(counter("detector_unban"), detector + 1.0);
     assert_eq!(counter("operator"), operator);
+}
+
+const VECTOR_PLAYBOOKS: &str = r#"
+playbooks:
+  - name: udp_flood_police
+    match: { vector: udp_flood }
+    steps:
+      - { action: police, rate_bps: 5000000, ttl_seconds: 120 }
+  - name: udp_amplification
+    match: { vector: udp_amplification }
+    steps:
+      - ttl_seconds: 300
+        rules:
+          - match: { src_ports: from_event }
+            action: discard
+  - name: syn_flood
+    match: { vector: syn_flood }
+    steps:
+      - { action: discard, ttl_seconds: 120 }
+  - name: ack_flood
+    match: { vector: ack_flood }
+    steps:
+      - { action: police, rate_bps: 5000000, ttl_seconds: 120 }
+  - name: icmp_flood
+    match: { vector: icmp_flood }
+    steps:
+      - { action: discard, ttl_seconds: 120 }
+"#;
+
+async fn live_for(repo: &MockRepository, victim: &str) -> Vec<prefixd::domain::Mitigation> {
+    repo.list_live_by_victim_and_source(victim, "test-pop", "fastnetmon")
+        .await
+        .unwrap()
+}
+
+/// The native FastNetMon adapter's unban withdraws what its ban created, even
+/// when the unban's own payload would classify as another vector: the end of
+/// an attack has other counters and often no packet dump. The reviewer's
+/// probe: an amplification ban from the ntp-memcached dump, then the same
+/// payload as an unban without the dump; and a SYN ban whose unban counters
+/// read as an ACK flood. Negative control: classifying the unban's payload
+/// again leaves the SYN rule live.
+#[tokio::test]
+async fn native_fastnetmon_unbans_withdraw_what_the_ban_created() {
+    let f = fixture(AuthMode::Credentials).await;
+    *f.state.playbooks.write().await =
+        prefixd::config::Playbooks::from_yaml(VECTOR_PLAYBOOKS).unwrap();
+    let fnm = bearer(
+        &f.repo
+            .mint_token_for_test("fnm", TokenScope::Ingest, Some("fastnetmon")),
+    );
+    let auth = Some(("authorization", fnm.as_str()));
+
+    let ban: Value = serde_json::from_str(include_str!(
+        "fixtures/fastnetmon/native-ntp-memcached.json"
+    ))
+    .unwrap();
+    let victim = ban["ip"].as_str().unwrap().to_string();
+    let (status, body) = send(&f.app, "/v1/signals/fastnetmon", auth, &ban).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    let live = live_for(&f.repo, &victim).await;
+    assert!(!live.is_empty());
+    assert!(
+        live.iter()
+            .all(|m| m.vector == prefixd::domain::AttackVector::UdpAmplification),
+        "{live:?}"
+    );
+    let mut unban = ban.clone();
+    unban["action"] = "unban".into();
+    unban
+        .as_object_mut()
+        .unwrap()
+        .remove("packet_dump_detailed");
+    let (status, body) = send(&f.app, "/v1/signals/fastnetmon", auth, &unban).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    assert_eq!(body["status"], "withdrawn", "{body}");
+    assert!(live_for(&f.repo, &victim).await.is_empty());
+
+    let syn_victim = "203.0.113.77";
+    let details = |syn: i64| {
+        json!({
+            "attack_uuid": "syn-ack-1", "incoming_tcp_pps": 10000,
+            "incoming_syn_tcp_pps": syn, "total_incoming_pps": 10000,
+        })
+    };
+    let ban = json!({"action": "ban", "ip": syn_victim, "alert_scope": "host",
+        "attack_details": details(9000)});
+    let (status, body) = send(&f.app, "/v1/signals/fastnetmon", auth, &ban).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    assert_eq!(
+        live_for(&f.repo, syn_victim).await[0].vector,
+        prefixd::domain::AttackVector::SynFlood
+    );
+    let unban = json!({"action": "unban", "ip": syn_victim, "alert_scope": "host",
+        "attack_details": details(1000)});
+    let (_, body) = send(&f.app, "/v1/signals/fastnetmon", auth, &unban).await;
+    assert_eq!(body["status"], "withdrawn", "{body}");
+    assert!(live_for(&f.repo, syn_victim).await.is_empty());
+}
+
+/// UDP floods and amplification are one family for an unban: a
+/// `udp_amplification` ban that fell back to a `udp_flood` rule (no
+/// amplification playbook) is withdrawn by an amplification unban.
+/// Negative control: without the family rule the unban finds nothing.
+#[tokio::test]
+async fn an_amplification_unban_withdraws_its_udp_flood_fallback() {
+    let f = fixture(AuthMode::Credentials).await;
+    let fnm = bearer(
+        &f.repo
+            .mint_token_for_test("fnm", TokenScope::Ingest, Some("fastnetmon")),
+    );
+    let auth = Some(("authorization", fnm.as_str()));
+    let victim = "203.0.113.78";
+    let mut ban = with_vector(event("fastnetmon", victim, "amp-1"), "udp_amplification");
+    ban["top_src_ports"] = json!([123]);
+    let (status, body) = send(&f.app, "/v1/events", auth, &ban).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    let live = live_for(&f.repo, victim).await;
+    assert_eq!(live.len(), 1);
+    assert_eq!(live[0].vector, prefixd::domain::AttackVector::UdpFlood);
+    let (_, body) = send(
+        &f.app,
+        "/v1/events",
+        auth,
+        &with_vector(unban("fastnetmon", victim, "amp-2"), "udp_amplification"),
+    )
+    .await;
+    assert_eq!(body["status"], "withdrawn", "{body}");
+    assert!(live_for(&f.repo, victim).await.is_empty());
+}
+
+/// A captured unban replayed after a new ban reuses its original targets and
+/// never selects again, so the new mitigation stays live. Negative control:
+/// selecting again withdraws the new mitigation.
+#[tokio::test]
+async fn a_replayed_unban_cannot_withdraw_a_later_mitigation() {
+    let f = fixture(AuthMode::Credentials).await;
+    let fnm = bearer(
+        &f.repo
+            .mint_token_for_test("fnm", TokenScope::Ingest, Some("fastnetmon")),
+    );
+    let auth = Some(("authorization", fnm.as_str()));
+    let victim = "203.0.113.79";
+    let (_, first) = send(
+        &f.app,
+        "/v1/events",
+        auth,
+        &event("fastnetmon", victim, "b-1"),
+    )
+    .await;
+    let (_, withdrawn) = send(
+        &f.app,
+        "/v1/events",
+        auth,
+        &unban("fastnetmon", victim, "u-1"),
+    )
+    .await;
+    assert_eq!(withdrawn["mitigation_ids"], json!([first["mitigation_id"]]));
+    let (_, second) = send(
+        &f.app,
+        "/v1/events",
+        auth,
+        &event("fastnetmon", victim, "b-2"),
+    )
+    .await;
+    let second: uuid::Uuid = second["mitigation_id"].as_str().unwrap().parse().unwrap();
+
+    let (status, replayed) = send(
+        &f.app,
+        "/v1/events",
+        auth,
+        &unban("fastnetmon", victim, "u-1"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{replayed}");
+    assert_eq!(replayed["event_id"], withdrawn["event_id"], "{replayed}");
+    assert_eq!(replayed["mitigation_ids"], json!([first["mitigation_id"]]));
+    assert_eq!(
+        f.repo.get_mitigation(second).await.unwrap().unwrap().status,
+        MitigationStatus::Active
+    );
+
+    // An unban that found nothing is remembered as nothing.
+    let other = "203.0.113.80";
+    let (_, empty) = send(
+        &f.app,
+        "/v1/events",
+        auth,
+        &unban("fastnetmon", other, "u-2"),
+    )
+    .await;
+    assert_eq!(empty["status"], "no_active_mitigation", "{empty}");
+    let (_, later) = send(
+        &f.app,
+        "/v1/events",
+        auth,
+        &event("fastnetmon", other, "b-3"),
+    )
+    .await;
+    let (_, replayed) = send(
+        &f.app,
+        "/v1/events",
+        auth,
+        &unban("fastnetmon", other, "u-2"),
+    )
+    .await;
+    assert_eq!(replayed["status"], "no_active_mitigation", "{replayed}");
+    let later: uuid::Uuid = later["mitigation_id"].as_str().unwrap().parse().unwrap();
+    assert!(
+        f.repo
+            .get_mitigation(later)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_active()
+    );
+}
+
+/// A speaker whose TCP deletes never return.
+struct HangingTcpWithdrawals {
+    inner: MockAnnouncer,
+    hanging: std::sync::atomic::AtomicBool,
+    deletes: std::sync::atomic::AtomicUsize,
+}
+
+impl prefixd::bgp::FlowSpecAnnouncer for HangingTcpWithdrawals {
+    fn backend(&self) -> &'static str {
+        "mock"
+    }
+    fn reader(&self) -> Option<&dyn prefixd::bgp::FlowSpecReader> {
+        Some(self)
+    }
+    fn peer_observer(&self) -> Option<&dyn prefixd::bgp::PeerObserver> {
+        Some(self)
+    }
+}
+
+#[async_trait::async_trait]
+impl prefixd::bgp::FlowSpecWriter for HangingTcpWithdrawals {
+    async fn announce(&self, rule: &prefixd::domain::FlowSpecRule) -> prefixd::error::Result<()> {
+        self.inner.announce(rule).await
+    }
+    async fn withdraw(&self, rule: &prefixd::domain::FlowSpecRule) -> prefixd::error::Result<()> {
+        use std::sync::atomic::Ordering::SeqCst;
+        self.deletes.fetch_add(1, SeqCst);
+        if rule.nlri.protocol == Some(6) && self.hanging.load(SeqCst) {
+            std::future::pending::<()>().await;
+        }
+        self.inner.withdraw(rule).await
+    }
+}
+
+#[async_trait::async_trait]
+impl prefixd::bgp::FlowSpecReader for HangingTcpWithdrawals {
+    async fn list_active(&self) -> prefixd::error::Result<Vec<prefixd::domain::FlowSpecRule>> {
+        self.inner.list_active().await
+    }
+}
+
+#[async_trait::async_trait]
+impl prefixd::bgp::PeerObserver for HangingTcpWithdrawals {
+    async fn session_status(&self) -> prefixd::error::Result<Vec<prefixd::bgp::PeerStatus>> {
+        self.inner.session_status().await
+    }
+}
+
+/// A delete that times out is ambiguous, so the unban stops there: the
+/// lifecycle mutex is held for one bounded attempt, not one per rule, and the
+/// rest stay pending with their intents recorded. A resend of the same unban
+/// reuses those targets and finishes them once the speaker answers, leaving a
+/// mitigation banned in between. Time is paused, so the 3 s deadline elapses
+/// without waiting. Negative controls: carrying on after a timeout attempts
+/// the second delete too, and selecting again on the resend withdraws the
+/// later mitigation.
+#[tokio::test(start_paused = true)]
+async fn an_ambiguous_delete_stops_the_unban_and_a_resend_finishes_it() {
+    let repo = Arc::new(MockRepository::new());
+    let speaker = Arc::new(HangingTcpWithdrawals {
+        inner: MockAnnouncer::new(),
+        hanging: std::sync::atomic::AtomicBool::new(true),
+        deletes: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let mut settings = settings(AuthMode::Credentials, "test-pop", 1);
+    settings.mode = prefixd::config::OperationMode::Enforced;
+    let state = AppState::new(
+        settings,
+        Inventory::new(vec![Customer {
+            customer_id: "bound".into(),
+            name: "Source binding".into(),
+            prefixes: vec!["203.0.113.0/24".into()],
+            policy_profile: PolicyProfile::Normal,
+            services: vec![],
+        }]),
+        common::test_playbooks(),
+        repo.clone(),
+        speaker.clone(),
+        ".".into(),
+    )
+    .unwrap();
+    let app =
+        prefixd::api::create_test_router_with_session_store(state.clone(), MemoryStore::default());
+    let fnm = bearer(&repo.mint_token_for_test("fnm", TokenScope::Ingest, Some("fastnetmon")));
+    let auth = Some(("authorization", fnm.as_str()));
+    let victim = "203.0.113.81";
+    let mut ids = Vec::new();
+    for (id, vector) in [("s1", "syn_flood"), ("u1", "udp_flood")] {
+        let (_, body) = send(
+            &app,
+            "/v1/events",
+            auth,
+            &with_vector(event("fastnetmon", victim, id), vector),
+        )
+        .await;
+        ids.push(
+            body["mitigation_id"]
+                .as_str()
+                .unwrap()
+                .parse::<uuid::Uuid>()
+                .unwrap(),
+        );
+    }
+    let unban = with_vector(unban("fastnetmon", victim, "u-timeout"), "unknown");
+    let (status, body) = send(&app, "/v1/events", auth, &unban).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(
+        speaker.deletes.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the unban stopped at the timed-out delete"
+    );
+    let mut pending: Vec<_> = repo
+        .pending_withdrawals(None)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|request| request.mitigation_id)
+        .collect();
+    pending.sort();
+    let mut wanted = ids.clone();
+    wanted.sort();
+    assert_eq!(pending, wanted, "both intents are recorded");
+
+    // A ban after the 503, of another rule, is not one of the unban's targets.
+    *state.playbooks.write().await =
+        prefixd::config::Playbooks::from_yaml(VECTOR_PLAYBOOKS).unwrap();
+    let (_, later) = send(
+        &app,
+        "/v1/events",
+        auth,
+        &with_vector(event("fastnetmon", victim, "i1"), "icmp_flood"),
+    )
+    .await;
+    let later: uuid::Uuid = later["mitigation_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{later}"))
+        .parse()
+        .unwrap();
+
+    speaker
+        .hanging
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    let (status, body) = send(&app, "/v1/events", auth, &unban).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    for id in ids {
+        assert_eq!(
+            repo.get_mitigation(id).await.unwrap().unwrap().status,
+            MitigationStatus::Withdrawn
+        );
+    }
+    assert!(repo.pending_withdrawals(None).await.unwrap().is_empty());
+    assert_eq!(
+        repo.get_mitigation(later).await.unwrap().unwrap().status,
+        MitigationStatus::Active,
+        "the resend completed only the original targets"
+    );
+}
+
+/// Every HMAC adapter's unban needs an event ID, so a replay of it reuses its
+/// targets. Negative control: without the check the ID-less unban runs.
+#[tokio::test]
+async fn an_hmac_unban_without_an_event_id_is_refused() {
+    const SECRET: &str = "0123456789abcdef0123456789abcdef-unban";
+    if !rerun_with(
+        "an_hmac_unban_without_an_event_id_is_refused",
+        &[("PREFIXD_WEBHOOK_TEST_SIGNED", SECRET)],
+    ) {
+        return;
+    }
+    let f = fixture(AuthMode::Credentials).await;
+    f.state.correlation_config.write().await.webhook_adapters = vec![webhook_adapter(
+        "signed",
+        WebhookAuth::Hmac {
+            secret_env: "PREFIXD_WEBHOOK_TEST_SIGNED".into(),
+            header: "X-Signature-SHA256".into(),
+            algorithm: "sha256".into(),
+        },
+    )];
+    let body = json!({"ip": "203.0.113.82", "vector": "udp_flood", "action": "unban"});
+    let signature = {
+        use hmac::{KeyInit, Mac};
+        let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(SECRET.as_bytes()).unwrap();
+        mac.update(body.to_string().as_bytes());
+        hex::encode(mac.finalize().into_bytes())
+    };
+    let response = f
+        .app
+        .clone()
+        .oneshot(
+            Request::post("/v1/signals/webhook/signed")
+                .header("content-type", "application/json")
+                .header("x-signature-sha256", signature)
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    let text = String::from_utf8_lossy(&bytes);
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{text}");
+    assert!(text.contains("every unban from an HMAC adapter"), "{text}");
+    assert_eq!(written(&f.repo).await, (0, 0, 0));
+}
+
+/// The ingest extractor refuses a principal that cannot hold a grant before
+/// the body is parsed: malformed JSON from an Operator gets 403 and without a
+/// credential 401, not a parse error. Negative control: checking the
+/// principal after extraction answers the parse error.
+#[tokio::test]
+async fn ingest_routes_refuse_the_principal_before_parsing_the_body() {
+    let f = fixture(AuthMode::Credentials).await;
+    let operator = bearer(
+        &f.repo
+            .mint_token_for_test("automation", TokenScope::Operator, None),
+    );
+    for path in ["/v1/events", "/v1/events/batch", "/v1/signals/corroborator"] {
+        for (auth, expected) in [
+            (Some(operator.as_str()), StatusCode::FORBIDDEN),
+            (None, StatusCode::UNAUTHORIZED),
+        ] {
+            let mut request = Request::post(path).header("content-type", "application/json");
+            if let Some(auth) = auth {
+                request = request.header("authorization", auth);
+            }
+            let response = f
+                .app
+                .clone()
+                .oneshot(request.body(Body::from("{not json")).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected, "{path} {auth:?}");
+        }
+    }
 }

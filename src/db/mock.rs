@@ -627,6 +627,24 @@ impl RepositoryTrait for MockRepository {
             .cloned())
     }
 
+    async fn find_unban_event_by_external_id(
+        &self,
+        source: &str,
+        external_id: &str,
+    ) -> Result<Option<AttackEvent>> {
+        Ok(self
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|e| {
+                e.source == source
+                    && e.external_event_id.as_deref() == Some(external_id)
+                    && e.action == "unban"
+            })
+            .cloned())
+    }
+
     async fn list_events_filtered(
         &self,
         filters: &super::EventListParams,

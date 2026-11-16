@@ -229,7 +229,10 @@ impl FromRequestParts<Arc<AppState>> for AuthPrincipal {
     }
 }
 
-/// The principal of an ingest route, which may be an ingest token.
+/// The principal of an ingest route, which may be an ingest token. Only a
+/// principal that can hold a source grant gets past extraction (see
+/// [`require_ingest`]), so an Operator gets 403 and a request without a
+/// credential 401 before the body is parsed.
 #[derive(Clone, Debug)]
 pub struct IngestPrincipal(pub AuthPrincipal);
 
@@ -240,10 +243,11 @@ impl FromRequestParts<Arc<AppState>> for IngestPrincipal {
         parts: &mut Parts,
         state: &Arc<AppState>,
     ) -> Result<Self, Self::Rejection> {
-        extract(parts, state)
+        let principal = extract(parts, state)
             .await
-            .map(Self)
-            .map_err(|error| AppError(error).into_response())
+            .map_err(|error| AppError(error).into_response())?;
+        require_ingest(&principal).map_err(|error| AppError(error).into_response())?;
+        Ok(Self(principal))
     }
 }
 

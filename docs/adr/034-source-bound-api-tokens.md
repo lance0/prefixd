@@ -1224,9 +1224,18 @@ unban bullet in section 4 and the state file and lock in section 12.
   unban after a lost earlier unban. No client state is needed.
 - With nothing to withdraw the answer is the definitive
   `no_active_mitigation`; `not_found` and `ignored_no_event_id` are gone.
-- The unban's `event_id` and `vector` select nothing. The unban is still
-  stored as an event, and the withdrawal is audited as the credential with the
-  reason `Detector unban: <source>`.
+- A vector other than `unknown` narrows the unban to that vector's
+  mitigations, with UDP floods and amplification as one family. The native
+  FastNetMon adapter and the bundled script send `unknown`, because FastNetMon
+  bans and unbans a host and an unban's counters can name another vector.
+- The unban's `event_id` does not select mitigations. It does identify the
+  unban: a resend or replay of an event ID the source already sent reuses
+  that unban's targets and never selects again, so a resend after a 503
+  completes the original set and a replayed signed unban cannot withdraw a
+  later ban's mitigation. Every HMAC adapter's unban needs an event ID.
+- The unban is stored as an event even when nothing matched, and the
+  withdrawal is audited as the credential with the reason
+  `Detector unban: <source>`.
 - A POP-bound token cannot unban another POP's mitigation: it is refused on
   that POP's controller, and a controller's unban considers only its own POP.
 

@@ -573,6 +573,28 @@ impl RepositoryTrait for Repository {
         Ok(event)
     }
 
+    async fn find_unban_event_by_external_id(
+        &self,
+        source: &str,
+        external_id: &str,
+    ) -> Result<Option<AttackEvent>> {
+        Ok(sqlx::query_as::<_, AttackEvent>(
+            r#"
+            SELECT event_id, external_event_id, source, event_timestamp, ingested_at,
+                   victim_ip, vector, protocol, bps, pps, top_dst_ports_json, top_src_ports_json, confidence,
+                   action, raw_details, outcome, outcome_reason, outcome_mitigation_ids
+            FROM events
+            WHERE source = $1 AND external_event_id = $2 AND action = 'unban'
+            ORDER BY ingested_at, event_id
+            LIMIT 1
+            "#,
+        )
+        .bind(source)
+        .bind(external_id)
+        .fetch_optional(&self.pool)
+        .await?)
+    }
+
     async fn list_events_filtered(
         &self,
         filters: &super::EventListParams,
