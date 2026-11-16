@@ -15,6 +15,7 @@ use crate::AppState;
 use crate::api::auth::AuthPrincipal;
 use crate::api::auth::require_role;
 use crate::db::NotificationPreferences;
+use crate::domain::is_valid_username;
 
 const LOGIN_MAX_ATTEMPTS: u32 = 5;
 
@@ -66,8 +67,6 @@ async fn clear_login_attempts(key: &str) {
     let mut attempts = LOGIN_ATTEMPTS.lock().await;
     attempts.remove(key);
 }
-
-use crate::domain::is_valid_username;
 
 const MAX_PASSWORD_LEN: usize = 256;
 
