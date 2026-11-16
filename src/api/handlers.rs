@@ -764,7 +764,7 @@ pub struct WithdrawRequest {
 )]
 pub async fn ingest_event(
     State(state): State<Arc<AppState>>,
-    principal: AuthPrincipal,
+    crate::api::auth::IngestPrincipal(principal): crate::api::auth::IngestPrincipal,
     Json(input): Json<DetectorEventRequest>,
 ) -> impl IntoResponse {
     let input = input.0;
@@ -3206,7 +3206,7 @@ pub struct BatchEventResponse {
 )]
 pub async fn ingest_events_batch(
     State(state): State<Arc<AppState>>,
-    principal: AuthPrincipal,
+    crate::api::auth::IngestPrincipal(principal): crate::api::auth::IngestPrincipal,
     Json(req): Json<BatchEventRequest>,
 ) -> impl IntoResponse {
     crate::api::auth::require_ingest(&principal).map_err(AppError)?;

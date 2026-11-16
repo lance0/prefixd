@@ -7834,6 +7834,119 @@ async fn test_webhook_hmac_accepts_correct_signature() {
     println!("\n{completed}");
 }
 
+/// An HMAC adapter's signature is its credential: a garbage, unknown or other
+/// scheme `Authorization` header beside a valid signature changes nothing, and
+/// no token is looked up. A bearer adapter verifies the same header.
+#[tokio::test]
+async fn hmac_webhook_ignores_authorization_while_bearer_adapters_verify_it() {
+    use hmac::Mac;
+    use prefixd::correlation::WebhookAuth;
+
+    const INGEST: &str = "prefixd_webhookingesttokenAAAAAAAAAAAAAAAAAAAAAAAAA";
+    let env_name = "PREFIXD_TEST_HMAC_SECRET_POS";
+    let secret = "token-precedence-secret";
+    let Some(completed) = webhook_hmac_child(
+        "hmac_webhook_ignores_authorization_while_bearer_adapters_verify_it",
+        env_name,
+        secret,
+    )
+    .await
+    else {
+        return;
+    };
+
+    let mut signed = basic_webhook_adapter("signed-tokens");
+    signed.auth = WebhookAuth::Hmac {
+        secret_env: env_name.into(),
+        header: "X-Signature-SHA256".into(),
+        algorithm: "sha256".into(),
+    };
+    let mut bearer = basic_webhook_adapter("bearer-tokens");
+    bearer.auth = WebhookAuth::Bearer;
+    let mock = Arc::new(MockRepository::new());
+    mock.insert_token(
+        INGEST,
+        "webhook-ingest",
+        TokenScope::Ingest,
+        Some("bearer-tokens"),
+    );
+    let mut settings = test_settings_with_correlation(true, 1, 0.5);
+    settings.http.auth.mode = AuthMode::Credentials;
+    let state = AppState::new(
+        settings,
+        test_inventory(),
+        test_playbooks(),
+        mock,
+        Arc::new(MockAnnouncer::new()),
+        std::path::PathBuf::from("."),
+    )
+    .unwrap();
+    state.correlation_config.write().await.webhook_adapters = vec![signed, bearer];
+    let app = create_test_router(state);
+
+    let body = r#"{"ip":"203.0.113.5","vector":"udp_flood","id":"hmac-1"}"#;
+    let mut mac =
+        <hmac::Hmac<sha2::Sha256> as hmac::KeyInit>::new_from_slice(secret.as_bytes()).unwrap();
+    mac.update(body.as_bytes());
+    let sig = hex::encode(mac.finalize().into_bytes());
+    let unknown = "Bearer prefixd_unknownwebhooktokenAAAAAAAAAAAAAAAAAAAAAA";
+    for (index, authorization) in ["Bearer not-a-token", unknown, "Basic dXNlcjpwYXNz"]
+        .into_iter()
+        .enumerate()
+    {
+        let body = body.replace("hmac-1", &format!("hmac-{index}"));
+        let mut mac =
+            <hmac::Hmac<sha2::Sha256> as hmac::KeyInit>::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(body.as_bytes());
+        let sig = hex::encode(mac.finalize().into_bytes());
+        let (status, json) = post_webhook(
+            &app,
+            "signed-tokens",
+            &body,
+            &[
+                ("X-Signature-SHA256", &sig),
+                ("authorization", authorization),
+            ],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{authorization}: {json}");
+    }
+    // Control: a bad signature still fails beside a valid ingest token.
+    let (status, _) = post_webhook(
+        &app,
+        "signed-tokens",
+        body,
+        &[
+            ("X-Signature-SHA256", &"0".repeat(64)),
+            ("authorization", &format!("Bearer {INGEST}")),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(!sig.is_empty());
+    // A bearer adapter verifies the header: malformed and unknown get 401.
+    for authorization in ["Bearer not-a-token", unknown] {
+        let (status, _) = post_webhook(
+            &app,
+            "bearer-tokens",
+            body,
+            &[("authorization", authorization)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{authorization}");
+    }
+    let (status, json) = post_webhook(
+        &app,
+        "bearer-tokens",
+        body,
+        &[("authorization", &format!("Bearer {INGEST}"))],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+
+    println!("\n{completed}");
+}
+
 #[tokio::test]
 async fn test_webhook_hmac_rejects_wrong_signature() {
     use prefixd::correlation::WebhookAuth;

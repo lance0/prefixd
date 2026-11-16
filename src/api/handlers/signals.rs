@@ -13,7 +13,9 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::AppState;
-use crate::api::auth::{AuthPrincipal, require_auth, require_ingest, require_role};
+use crate::api::auth::{
+    AuthPrincipal, IngestPrincipal, require_auth, require_ingest, require_role,
+};
 use crate::auth::AuthSession;
 use crate::db::ListParams;
 use crate::domain::{AttackEventInput, AttackVector, validate_confidence};
@@ -376,7 +378,7 @@ fn parse_optional_i64(annotations: &HashMap<String, String>, key: &str) -> Optio
 )]
 pub async fn ingest_alertmanager(
     State(state): State<Arc<AppState>>,
-    principal: AuthPrincipal,
+    IngestPrincipal(principal): IngestPrincipal,
     body: axum::body::Bytes,
 ) -> impl IntoResponse {
     ingest_alertmanager_inner(state, principal, body).await
@@ -818,7 +820,7 @@ fn classify_fastnetmon(
 )]
 pub async fn ingest_fastnetmon(
     State(state): State<Arc<AppState>>,
-    principal: AuthPrincipal,
+    IngestPrincipal(principal): IngestPrincipal,
     body: axum::body::Bytes,
 ) -> impl IntoResponse {
     ingest_fastnetmon_inner(state, principal, body).await
@@ -1230,7 +1232,7 @@ pub struct CorroboratorResponse {
 )]
 pub async fn ingest_corroborator(
     State(state): State<Arc<AppState>>,
-    principal: AuthPrincipal,
+    IngestPrincipal(principal): IngestPrincipal,
     Json(input): Json<CorroboratorInput>,
 ) -> impl IntoResponse {
     require_ingest(&principal).map_err(AppError)?;

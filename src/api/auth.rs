@@ -175,6 +175,22 @@ impl AuthPrincipal {
     }
 }
 
+/// Resolve once per request; later extractions reuse the stored principal.
+async fn extract(parts: &mut Parts, state: &AppState) -> Result<AuthPrincipal, PrefixdError> {
+    if let Some(resolved) = parts.extensions.get::<AuthPrincipal>() {
+        return Ok(resolved.clone());
+    }
+    let resolved =
+        AuthPrincipal::resolve(state, &parts.headers, parts.extensions.get::<AuthSession>())
+            .await?;
+    parts.extensions.insert(resolved.clone());
+    Ok(resolved)
+}
+
+/// Every route except the ingest routes extracts this. It refuses an ingest
+/// token with 403 before the body is read, so a route reaches ingest tokens
+/// only by extracting [`IngestPrincipal`] instead; `require_auth` and
+/// `require_role` refuse them again.
 impl FromRequestParts<Arc<AppState>> for AuthPrincipal {
     type Rejection = Response;
 
@@ -182,14 +198,35 @@ impl FromRequestParts<Arc<AppState>> for AuthPrincipal {
         parts: &mut Parts,
         state: &Arc<AppState>,
     ) -> Result<Self, Self::Rejection> {
-        if let Some(resolved) = parts.extensions.get::<Self>() {
-            return Ok(resolved.clone());
-        }
-        let resolved = Self::resolve(state, &parts.headers, parts.extensions.get::<AuthSession>())
+        let resolved = extract(parts, state)
             .await
             .map_err(|error| AppError(error).into_response())?;
-        parts.extensions.insert(resolved.clone());
+        if let Some(Principal::Ingest { token, .. }) = &resolved.0 {
+            tracing::warn!(token = %token, "ingest token refused outside the ingest routes");
+            return Err(AppError(PrefixdError::Forbidden(
+                "an ingest token reaches only the ingest routes".into(),
+            ))
+            .into_response());
+        }
         Ok(resolved)
+    }
+}
+
+/// The principal of an ingest route, which may be an ingest token.
+#[derive(Clone, Debug)]
+pub struct IngestPrincipal(pub AuthPrincipal);
+
+impl FromRequestParts<Arc<AppState>> for IngestPrincipal {
+    type Rejection = Response;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
+        extract(parts, state)
+            .await
+            .map(Self)
+            .map_err(|error| AppError(error).into_response())
     }
 }
 
