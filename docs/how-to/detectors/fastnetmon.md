@@ -474,6 +474,25 @@ Rules that keep the mapping honest:
   A value such as `Attack_type: udp_flood` still contains a separate `udp`
   token and selects `udp_flood`.
 
+### Destination ports
+
+The bundled script does not report destination ports. UDP and TCP police
+playbooks therefore match the victim and protocol without a destination-port
+component. The service's `allowed_ports` cannot stand in for attack evidence:
+a UDP flood to port 80 must not produce a rule only on the service's DNS and
+NTP ports.
+
+The [2026-11-16 qualification receipt](../../reference/qualification/fastnetmon-community-2026-11-16.md)
+records that earlier mismatch. Its route-lifecycle result does not establish
+attack coverage; the updated lane checks coverage separately.
+
+Protocol-only policing also limits legitimate traffic of that protocol to the
+victim. The listed service ports are not protected exceptions. Size the rate
+for that effect, or set `require_top_ports: true` to decline portless events
+and supply destination ports from a detector that observes them. A UDP/TCP
+detector discard without destination ports is refused. Explicit reflector
+source-port rules below retain their own matching behavior.
+
 ### UDP amplification
 
 When the vector is `udp_flood`, the script also reads the sampled packets

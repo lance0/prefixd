@@ -9,10 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrade notes
 
+- **Portless detector police rules match the whole protocol.** UDP/TCP events
+  without destination ports no longer borrow the service's `allowed_ports`.
+  New rules police all traffic of that protocol to the victim, legitimate
+  traffic included. Review rates, or set `require_top_ports: true` and supply
+  detector ports. Portless UDP/TCP detector discard is refused; prefix TCP
+  police still requires ports. Existing rules keep their saved matches until
+  expiry or withdrawal. See
+  [detector port selection](docs/how-to/upgrading.md#detector-events-without-destination-ports).
+
 - If earlier versions ran with debug logging, treat retained login logs as
   credentials and reset affected operator passwords; those logs can contain
   password hashes. See [earlier debug logs](docs/how-to/upgrading.md#password-hashes-in-earlier-debug-logs).
-
 - **Compose needs `POSTGRES_PASSWORD`.** `docker-compose.yml` no longer falls
   back to the published `prefixd_secret`; every Compose command refuses to run
   until the variable is set. Before upgrading an existing Compose stack, put
@@ -366,8 +374,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   script run directly and from a replayed NetFlow v5 flood must create the
   mitigation and the exact rule at FRR, re-bans must extend it, and unbans,
   including FastNetMon's own timer unban of the detected ban, must withdraw it.
-  The detected ban's rule polices the service's allowed UDP ports, not the
-  flood's port, because the script sends none. The lane runs prefixd in
+  The detected ban's rule polices UDP to the victim without a port component,
+  and the lane asserts that it covers the flood's port. The lane runs prefixd in
   `credentials` mode with API tokens minted by `prefixdctl`: the script holds
   an ingest token bound to `fastnetmon`, the driver an operator token for its
   reads, and an ingest token bound to another source and the operator token
@@ -529,6 +537,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from a database outage. Scoped-token requests need a current database read
   and return `503` when it fails, including on `/v1/health/detail`; a stale
   cookie does not change that response.
+- Detector floods without destination ports no longer target unrelated
+  service ports, missing attacks outside that list. The FastNetMon interop
+  lane now checks that the generated rule covers its synthetic flood's port.
+  Detector police events also cannot prolong a saved protocol-only UDP/TCP
+  discard.
+
 - Releases require the latest CI and Interop push runs to pass on the exact
   release commit before tagging or publishing. A missing, pending or failed
   Interop run, including the FastNetMon lane, blocks publication even when CI
