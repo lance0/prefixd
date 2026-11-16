@@ -18,12 +18,20 @@ use crate::auth::token::NewToken;
 use crate::domain::ApiToken;
 
 /// The created token. `token` is the only time the plaintext appears.
-#[derive(Debug, Serialize, ToSchema)]
+#[derive(Serialize, ToSchema)]
 pub struct CreatedToken {
     #[serde(flatten)]
     pub record: ApiToken,
     /// The secret, shown once; store it now
     pub token: String,
+}
+
+impl std::fmt::Debug for CreatedToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CreatedToken")
+            .field("record", &self.record)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Serialize, ToSchema)]
