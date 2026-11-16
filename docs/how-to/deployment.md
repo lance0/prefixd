@@ -731,10 +731,10 @@ prefixd.
 
 Secrets go in `/etc/default/prefixd`, outside the writable `/etc/prefixd`, so
 the service user cannot replace them. systemd reads the file as root before it
-drops privileges, so it can stay root-only:
+drops privileges, so it can stay root-only. Append a random API token to it:
 
 ```bash
-PREFIXD_API_TOKEN=your-secret-token
+sudo sh -c 'umask 077; printf "PREFIXD_API_TOKEN=%s\n" "$(openssl rand -hex 32)" >> /etc/default/prefixd'
 ```
 
 Alert destination variables named by `*_env` keys go in the same file; see

@@ -158,8 +158,9 @@ sudo chmod +x /usr/local/bin/prefixd-fastnetmon.sh
 # prefixd API endpoint
 PREFIXD_API="http://prefixd-host:8080"
 
-# Bearer token for authentication (if auth.mode=bearer)
-PREFIXD_TOKEN="your-api-token"
+# Bearer token for authentication (if auth.mode=bearer): the controller's
+# PREFIXD_API_TOKEN value
+PREFIXD_TOKEN=""
 
 # Operator request field (optional; audit actor comes from authentication)
 PREFIXD_OPERATOR="fastnetmon"
