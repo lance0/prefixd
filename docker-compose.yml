@@ -10,7 +10,7 @@ x-controller: &controller
     RUST_LOG: sqlx::postgres::notice=warn,info
     # prefixdctl in this container talks to the controller's own listener, not nginx.
     PREFIXD_API: http://127.0.0.1:8080
-    DATABASE_URL: postgres://prefixd:${POSTGRES_PASSWORD:-prefixd_secret}@postgres:5432/prefixd
+    DATABASE_URL: postgres://prefixd:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env; scripts/compose-bootstrap.sh env generates one}@postgres:5432/prefixd
   # Above shutdown.drain_timeout_seconds (30), so stop and restart let the drain finish.
   stop_grace_period: 35s
   restart: unless-stopped
@@ -122,7 +122,7 @@ services:
     container_name: prefixd-postgres
     environment:
       POSTGRES_USER: prefixd
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-prefixd_secret}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env; scripts/compose-bootstrap.sh env generates one}
       POSTGRES_DB: prefixd
     volumes:
       - postgres-data:/var/lib/postgresql/data

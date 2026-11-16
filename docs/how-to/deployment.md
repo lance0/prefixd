@@ -534,10 +534,16 @@ postgres:
   environment:
     POSTGRES_DB: prefixd
     POSTGRES_USER: prefixd
-    POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-prefixd_secret}
+    POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env; scripts/compose-bootstrap.sh env generates one}
   volumes:
     - postgres-data:/var/lib/postgresql/data
 ```
+
+There is no default password: Compose refuses to start until `.env` sets
+`POSTGRES_PASSWORD`. `scripts/compose-bootstrap.sh env` writes a random one,
+mode 0600, on a fresh checkout. PostgreSQL keeps the password its data volume
+was created with, so changing the variable later locks the controller out
+until you also change it in the database.
 
 ### External PostgreSQL
 

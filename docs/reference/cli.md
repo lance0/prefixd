@@ -50,11 +50,11 @@ On the Compose stack, `scripts/compose-bootstrap.sh rustbgpd` (or `gobgp`)
 mints an operator token into `.prefixd/cli.token`, mode 0600; see the
 [quickstart](../tutorials/quickstart.md#start-and-log-in). Compose sets
 `PREFIXD_API=http://127.0.0.1:8080` in both controller services, so the CLI
-inside the controller needs only the token, copied from your shell by name:
+inside the controller needs only the token. Pass it on stdin, so it never
+enters the container's environment or the Docker API:
 
 ```bash
-export PREFIXD_TOKEN="$(cat .prefixd/cli.token)"
-docker compose exec -e PREFIXD_TOKEN prefixd-rustbgpd prefixdctl status
+docker compose exec -T -e PREFIXD_TOKEN_FILE=/dev/stdin prefixd-rustbgpd prefixdctl status < .prefixd/cli.token
 ```
 
 ### Command-Line Options
@@ -66,20 +66,24 @@ prefixdctl -a http://localhost <command>
 prefixdctl -a http://127.0.0.1:8080 <command>
 ```
 
-Pass the token through `PREFIXD_TOKEN` rather than `--token`: other local
-users can read command-line arguments through `ps` and `/proc`, and a flag
-lands in shell history.
+Pass the token through `PREFIXD_TOKEN_FILE` or `PREFIXD_TOKEN` rather than
+`--token`: other local users can read command-line arguments through `ps` and
+`/proc`, and a flag lands in shell history. A token file keeps the token out of
+the environment as well.
 
 | Option | Env Var | Description |
 |--------|---------|-------------|
 | `-a, --api` | `PREFIXD_API` | API endpoint URL |
 | `-t, --token` | `PREFIXD_TOKEN` | API token (`prefixd_...`), sent as `Authorization: Bearer` |
+| `--token-file` | `PREFIXD_TOKEN_FILE` | File holding the API token on one line, such as `/dev/stdin`; a trailing newline is allowed |
 | `--session-cookie` | `PREFIXD_SESSION_COOKIE` | Cookie header from an authenticated Admin session |
 | `-f, --format` | - | Output format: `table` (default) or `json` |
 
 Help output names these variables but never prints their values. prefixdctl
 never sends both credentials: a token and a session cookie together, from flags
-or the environment, is a usage error (exit 2) before any request. The
+or the environment, is a usage error (exit 2) before any request. So is a token
+together with a token file, and a token file that cannot be read or holds more
+than one line; those errors name the file, never its contents. The
 controller would use only the token. A token together with `user:password` in
 `--api` (`PREFIXD_API`) is a usage error too: the userinfo would become an
 `Authorization: Basic` header beside the token, which the controller refuses.
@@ -136,6 +140,7 @@ prefixdctl status
 
 # Illustrative output with rustbgpd:
 # Status: healthy
+# Mode: enforced
 # Active Mitigations: 12
 # Speaker: rustbgpd
 #   Daemon version: <rustbgpd-version>
@@ -151,6 +156,10 @@ prefixdctl status
 #   ● 192.0.2.1 - established
 #   ● 192.0.2.2 - established
 ```
+
+`Mode` is the running operation mode, `enforced` or `dry-run`, read from
+`GET /v1/config/settings`; `--format json` adds it as `mode`. Status therefore
+makes two requests, both readable by any role.
 
 ### Peers
 

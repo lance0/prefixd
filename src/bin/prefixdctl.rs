@@ -24,6 +24,11 @@ struct Cli {
     #[arg(short, long, env = "PREFIXD_TOKEN", hide_env_values = true)]
     token: Option<String>,
 
+    /// File holding the API token on one line, such as /dev/stdin; keeps the
+    /// token out of the environment, shell history and process listings
+    #[arg(long, env = "PREFIXD_TOKEN_FILE", hide_env_values = true)]
+    token_file: Option<std::path::PathBuf>,
+
     /// Cookie header from an authenticated administrator session
     #[arg(long, env = "PREFIXD_SESSION_COOKIE", hide_env_values = true)]
     session_cookie: Option<String>,
@@ -458,6 +463,9 @@ struct HealthResponse {
     gobgp: ComponentHealth,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     speaker: Option<SpeakerHealth>,
+    /// Operation mode, from `/v1/config/settings`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mode: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -689,7 +697,7 @@ fn format_http_error(status: reqwest::StatusCode, message: Option<String>) -> St
         match status {
             reqwest::StatusCode::UNAUTHORIZED => {
                 "authentication failed: missing, invalid, revoked or expired credentials \
-                 (set PREFIXD_TOKEN to an API token, or --session-cookie)"
+                 (set PREFIXD_TOKEN or PREFIXD_TOKEN_FILE to an API token, or --session-cookie)"
             }
             reqwest::StatusCode::FORBIDDEN => {
                 "permission denied: the authenticated identity's role does not allow this request"
@@ -793,23 +801,48 @@ impl Client {
     }
 }
 
+/// Reads a token file: one line, a trailing newline allowed. Errors name the
+/// file, never its contents.
+fn read_token_file(path: &std::path::Path) -> Result<String, String> {
+    let raw = std::fs::read_to_string(path)
+        .map_err(|e| format!("cannot read the token file {}: {e}", path.display()))?;
+    let token = raw.strip_suffix('\n').unwrap_or(&raw);
+    let token = token.strip_suffix('\r').unwrap_or(token);
+    if token.is_empty() || token.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err(format!(
+            "the token file {} must hold one token on one line",
+            path.display()
+        ));
+    }
+    Ok(token.to_owned())
+}
+
 /// The client variable the controller's shared token used to live in.
 const REMOVED_TOKEN_ENV: &str = "PREFIXD_API_TOKEN";
 
 #[tokio::main]
 async fn main() -> ExitCode {
     let cli = Cli::parse();
-    // Never send both credentials: the controller would use only the token.
-    if cli.token.is_some() && cli.session_cookie.is_some() {
+    // One token source: neither silently wins over the other.
+    if cli.token.is_some() && cli.token_file.is_some() {
         eprintln!(
-            "error: pass an API token (--token or PREFIXD_TOKEN) or --session-cookie \
-             (PREFIXD_SESSION_COOKIE), not both"
+            "error: pass an API token (--token or PREFIXD_TOKEN) or a token file \
+             (--token-file or PREFIXD_TOKEN_FILE), not both"
+        );
+        return ExitCode::from(2);
+    }
+    let has_token = cli.token.is_some() || cli.token_file.is_some();
+    // Never send both credentials: the controller would use only the token.
+    if has_token && cli.session_cookie.is_some() {
+        eprintln!(
+            "error: pass an API token (--token, PREFIXD_TOKEN, --token-file or \
+             PREFIXD_TOKEN_FILE) or --session-cookie (PREFIXD_SESSION_COOKIE), not both"
         );
         return ExitCode::from(2);
     }
     // reqwest sends URL userinfo as `Authorization: Basic`, and the controller
     // refuses a request with two Authorization headers.
-    if cli.token.is_some()
+    if has_token
         && reqwest::Url::parse(&cli.api)
             .is_ok_and(|url| !url.username().is_empty() || url.password().is_some())
     {
@@ -819,13 +852,25 @@ async fn main() -> ExitCode {
         );
         return ExitCode::from(2);
     }
-    if std::env::var_os(REMOVED_TOKEN_ENV).is_some() && std::env::var_os("PREFIXD_TOKEN").is_none()
+    if std::env::var_os(REMOVED_TOKEN_ENV).is_some()
+        && std::env::var_os("PREFIXD_TOKEN").is_none()
+        && std::env::var_os("PREFIXD_TOKEN_FILE").is_none()
     {
         eprintln!(
             "warning: {REMOVED_TOKEN_ENV} is set but no longer read; set PREFIXD_TOKEN to an API token"
         );
     }
-    let mut client = Client::new(cli.api, cli.token);
+    let token = match &cli.token_file {
+        Some(path) => match read_token_file(path) {
+            Ok(token) => Some(token),
+            Err(error) => {
+                eprintln!("error: {error}");
+                return ExitCode::from(2);
+            }
+        },
+        None => cli.token,
+    };
+    let mut client = Client::new(cli.api, token);
     client.session_cookie = cli.session_cookie;
 
     let result = match cli.command {
@@ -1041,7 +1086,9 @@ async fn cmd_diversions(client: &Client, command: DiversionCommands) -> Result<(
 }
 
 async fn cmd_status(client: &Client, format: OutputFormat) -> Result<(), String> {
-    let health: HealthResponse = client.get("/v1/health/detail").await?;
+    let mut health: HealthResponse = client.get("/v1/health/detail").await?;
+    let settings: serde_json::Value = client.get("/v1/config/settings").await?;
+    health.mode = settings["settings"]["mode"].as_str().map(str::to_owned);
 
     match format {
         OutputFormat::Json => {
@@ -1049,6 +1096,7 @@ async fn cmd_status(client: &Client, format: OutputFormat) -> Result<(), String>
         }
         OutputFormat::Table => {
             println!("Status: {}", health.status);
+            println!("Mode: {}", health.mode.as_deref().unwrap_or("unavailable"));
             println!("Active Mitigations: {}", health.active_mitigations);
             if let Some(speaker) = &health.speaker {
                 println!("Speaker: {}", speaker.backend);

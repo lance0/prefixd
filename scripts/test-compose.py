@@ -16,12 +16,15 @@ DASHBOARD_IMAGE = (
     os.environ.get("PREFIXD_DASHBOARD_IMAGE") or "ghcr.io/lance0/prefixd-dashboard:main"
 )
 RUSTBGPD_IMAGE = os.environ.get("PREFIXD_RUSTBGPD_IMAGE")
+# Compose refuses to start without a database password; these tests supply one.
+DB_PASSWORD = "compose-test-password"
 
 
-def docker(*args, check=True):
+def docker(*args, check=True, env=None):
+    env = {**os.environ, "POSTGRES_PASSWORD": DB_PASSWORD} if env is None else env
     try:
         return subprocess.run(
-            ["docker", *args], cwd=ROOT, text=True, capture_output=True, check=check
+            ["docker", *args], cwd=ROOT, text=True, capture_output=True, check=check, env=env
         )
     except subprocess.CalledProcessError as error:
         raise RuntimeError(f"{error.stdout}\n{error.stderr}") from error
@@ -99,6 +102,35 @@ class Profiles(unittest.TestCase):
                     self.assertIn("--pprof-disable", services[profile]["command"])
                     self.assertIn("--metrics-path=", services[profile]["command"])
                     self.assertIn("@sha256:", services[profile]["image"])
+
+    def test_missing_database_password_refuses_every_profile(self):
+        env = {k: v for k, v in os.environ.items() if k != "POSTGRES_PASSWORD"}
+        for profile in ("rustbgpd", "gobgp"):
+            with self.subTest(profile=profile):
+                services = self.model(profile)["services"]
+                self.assertEqual(
+                    services["postgres"]["environment"]["POSTGRES_PASSWORD"], DB_PASSWORD
+                )
+                self.assertIn(
+                    f"prefixd:{DB_PASSWORD}@postgres",
+                    services[f"prefixd-{profile}"]["environment"]["DATABASE_URL"],
+                )
+                # --env-file /dev/null: no checkout .env can supply it.
+                result = docker(
+                    "compose",
+                    "--env-file",
+                    "/dev/null",
+                    "-f",
+                    "docker-compose.yml",
+                    "--profile",
+                    profile,
+                    "config",
+                    check=False,
+                    env=env,
+                )
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn("required variable POSTGRES_PASSWORD is missing", result.stderr)
+                self.assertIn("scripts/compose-bootstrap.sh env", result.stderr)
 
     def test_two_profiles_fail_before_startup(self):
         result = docker(

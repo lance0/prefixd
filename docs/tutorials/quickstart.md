@@ -10,6 +10,7 @@ Rust or JavaScript toolchain is needed. Run commands from the repository root.
 ```bash
 git clone https://github.com/lance0/prefixd.git
 cd prefixd
+scripts/compose-bootstrap.sh env
 docker compose --profile rustbgpd up -d --pull always --no-build
 docker compose --profile rustbgpd ps
 curl http://localhost/v1/health
@@ -17,40 +18,49 @@ scripts/compose-bootstrap.sh rustbgpd
 open http://localhost
 ```
 
-`scripts/compose-bootstrap.sh` runs `prefixdctl` inside `prefixd-rustbgpd`,
-which already has `DATABASE_URL`. There is no default or shared credential;
-the script creates each one:
+There is no default or shared credential; the bootstrap script creates each
+one.
 
-- **The first Admin.** It runs `prefixdctl operators create --username admin
-  --role admin` at a hidden password prompt, unless an Admin already exists.
-  Sign in to the dashboard with that account.
+- **Database password.** Compose refuses to start without
+  `POSTGRES_PASSWORD`. `scripts/compose-bootstrap.sh env` writes a random one
+  into `.env`, mode 0600, before the first start. It keeps a password `.env`
+  already sets, and refuses when a PostgreSQL volume already exists, because
+  that database keeps the password it was created with.
+- **The first Admin.** `scripts/compose-bootstrap.sh rustbgpd` runs
+  `prefixdctl` inside `prefixd-rustbgpd`, which already has `DATABASE_URL`.
+  It runs `prefixdctl operators create --username admin --role admin` at a
+  hidden password prompt, unless an Admin already exists. Sign in to the
+  dashboard with that account.
 - **A detector token.** An ingest token bound to the `fastnetmon` source, in
   `.prefixd/fastnetmon.token`. It can post events as `fastnetmon` and nothing
   else.
 - **A CLI token.** An operator token for `prefixdctl`, in `.prefixd/cli.token`.
 
 The `.prefixd` directory is mode 0700 and each token file 0600, owned by you;
-Git and Docker builds ignore it. The script never prints a token or puts one
-on a command line. Rerunning it keeps existing files; delete a file to mint a
-replacement under a new name, and revoke the old token with
-`prefixdctl tokens revoke`. `docker compose down -v` deletes the tokens with
-the database, so delete `.prefixd` too before bootstrapping again. To mint
+Git and Docker builds ignore it and `.env`. Each token's name is recorded next
+to it, in `cli.token.name` and `fastnetmon.token.name`. The script never prints
+a token or puts one on a command line, and one run at a time holds a lock in
+`.prefixd`. Rerunning it keeps existing token files, resets their mode to 0600,
+and stops with an error if a recorded token no longer exists or is revoked.
+`docker compose down -v` deletes the tokens with the database, so delete
+`.prefixd` too before bootstrapping again. To replace one token, delete its two
+files, rerun, and revoke the old token with `prefixdctl tokens revoke`. To mint
 tokens by hand instead, see [create API tokens](../how-to/deployment.md#create-api-tokens).
 
-Run the CLI in the controller with the operator token:
+Run the CLI in the controller with the operator token, read on stdin:
 
 ```bash
-export PREFIXD_TOKEN="$(cat .prefixd/cli.token)"
-docker compose exec -e PREFIXD_TOKEN prefixd-rustbgpd prefixdctl status
+docker compose exec -T -e PREFIXD_TOKEN_FILE=/dev/stdin prefixd-rustbgpd prefixdctl status < .prefixd/cli.token
 ```
 
 Compose sets `PREFIXD_API=http://127.0.0.1:8080` in the controller, so
-`prefixdctl` there reaches the controller's own listener. `-e PREFIXD_TOKEN`
-copies the token from your shell by name, so it never appears in a process
-listing. Without a token, `prefixdctl` exits 1 with `401 Unauthorized`
-and a hint to set `PREFIXD_TOKEN`. A missing or wrong client token never stops
-or restarts the controller, and it never affects the rules the controller
-holds.
+`prefixdctl` there reaches the controller's own listener.
+`PREFIXD_TOKEN_FILE=/dev/stdin` reads the token from the redirected file, so it
+never enters the container's environment, a command line or the Docker API.
+`status` shows the running mode, `enforced` or `dry-run`. Without a token,
+`prefixdctl` exits 1 with `401 Unauthorized` and a hint to set
+`PREFIXD_TOKEN` or `PREFIXD_TOKEN_FILE`. A missing or wrong client token never stops or restarts the
+controller, and it never affects the rules the controller holds.
 
 The shipped main config enables credentials, enforced operation and
 [leased FlowSpec](../reference/configuration.md#leased-flowspec):
@@ -62,15 +72,30 @@ is not proof of a BGP session or router enforcement.
 ## Rehearse one detector event in dry-run
 
 Send one event as the detector would, then withdraw it, without announcing
-anything. Do this on a fresh stack: dry-run cannot withdraw rules announced in
-enforced mode (see [dry-run rollout](../cookbook/dry-run-rollout.md)).
+anything.
+
+**Rehearse only on a fresh stack that has never announced a rule.** Switching
+a live enforced stack to dry-run is not a safe pause:
+
+- **rustbgpd.** Dry-run never renews the injection lease, so every leased rule
+  the enforced run announced lapses within one lease, 60 seconds by default.
+- **GoBGP.** The rules stay announced, and dry-run cannot withdraw them.
+
+To rehearse against a stack that already enforces, follow
+[dry-run rollout](../cookbook/dry-run-rollout.md) and the
+[upgrade guide](../how-to/upgrading.md#pending-withdrawals-and-rollback) first.
 
 Set `mode: dry-run` on line 2 of `configs/prefixd.yaml`, then recreate the
-controller so it reads the edited file:
+controller so it reads the edited file, and confirm the mode before sending
+anything:
 
 ```bash
 docker compose --profile rustbgpd up -d --no-build --force-recreate --no-deps prefixd-rustbgpd
+docker compose exec -T -e PREFIXD_TOKEN_FILE=/dev/stdin prefixd-rustbgpd prefixdctl status < .prefixd/cli.token
 ```
+
+The output must include `Mode: dry-run`. If it still says `enforced`, stop:
+the controller did not read the edited file.
 
 Post a ban with the detector's ingest token. curl reads the header from a
 config on stdin (`-K -`), so the token stays off the command line:
@@ -91,8 +116,8 @@ policy and guardrails created a mitigation: the sample inventory owns
 confirm that the speaker holds no rule:
 
 ```bash
-docker compose exec -e PREFIXD_TOKEN prefixd-rustbgpd prefixdctl mitigations list
-docker compose exec -e PREFIXD_TOKEN prefixd-rustbgpd prefixdctl speaker list-routes
+docker compose exec -T -e PREFIXD_TOKEN_FILE=/dev/stdin prefixd-rustbgpd prefixdctl mitigations list < .prefixd/cli.token
+docker compose exec -T -e PREFIXD_TOKEN_FILE=/dev/stdin prefixd-rustbgpd prefixdctl speaker list-routes < .prefixd/cli.token
 ```
 
 Withdraw it as the detector would, with an unban that names the victim:
@@ -103,7 +128,7 @@ printf 'header = "Authorization: Bearer %s"\n' "$(cat .prefixd/fastnetmon.token)
     -H 'Content-Type: application/json' \
     -d '{"timestamp":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'","source":"fastnetmon",
          "victim_ip":"203.0.113.10","vector":"unknown","action":"unban"}'
-docker compose exec -e PREFIXD_TOKEN prefixd-rustbgpd prefixdctl mitigations list
+docker compose exec -T -e PREFIXD_TOKEN_FILE=/dev/stdin prefixd-rustbgpd prefixdctl mitigations list < .prefixd/cli.token
 ```
 
 The unban answers `"status":"withdrawn"` with the mitigation's ID, and the list
@@ -111,11 +136,14 @@ shows it as `withdrawn`. An operator withdraws with
 `prefixdctl mitigations withdraw <id> --reason <text>` instead.
 
 Return to enforced operation: restore `mode: enforced` (for example with
-`git checkout configs/prefixd.yaml`) and recreate the controller with the same
-command. Enforced startup refuses to run while a rehearsal mitigation is still
-live: the controller exits, and Compose restarts it until that mitigation's
-TTL (120 seconds for the sample playbook) has passed. Withdraw it first, or
-follow [switch to enforced](../cookbook/dry-run-rollout.md#5-switch-to-enforced).
+`git checkout configs/prefixd.yaml`), recreate the controller with the same
+command, and check that `status` shows `Mode: enforced`. Enforced startup
+refuses to run while a rehearsal mitigation is still live: the controller
+exits, and Compose restarts it until that mitigation's TTL (120 seconds for the
+sample playbook) has passed. Withdraw it first, or stop the controller and run
+`prefixd --retire-dry-run-intent` once, as
+[switch to enforced](../cookbook/dry-run-rollout.md#5-switch-to-enforced)
+describes.
 
 ## Build from source
 
@@ -265,14 +293,14 @@ state and history; do not use it as an upgrade or speaker-switch procedure.
 For a **fresh** deployment:
 
 ```bash
+scripts/compose-bootstrap.sh env
 docker compose --profile gobgp up -d --pull always --no-build
 scripts/compose-bootstrap.sh gobgp
-export PREFIXD_TOKEN="$(cat .prefixd/cli.token)"
-docker compose exec -e PREFIXD_TOKEN prefixd-gobgp prefixdctl status
+docker compose exec -T -e PREFIXD_TOKEN_FILE=/dev/stdin prefixd-gobgp prefixdctl status < .prefixd/cli.token
 ```
 
-The rehearsal works the same way: edit `configs/prefixd-gobgp.yaml`, recreate
-`prefixd-gobgp`, and run the CLI there.
+The rehearsal works the same way, on a fresh stack only: edit
+`configs/prefixd-gobgp.yaml`, recreate `prefixd-gobgp`, and run the CLI there.
 
 The controller shares GoBGP's network namespace; management listens only on
 `127.0.0.1:50051`. Recreate both together if that namespace owner is recreated:
@@ -308,7 +336,9 @@ Adapt the sample policy to your network, then connect a signal source:
    action and TTL. See [step selection](../reference/configuration.md#step-selection).
 3. **Rehearse.** Run a [manual mitigation and withdrawal](../cookbook/manual-mitigation.md),
    or switch to [dry-run](../cookbook/dry-run-rollout.md) before you connect a
-   detector.
+   detector. Never switch a stack that has announced rules to dry-run: on
+   rustbgpd its leased rules lapse within a minute, and on GoBGP they stay
+   and dry-run cannot withdraw them.
 4. **Connect a detector.** Use the [FastNetMon](../how-to/detectors/fastnetmon.md)
    notify script, [Alertmanager](../how-to/deployment.md#alertmanager-setup), or a
    [generic webhook adapter](../how-to/detectors/generic-webhook.md). The

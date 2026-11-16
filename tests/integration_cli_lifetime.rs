@@ -132,12 +132,18 @@ fn cli_help_hides_credential_environment_values() {
             .env("PREFIXD_TOKEN", TOKEN)
             .env("PREFIXD_API_TOKEN", SENTINEL)
             .env("PREFIXD_SESSION_COOKIE", SENTINEL)
+            .env("PREFIXD_TOKEN_FILE", format!("/run/{SENTINEL}/token"))
             .output()
             .unwrap();
         let stdout = String::from_utf8(output.stdout).unwrap();
         let stderr = String::from_utf8(output.stderr).unwrap();
         assert!(output.status.success(), "{flag}");
-        for name in ["PREFIXD_API", "PREFIXD_TOKEN", "PREFIXD_SESSION_COOKIE"] {
+        for name in [
+            "PREFIXD_API",
+            "PREFIXD_TOKEN",
+            "PREFIXD_TOKEN_FILE",
+            "PREFIXD_SESSION_COOKIE",
+        ] {
             assert!(stdout.contains(name), "{flag}: {stdout}");
         }
         for secret in [SENTINEL, TOKEN] {
@@ -299,4 +305,162 @@ fn cli_refuses_two_credentials_and_warns_about_the_old_variable() {
         &[("PREFIXD_API_TOKEN", TOKEN), ("PREFIXD_TOKEN", TOKEN)],
     );
     assert!(!stderr.contains("no longer read"), "{stderr}");
+}
+
+/// `PREFIXD_TOKEN_FILE` (or `--token-file`, including `/dev/stdin`) sends the
+/// file's token on every request; `status` shows the running mode. A token
+/// file together with a token or a session cookie, an unreadable file and a
+/// file that is not one line are usage errors before any request, and no
+/// error repeats the file's contents.
+#[tokio::test]
+async fn cli_reads_the_token_file_and_status_shows_the_mode() {
+    const TOKEN: &str = "prefixd_tokenfilecanaryAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    type Sent = tokio::sync::mpsc::UnboundedSender<(String, String)>;
+    let (sent, mut requests) = tokio::sync::mpsc::unbounded_channel();
+    let record = |sent: Sent, path: &'static str, body: serde_json::Value| {
+        move |headers: HeaderMap| async move {
+            let auth = headers
+                .get("authorization")
+                .map(|v| v.to_str().unwrap().to_owned())
+                .unwrap_or_default();
+            sent.send((path.to_owned(), auth)).unwrap();
+            Json(body)
+        }
+    };
+    let health = serde_json::json!({
+        "status": "healthy", "bgp_sessions": {}, "active_mitigations": 0,
+        "database": "connected", "gobgp": { "status": "connected" }
+    });
+    let settings = serde_json::json!({ "settings": { "mode": "dry-run" } });
+    let app = Router::new()
+        .route(
+            "/v1/health/detail",
+            axum::routing::get(record(sent.clone(), "/v1/health/detail", health)),
+        )
+        .route(
+            "/v1/config/settings",
+            axum::routing::get(record(sent, "/v1/config/settings", settings)),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let api = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let dir = tempfile::tempdir().unwrap();
+    let token_file = dir.path().join("cli.token");
+    std::fs::write(&token_file, format!("{TOKEN}\n")).unwrap();
+    let run = |args: Vec<String>, env: Vec<(&'static str, String)>, stdin: Option<String>| {
+        let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_prefixdctl"));
+        command
+            .arg("--api")
+            .arg(&api)
+            .args(args)
+            .env_remove("PREFIXD_TOKEN")
+            .env_remove("PREFIXD_TOKEN_FILE")
+            .env_remove("PREFIXD_SESSION_COOKIE")
+            .env_remove("PREFIXD_API_TOKEN")
+            .envs(env)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
+        async move {
+            let mut child = command.spawn().unwrap();
+            let mut input = child.stdin.take().unwrap();
+            if let Some(text) = stdin {
+                tokio::io::AsyncWriteExt::write_all(&mut input, text.as_bytes())
+                    .await
+                    .unwrap();
+            }
+            drop(input);
+            let output =
+                tokio::time::timeout(std::time::Duration::from_secs(15), child.wait_with_output())
+                    .await
+                    .unwrap()
+                    .unwrap();
+            (
+                output.status.code(),
+                String::from_utf8(output.stdout).unwrap(),
+                String::from_utf8(output.stderr).unwrap(),
+            )
+        }
+    };
+    let file = token_file.display().to_string();
+    let args = |list: &[&str]| list.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
+    for (label, argv, env, stdin) in [
+        (
+            "env",
+            args(&["status"]),
+            vec![("PREFIXD_TOKEN_FILE", file.clone())],
+            None,
+        ),
+        (
+            "flag",
+            args(&["--token-file", &file, "status"]),
+            vec![],
+            None,
+        ),
+        (
+            "stdin",
+            args(&["--format", "json", "status"]),
+            vec![("PREFIXD_TOKEN_FILE", "/dev/stdin".to_owned())],
+            Some(format!("{TOKEN}\n")),
+        ),
+    ] {
+        let (code, stdout, stderr) = run(argv, env, stdin).await;
+        assert_eq!(code, Some(0), "{label}: {stderr}");
+        for path in ["/v1/health/detail", "/v1/config/settings"] {
+            let (seen, auth) = requests.try_recv().unwrap();
+            assert_eq!(seen, path, "{label}");
+            assert_eq!(auth, format!("Bearer {TOKEN}"), "{label}");
+        }
+        if label == "stdin" {
+            let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+            assert_eq!(json["mode"], "dry-run", "{stdout}");
+        } else {
+            assert!(stdout.contains("Mode: dry-run"), "{label}: {stdout}");
+        }
+        assert!(
+            !stdout.contains(TOKEN) && !stderr.contains(TOKEN),
+            "{label}"
+        );
+    }
+
+    let two_lines = dir.path().join("two-lines.token");
+    std::fs::write(&two_lines, format!("{TOKEN}\nsecond-line-canary\n")).unwrap();
+    let missing = dir.path().join("missing.token").display().to_string();
+    let two = two_lines.display().to_string();
+    for (label, argv, env, expected) in [
+        (
+            "token and file",
+            args(&["--token-file", &file, "status"]),
+            vec![("PREFIXD_TOKEN", TOKEN.to_owned())],
+            "not both",
+        ),
+        (
+            "file and cookie",
+            args(&["--session-cookie", "id=cookie-canary", "status"]),
+            vec![("PREFIXD_TOKEN_FILE", file.clone())],
+            "not both",
+        ),
+        (
+            "unreadable",
+            args(&["status"]),
+            vec![("PREFIXD_TOKEN_FILE", missing.clone())],
+            "cannot read the token file",
+        ),
+        (
+            "two lines",
+            args(&["status"]),
+            vec![("PREFIXD_TOKEN_FILE", two.clone())],
+            "one token on one line",
+        ),
+    ] {
+        let (code, _, stderr) = run(argv, env, None).await;
+        assert_eq!(code, Some(2), "{label}: {stderr}");
+        assert!(stderr.contains(expected), "{label}: {stderr}");
+        assert!(!stderr.contains(TOKEN), "{label}: {stderr}");
+        assert!(!stderr.contains("second-line-canary"), "{label}: {stderr}");
+        assert!(requests.try_recv().is_err(), "{label} sent a request");
+    }
+    server.abort();
 }
