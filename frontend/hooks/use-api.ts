@@ -163,6 +163,11 @@ export function useOperators(enabled = true) {
   )
 }
 
+/** API tokens (Admin session only); `enabled: false` skips the request. The list never holds a secret. */
+export function useApiTokens(enabled = true) {
+  return useSWR(enabled ? "api-tokens" : null, api.getApiTokens, { refreshInterval: 0, revalidateOnFocus: true })
+}
+
 // Config endpoints (read-only, no auto-refresh)
 export function useConfigSettings() {
   return useSWR(
@@ -180,9 +185,9 @@ export function useConfigInventory() {
   )
 }
 
-export function useConfigPlaybooks() {
+export function useConfigPlaybooks(enabled = true) {
   return useSWR(
-    "config-playbooks",
+    enabled ? "config-playbooks" : null,
     api.getConfigPlaybooks,
     { refreshInterval: 0, revalidateOnFocus: true }
   )

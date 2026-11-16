@@ -124,7 +124,7 @@ export default function MitigationDetailPage({ params }: { params: Promise<{ id:
     setWithdrawError(null)
 
     try {
-      await withdrawMitigation(mitigation.mitigation_id, reason, "dashboard")
+      await withdrawMitigation(mitigation.mitigation_id, reason)
       // The timeline's withdraw entry carries the actor and reason; refetch it with the record.
       void Promise.allSettled([
         mutate(),

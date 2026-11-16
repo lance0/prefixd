@@ -52,19 +52,19 @@ describe("operator configuration accessible names", () => {
     const name = dialog.getByRole("textbox", { name: "Name" })
     const nameId = name.id
     expect(name).toHaveAttribute("aria-invalid", "true")
-    expect(name).toHaveAccessibleDescription("Must match [a-z0-9-]{1,64}")
+    expect(name).toHaveAccessibleDescription("Must match ^[a-z0-9][a-z0-9-]{0,63}$")
     fireEvent.change(name, { target: { value: "provider-alerts" } })
     expect(name.id).toBe(nameId)
     expect(name).toHaveAttribute("aria-invalid", "false")
-    expect(name).toHaveAccessibleDescription("URL path segment, [a-z0-9-]{1,64}")
+    expect(name).toHaveAccessibleDescription("URL path segment and the adapter's source: lowercase letters, digits and hyphens, starting with a letter or digit")
     fireEvent.change(name, { target: { value: "Invalid Name" } })
-    expect(name).toHaveAccessibleDescription("Must match [a-z0-9-]{1,64}")
+    expect(name).toHaveAccessibleDescription("Must match ^[a-z0-9][a-z0-9-]{0,63}$")
 
     for (const label of ["Description", "Secret env var", "Header", "victim_ip *", "vector", "timestamp", "bps", "pps", "confidence", "source_id", "top_dst_ports", "top_src_ports", "action", "root_path", "default_vector", "confidence_scale", "source_id_prefix"]) {
       expect(dialog.getByRole("textbox", { name: label })).toBeVisible()
     }
 
-    expect(dialog.getByRole("textbox", { name: "Secret env var" })).toHaveAccessibleDescription("Name of the env var holding the HMAC secret (value never sent)")
+    expect(dialog.getByRole("textbox", { name: "Secret env var" })).toHaveAccessibleDescription("A controller environment variable starting with PREFIXD_WEBHOOK_, holding at least 32 bytes. Only the name is saved here.")
     expect(dialog.getByRole("textbox", { name: "victim_ip *" })).toHaveAccessibleDescription('REQUIRED; e.g. "$.target.ip"')
     expect(dialog.getByRole("textbox", { name: /^vector_map/ })).toBeVisible()
     const authentication = dialog.getByRole("combobox", { name: "Authentication" })

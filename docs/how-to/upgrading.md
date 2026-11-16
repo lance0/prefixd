@@ -104,7 +104,16 @@ What changes:
   and delete, and password set or reset need a signed-in session; tokens,
   mTLS clients and `none` mode get 403. Automation that managed operators with
   the shared token, mTLS or `none` mode moves to `prefixdctl operators` on the
-  local database or an Admin session.
+  local database or an Admin session. In `none` and `mtls` mode the
+  dashboard's **Users** tab lists accounts without offering changes, and
+  **API tokens** is shown only to an Admin session.
+- **Mitigate now is a manual mitigation.** The dashboard no longer posts
+  events. Its Mitigate now action opens the manual FlowSpec rule form,
+  prefilled from the playbook for the chosen attack vector, and creates the
+  rule with `POST /v1/mitigations` as the signed-in operator, audited under
+  that operator's username. The rule passes manual admission, not correlation,
+  and no longer counts as a `dashboard` source. The shipped `correlation.yaml`
+  drops its `dashboard` source.
 - **Actor IDs.** Mitigations, acknowledgements, safelist entries and audit rows
   created with an operator or admin token record `token:<name>`, where the
   shared token recorded `bearer-token`. Update audit filters and dashboards
@@ -301,6 +310,9 @@ event, pending operation or audit row.
    - Set `http.auth.mode: credentials` and delete `bearer_token_env`.
    - Remove `PREFIXD_API_TOKEN` from the controller's environment. The shipped
      Compose file and `.env.example` no longer pass it.
+   - Remove any `dashboard` source from `correlation.yaml`, and from
+     `blackhole.detector_sources` and `guardrails.detector_prefix_sources`;
+     no credential posts as `dashboard` any more.
    - Change every webhook adapter with `auth.type: none` to `hmac` or
      `bearer`, map `fields.source_id` on allowlisted HMAC adapters, and rename
      each `secret_env` into the `PREFIXD_WEBHOOK_` namespace with a value of
@@ -330,7 +342,8 @@ event, pending operation or audit row.
       ```
 
    4. Mint one ingest token per detector and the operator tokens for
-      automation and harnesses. Each secret is printed once:
+      automation and harnesses, from **Administration → API tokens** in an
+      Admin session or with `prefixdctl`. Each secret is shown once:
 
       ```bash
       docker compose exec prefixd-rustbgpd prefixdctl tokens create --name fnm-pop1 --scope ingest --source fastnetmon --pop iad1

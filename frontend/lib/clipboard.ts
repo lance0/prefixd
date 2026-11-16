@@ -30,8 +30,9 @@ export async function copyText(text: string): Promise<boolean> {
     // Permissions API unavailable (or query unsupported): attempt the copy.
   }
 
+  const textarea = document.createElement("textarea")
+
   try {
-    const textarea = document.createElement("textarea")
     textarea.value = text
     textarea.setAttribute("readonly", "")
     textarea.style.position = "fixed"
@@ -39,11 +40,12 @@ export async function copyText(text: string): Promise<boolean> {
     textarea.style.opacity = "0"
     document.body.appendChild(textarea)
     textarea.select()
-    const copied = document.execCommand("copy")
-    document.body.removeChild(textarea)
 
-    return copied
+    return document.execCommand("copy")
   } catch {
     return false
+  } finally {
+    // The copied text can be a secret, such as a new API token: never leave it in the DOM.
+    textarea.remove()
   }
 }

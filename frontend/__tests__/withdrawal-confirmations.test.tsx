@@ -221,8 +221,8 @@ describe.each(["list", "detail"] as const)("%s single withdrawal confirmation", 
     fireEvent.click(within(dialog).getByRole("button", { name: "Withdraw" }))
     await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument())
     expect(bodies("POST", `/v1/mitigations/${targets[0].mitigation_id}/withdraw`)).toEqual([
-      { reason: "false positive", operator_id: "dashboard" },
-      { reason: "false positive", operator_id: "dashboard" },
+      { reason: "false positive" },
+      { reason: "false positive" },
     ])
   })
 
@@ -336,8 +336,8 @@ describe("bulk withdrawal confirmation", { timeout: 10_000 }, () => {
     fireEvent.click(within(dialog).getByRole("button", { name: "Withdraw 1" }))
     await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument())
     expect(bodies("POST", "/v1/mitigations/withdraw")).toEqual([
-      { mitigation_ids: targets.map((target) => target.mitigation_id), reason: "incident resolved", operator_id: "dashboard" },
-      { mitigation_ids: [targets[1].mitigation_id], reason: "incident resolved", operator_id: "dashboard" },
+      { mitigation_ids: targets.map((target) => target.mitigation_id), reason: "incident resolved" },
+      { mitigation_ids: [targets[1].mitigation_id], reason: "incident resolved" },
     ])
     await waitFor(() => expect(refreshes("list")).toBe(2))
     await waitFor(() => expect(screen.getByPlaceholderText("Search IP, vector or ID…")).toHaveFocus())
@@ -356,8 +356,8 @@ describe("bulk withdrawal confirmation", { timeout: 10_000 }, () => {
     fireEvent.click(within(dialog).getByRole("button", { name: "Withdraw 2" }))
     await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument())
     expect(bodies("POST", "/v1/mitigations/withdraw")).toEqual([
-      { mitigation_ids: targets.map((target) => target.mitigation_id), reason: "retry whole request", operator_id: "dashboard" },
-      { mitigation_ids: targets.map((target) => target.mitigation_id), reason: "retry whole request", operator_id: "dashboard" },
+      { mitigation_ids: targets.map((target) => target.mitigation_id), reason: "retry whole request" },
+      { mitigation_ids: targets.map((target) => target.mitigation_id), reason: "retry whole request" },
     ])
   })
 

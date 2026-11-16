@@ -1471,7 +1471,7 @@ mod tests {
         ));
         config.detector_sources = vec!["fastnetmon".into()];
         check_detector_source(&config, "fastnetmon").unwrap();
-        for refused in ["dashboard", "FastNetMon", "fastnetmon ", ""] {
+        for refused in ["radware", "FastNetMon", "fastnetmon ", ""] {
             assert!(
                 check_detector_source(&config, refused).is_err(),
                 "{refused}"

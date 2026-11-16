@@ -22,9 +22,11 @@ import { useMitigations, useEvents } from "@/hooks/use-api"
 interface CommandPaletteProps {
   open: boolean
   onOpenChange: (open: boolean) => void
+  /** Viewers cannot create mitigations, so Mitigate now is not offered. */
+  canMitigate?: boolean
 }
 
-export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
+export function CommandPalette({ open, onOpenChange, canMitigate = false }: CommandPaletteProps) {
   const router = useRouter()
   const [search, setSearch] = useState("")
   
@@ -169,13 +171,13 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
 
           <CommandSeparator />
           <CommandGroup heading="Quick actions">
-            <CommandItem
+            {canMitigate && <CommandItem
               onSelect={() => runCommand(() => router.push("/mitigations?mitigate=true"))}
               className="text-sm"
             >
               <ShieldAlert className="mr-2 h-3 w-3 text-muted-foreground" />
               <span>Mitigate now</span>
-            </CommandItem>
+            </CommandItem>}
             <CommandItem
               onSelect={() => runCommand(() => router.push("/mitigations?status=active"))}
               className="text-sm"

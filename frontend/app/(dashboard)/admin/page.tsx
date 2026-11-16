@@ -48,6 +48,7 @@ import {
   Key,
 } from "lucide-react"
 import { PageHeader } from "@/components/dashboard/page-header"
+import { ApiTokensPanel } from "@/components/dashboard/api-tokens"
 import { EmptyState, ErrorState, LoadingRows } from "@/components/dashboard/states"
 import { Tag } from "@/components/dashboard/status-pill"
 import { MISSING } from "@/lib/format"
@@ -100,8 +101,9 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
   )
 }
 
-const TABS = ["status", "safelist", "users"] as const
-const TABS_WITHOUT_USERS = ["status", "safelist"] as const
+const TABS_ALL = ["status", "safelist", "users", "tokens"] as const
+const TABS_WITH_USERS = ["status", "safelist", "users"] as const
+const TABS_BASE = ["status", "safelist"] as const
 
 export default function AdminPage() {
   const id = useId()
@@ -109,12 +111,13 @@ export default function AdminPage() {
   const { mutate } = useSWRConfig()
   const { operator } = useAuth()
   const permissions = usePermissions()
-  const [activeTab, setActiveTab] = useTabParam(permissions.canManageUsers ? TABS : TABS_WITHOUT_USERS)
+  // Tokens need an Admin session; `none` mode and mTLS still list operators but cannot change them.
+  const [activeTab, setActiveTab] = useTabParam(permissions.canManageIdentity ? TABS_ALL : permissions.canListOperators ? TABS_WITH_USERS : TABS_BASE)
   const { data: health, error: healthError, isLoading: healthLoading, isStale: healthStale, mutate: mutateHealth } = useHealthDetail()
   const { data: stats, error: statsError, isLoading: statsLoading, mutate: mutateStats } = useStats()
   const { data: safelist, error: safelistError, isLoading: safelistLoading, mutate: mutateSafelist } = useSafelist()
   const { data: pops, error: popsError, isLoading: popsLoading, mutate: mutatePops } = usePops()
-  const { data: operators, error: operatorsError, isLoading: operatorsLoading, mutate: mutateOperators } = useOperators(permissions.canManageUsers)
+  const { data: operators, error: operatorsError, isLoading: operatorsLoading, mutate: mutateOperators } = useOperators(permissions.canListOperators)
 
   const [newPrefix, setNewPrefix] = useState("")
   const [newReason, setNewReason] = useState("")
@@ -144,7 +147,7 @@ export default function AdminPage() {
     setSafelistError2(null)
     
     try {
-      await addSafelist(newPrefix.trim(), newReason.trim(), "dashboard")
+      await addSafelist(newPrefix.trim(), newReason.trim())
       await mutateSafelist()
       setNewPrefix("")
       setNewReason("")
@@ -240,7 +243,7 @@ export default function AdminPage() {
     <div className="space-y-6">
       <PageHeader
         title="Administration"
-        description="Controller health, the safelist and operator accounts."
+        description="Controller health, the safelist, operator accounts and API tokens."
         actions={
           <>
             {reloadResult && (
@@ -267,8 +270,11 @@ export default function AdminPage() {
               <Badge variant="secondary">{safelist.length}</Badge>
             )}
           </TabsTrigger>
-          {permissions.canManageUsers && (
+          {permissions.canListOperators && (
             <TabsTrigger value="users">Users</TabsTrigger>
+          )}
+          {permissions.canManageIdentity && (
+            <TabsTrigger value="tokens">API tokens</TabsTrigger>
           )}
         </TabsList>
 
@@ -506,15 +512,17 @@ export default function AdminPage() {
         </TabsContent>
 
         {/* Users Tab (admin only) */}
-        {permissions.canManageUsers && (
+        {permissions.canListOperators && (
           <TabsContent value="users" className="mt-4">
             <Card>
               <CardHeader>
                 <div className="flex items-center justify-between">
                   <CardDescription className="text-pretty">
-                    Manage operator accounts and permissions.
+                    {permissions.canManageIdentity
+                      ? "Manage operator accounts and permissions."
+                      : "Operator accounts. Creating or deleting an account and setting a password need a signed-in Admin session; without one, use prefixdctl operators on the controller host."}
                   </CardDescription>
-                  <Dialog open={showCreateUser} onOpenChange={setShowCreateUser}>
+                  {permissions.canManageIdentity && <Dialog open={showCreateUser} onOpenChange={setShowCreateUser}>
                     <DialogTrigger asChild>
                       <Button size="sm">
                         <Plus className="size-4 mr-1" />
@@ -584,7 +592,7 @@ export default function AdminPage() {
                         </Button>
                       </DialogFooter>
                     </DialogContent>
-                  </Dialog>
+                  </Dialog>}
                 </div>
               </CardHeader>
               <CardContent className="space-y-4">
@@ -623,6 +631,7 @@ export default function AdminPage() {
                               {op.last_login_at ? <time dateTime={op.last_login_at}>{formatTime(op.last_login_at)}</time> : MISSING}
                             </td>
                             <td className="py-2 px-2 flex gap-1">
+                              {permissions.canManageIdentity && <>
                               <Button
                                 variant="ghost"
                                 size="sm"
@@ -664,6 +673,7 @@ export default function AdminPage() {
                                   </AlertDialogContent>
                                 </AlertDialog>
                               )}
+                              </>}
                             </td>
                           </tr>
                         ))}
@@ -680,6 +690,12 @@ export default function AdminPage() {
                 )}
               </CardContent>
             </Card>
+          </TabsContent>
+        )}
+
+        {permissions.canManageIdentity && (
+          <TabsContent value="tokens" className="mt-4">
+            <ApiTokensPanel />
           </TabsContent>
         )}
       </Tabs>

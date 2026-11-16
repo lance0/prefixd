@@ -5,6 +5,8 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 interface KeyboardShortcutsModalProps {
   open: boolean
   onOpenChange: (open: boolean) => void
+  /** Viewers cannot create mitigations, so the Mitigate now shortcut is not listed. */
+  canMitigate?: boolean
 }
 
 const shortcuts = [
@@ -33,7 +35,7 @@ const shortcuts = [
   },
 ]
 
-export function KeyboardShortcutsModal({ open, onOpenChange }: KeyboardShortcutsModalProps) {
+export function KeyboardShortcutsModal({ open, onOpenChange, canMitigate = false }: KeyboardShortcutsModalProps) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-md bg-card border-border">
@@ -49,7 +51,7 @@ export function KeyboardShortcutsModal({ open, onOpenChange }: KeyboardShortcuts
                 {section.category}
               </h3>
               <div className="space-y-1">
-                {section.items.map((shortcut) => (
+                {section.items.filter((shortcut) => canMitigate || shortcut.description !== "Mitigate now").map((shortcut) => (
                   <div
                     key={shortcut.description}
                     className="flex items-center justify-between py-1.5 border-b border-border/50 last:border-0"

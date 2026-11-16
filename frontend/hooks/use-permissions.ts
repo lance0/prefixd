@@ -32,10 +32,14 @@ export function usePermissions() {
     // Permission checks (deny-by-default until settled)
     canWithdraw: authDisabled || role === "admin" || role === "operator",
     canManageSafelist: authDisabled || role === "admin",
-    canManageUsers: authDisabled || role === "admin",
+    // Listing accounts: every mTLS client is Admin to the controller, so it can read them too.
+    canListOperators: authDisabled || (settled && health?.auth_mode === "mtls") || role === "admin",
     canReloadConfig: authDisabled || role === "admin",
     canEditPlaybooks: authDisabled || role === "admin",
     canEditAlerting: authDisabled || role === "admin",
+    // Identity management (tokens, operator accounts, passwords) needs a signed-in
+    // Admin session: the controller refuses `none` mode and mTLS clients with 403.
+    canManageIdentity: settled && health?.auth_mode === "credentials" && role === "admin",
 
     // Current role (for display)
     role: authDisabled ? "admin" : role,
