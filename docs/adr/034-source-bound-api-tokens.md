@@ -167,9 +167,8 @@ Precedence, in every mode that accepts tokens:
 - **Session-only routes.** The WebSocket feed and the `/v1/auth/*` routes stay
   session-only.
 
-`prefixdctl` never sends both credentials. A configured token wins, and
-passing `--token` (or `PREFIXD_TOKEN`) together with `--session-cookie` is a
-usage error, not a silent choice.
+`prefixdctl` never sends both credentials. Passing `--token` (or
+`PREFIXD_TOKEN`) together with `--session-cookie` is a usage error.
 
 Tokens are verified in `credentials` mode. `none` mode stays anonymous Admin
 and ignores credentials. `mtls` mode is covered in
@@ -211,7 +210,7 @@ fn authorize_ingest(principal: &Principal, claimed: &str) -> Result<SourceGrant,
 
 | Principal | Rule | Grant |
 | --- | --- | --- |
-| Ingest token | `claimed` must equal the token's source; the token's `pop` must be null or equal this controller's | bound to that source |
+| Ingest token | `claimed` must equal the token's source. POP binding was already checked at verification ([section 1](#1-token-model)). | bound to that source |
 | Admin (session or admin token), mTLS, `none` | any `claimed` | bound to `claimed` |
 | Operator (session or operator token) | refused | none |
 | Viewer | refused, as today | none |
@@ -278,10 +277,21 @@ Several effects follow from that one rule:
 
 ### 5. Configuration refusals
 
-Correlation configuration is loaded at startup, on reload and through the
-Admin route `PUT /v1/config/correlation`. Each refusal below applies at all
-three entry points, so an Admin cannot reintroduce a refused shape at runtime.
-`CorrelationConfig::validate` therefore takes the auth mode as an argument.
+The refusals below depend on two files. Webhook adapters and source modes
+live in the correlation configuration. The auth mode and both allowlists,
+`blackhole.detector_sources` and `guardrails.detector_prefix_sources`, live in
+`prefixd.yaml`.
+
+`CorrelationConfig::validate` therefore takes the auth mode and both
+allowlists as arguments. It runs whenever either input changes:
+
+- at startup;
+- on reload of either file;
+- on the Admin route `PUT /v1/config/correlation`.
+
+Without this, adding an HMAC adapter's name to an allowlist in `prefixd.yaml`
+would bypass the `source_id` refusal. An Admin cannot reintroduce a refused
+shape at runtime through any of these paths.
 
 - **Unauthenticated webhook adapters.** A webhook adapter with
   `auth.type: none` would let anyone who can reach the controller claim the
@@ -380,7 +390,9 @@ respect. It is removed, not deprecated.
 - **Client variable renamed.** The client-side variable becomes
   `PREFIXD_TOKEN`, the name the FastNetMon script already uses. Running
   `prefixdctl` inside the controller container then does not set the variable
-  the controller warns about.
+  the controller warns about. When `PREFIXD_API_TOKEN` is set but
+  `PREFIXD_TOKEN` is not, `prefixdctl` warns that the old variable is no longer
+  read. A stale shell then gets a clear message instead of a bare 401.
 - **The intended break.** Operator sessions and operator tokens lose every
   ingest route.
 
@@ -573,6 +585,10 @@ The bundled script becomes an `ingest` client.
 - curl reads the `Authorization` header from a config passed on stdin
   (`curl -K -`), never from argv. That keeps the token out of `ps` and
   `/proc/*/cmdline`.
+- Every POST sets `--connect-timeout` (`EVENT_CONNECT_TIMEOUT_SECONDS`,
+  default 5) and `--max-time` (`EVENT_MAX_TIME_SECONDS`, default 15). Each
+  attempt is therefore bounded, and so is the time a ban holds its lock. The
+  current script sets neither.
 
 #### Ban
 
@@ -587,8 +603,12 @@ The bundled script becomes an `ingest` client.
 
 #### Unban
 
-1. The script takes the same lock, waiting at most the ban retry budget, so it
-   posts only after any ban still retrying for that address has finished.
+1. The script takes the same lock, so it posts only after any ban still
+   retrying for that address has finished. It waits at most the ban's worst
+   case: `EVENT_POST_ATTEMPTS × (EVENT_MAX_TIME_SECONDS +
+   EVENT_POST_DELAY_SECONDS)`. If the wait times out, the unban exits non-zero
+   without posting, logs the timeout, and keeps the state file. The rule then
+   runs to its TTL unless an operator withdraws it.
 2. It reads the state file and posts
    `{"action": "unban", "source": "fastnetmon", "event_id": <id>, ...}` to
    `/v1/events`. Like a ban, it retries only on connection errors and 503.
@@ -597,6 +617,14 @@ The bundled script becomes an `ingest` client.
    still be retrying: a withdrawal, `no_active_mitigation` and `not_found`.
 4. It keeps the file in two cases: a 4xx, so a corrected rerun can still pair,
    or a lock wait that timed out.
+
+The lock does not order the two processes. FastNetMon starts the ban and unban
+scripts independently. An unban spawned at nearly the same moment as its ban
+can take the lock first, find no state file, and exit as described under
+"No state file" below, leaving the rule to its TTL. Real ban and unban
+notifications are separated by the ban time, so this race needs nearly
+simultaneous calls. Tests and the CI lane must wait for the ban's outcome
+before triggering the unban.
 
 #### Edge cases
 
@@ -697,7 +725,10 @@ outcome:
   - whether `fcli set blackhole` fires the callback and the scripts.
 - FastNetMon Community image:
   - whether it ships `curl`;
-  - whether the stdin of a manual ban matches an automatic ban's.
+  - whether it ships `flock(1)`;
+  - whether the stdin of a manual ban matches an automatic ban's;
+  - whether `fastnetmon_api_client ban` can re-ban an address that is already
+    banned.
 
 ### 14. Secret exposure
 
@@ -750,13 +781,21 @@ implementation:
   tracked separately. The lane runs the official image,
   `ghcr.io/pavel-odintsov/fastnetmon-community`, pinned by digest (GPL-2.0, no
   license needed). It drives the bundled script with
-  `fastnetmon_api_client ban <ip>` and `unban <ip>`. Those calls run the same
-  per-host actions, and therefore the same notify-script contract, as a
-  detected attack, without depending on detection timing. The lane asserts:
+  `fastnetmon_api_client ban <ip>` and `unban <ip>`. Those calls reach the
+  same per-host action function as a detected attack, without depending on
+  detection timing. The stdin they produce may differ from a detected
+  attack's; that is an open check in
+  [section 13](#13-credential-delivery-per-detector). The lane waits for each
+  ban's outcome before it triggers the unban
+  ([section 12](#12-bundled-fastnetmon-scripts)). The lane asserts:
   - the ban creates a mitigation;
-  - the unban withdraws it, including after an extending re-ban;
+  - the unban withdraws it;
   - a token bound to another source gets 403;
   - the token never appears in argv.
+
+  The extending re-ban case runs the bundled script directly, with two bans
+  and then an unban. Whether `fastnetmon_api_client` can re-ban an address
+  that is already banned is not yet known (an open check in section 13).
 - **Advanced by hand.** FastNetMon Advanced needs a license that renews
   against the vendor's servers, so it is qualified by hand under a trial
   license, with a dated receipt for the host and hostgroup scripts.
@@ -946,8 +985,9 @@ separately:
      validation in `operators create`;
    - removal of `bearer` mode, `bearer_token_env` and the controller's read of
      `PREFIXD_API_TOKEN`, with the startup warning;
-   - renaming the client variable to `PREFIXD_TOKEN`, and making the CLI
-     refuse a token and a session cookie together.
+   - renaming the client variable to `PREFIXD_TOKEN`, with a warning when only
+     the old one is set, and making the CLI refuse a token and a session
+     cookie together.
 2. **Source enforcement.**
    - `authorize_ingest` and `SourceGrant` on every ingest route and the
      corroborator write path;
