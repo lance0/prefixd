@@ -362,12 +362,57 @@ History keeps the spelling the detector sent: events, audit rows and ended
 mitigations are evidence and are not rewritten. Lookups by address compare
 addresses instead of text, so the `victim_ip` filter, IP history and incident
 reports find every spelling of one address, including an IPv4-mapped one for
-its IPv4 address. Migration 023 adds a `prefixd_victim_inet` function and
-indexes `events` and `mitigations` by it; building the events index takes time
-proportional to the stored events, during which ingest waits, so expect a
-longer first start on a large history.
+its IPv4 address. Migration 023 adds a `prefixd_victim_inet` function, indexes
+`events` and `mitigations` by it, and drops `idx_events_victim_ingested`,
+which nothing reads any more.
 
-The migration leaves three kinds of live row as stored:
+### Event index build time
+
+Migration 023 builds the events index while no controller runs, and that time
+counts against the leases: with `leased_flowspec: true` and the default
+`lease_seconds: 60`, rustbgpd withdraws every leased rule and blackhole once a
+lease lapses. The build takes roughly 2 seconds per million events on a warm
+cache, and several times that on cold or slow storage. Check the size of the
+event history first:
+
+```sql
+SELECT pg_size_pretty(pg_relation_size('events')), count(*) FROM events;
+```
+
+On a large history, build the index before the window while the old
+controller runs. The build does not block ingest. Create the function first,
+exactly as migration 023 does:
+
+```sql
+CREATE OR REPLACE FUNCTION prefixd_victim_inet(victim TEXT) RETURNS inet
+LANGUAGE plpgsql IMMUTABLE STRICT PARALLEL RESTRICTED
+SET search_path = pg_catalog AS $$
+BEGIN
+    RETURN victim::inet;
+EXCEPTION WHEN invalid_text_representation THEN
+    RETURN NULL;
+END
+$$;
+```
+
+Then build the index without blocking writes. `CREATE INDEX CONCURRENTLY`
+cannot run inside a transaction block, so run it on its own:
+
+```sql
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_events_victim_inet
+    ON events (prefixd_victim_inet(victim_ip), ingested_at);
+```
+
+If a concurrent build fails it leaves an invalid index; drop it with
+`DROP INDEX CONCURRENTLY idx_events_victim_inet` and run it again. Migration
+023's `CREATE OR REPLACE FUNCTION` and `CREATE INDEX IF NOT EXISTS` then find
+both in place and do nothing, and the window covers only the live-row rewrite
+and the small mitigations index. An older controller is unaffected by the
+function and index.
+
+### Live rows the migration leaves
+
+Migration 023 leaves three kinds of live row as stored:
 
 - An open signal group whose canonical key already has an open group keeps
   its old spelling until its window closes, because only one open group may
