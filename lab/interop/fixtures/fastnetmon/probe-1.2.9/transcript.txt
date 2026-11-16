@@ -1,0 +1,132 @@
+FastNetMon Community probe, 2026-11-16T04:10:43Z
+base image: ghcr.io/pavel-odintsov/fastnetmon-community:1.2.9@sha256:c154b5b5fd74286719c1c1b97d02157a559926b7749fb5afa958d5faccbd5a0e
+probe image: prefixd-fastnetmon:interop sha256:bef9b4a47ea4cbabae5c8dee6fb19c8fec15b3ca42d88a98d8eca646ea29c28f
+
+$ docker run --rm --cpuset-cpus 24-31,56-63 --entrypoint bash ghcr.io/pavel-odintsov/fastnetmon-community:1.2.9@sha256:c154b5b5fd74286719c1c1b97d02157a559926b7749fb5afa958d5faccbd5a0e -c 'for c in curl flock jq python3 wget bash uuidgen mktemp mv awk; do printf "%s: " "$c"; command -v "$c" || echo MISSING; done'
+curl: MISSING
+flock: /usr/bin/flock
+jq: MISSING
+python3: MISSING
+wget: /usr/bin/wget
+bash: /usr/bin/bash
+uuidgen: MISSING
+mktemp: /usr/bin/mktemp
+mv: /usr/bin/mv
+awk: /usr/bin/awk
+[exit 0]
+
+$ docker run --rm --cpuset-cpus 24-31,56-63 --entrypoint bash prefixd-fastnetmon:interop -c 'for c in curl flock jq python3 wget bash uuidgen mktemp mv awk; do printf "%s: " "$c"; command -v "$c" || echo MISSING; done; ls -d /var/lib/prefixd-fastnetmon /var/log/fastnetmon_attacks'
+curl: /usr/bin/curl
+flock: /usr/bin/flock
+jq: MISSING
+python3: MISSING
+wget: /usr/bin/wget
+bash: /usr/bin/bash
+uuidgen: MISSING
+mktemp: /usr/bin/mktemp
+mv: /usr/bin/mv
+awk: /usr/bin/awk
+ls: cannot access '/var/lib/prefixd-fastnetmon': No such file or directory
+/var/log/fastnetmon_attacks
+[exit 2]
+
+$ docker exec prefixd-fnm-probe bash -c 'flock --version'
+flock from util-linux 2.39.3
+[exit 0]
+
+$ docker exec prefixd-fnm-probe bash -c 'flock -x /tmp/l -c "touch /tmp/held; sleep 5" & until [ -e /tmp/held ]; do sleep 0.1; done; start=$(date +%s%N); flock -w 1 -x /tmp/l true; rc=$?; echo "flock -w 1 -x returned $rc after $(( ($(date +%s%N) - start) / 1000000 )) ms"; wait'
+flock -w 1 -x returned 1 after 1001 ms
+[exit 0]
+
+$ docker exec prefixd-fnm-probe bash -c 'printf "url = \"http://127.0.0.1:9/from-stdin-config\"\n" | curl -sS -K - --connect-timeout 2'
+curl: (7) Failed to connect to 127.0.0.1 port 9 after 0 ms: Couldn't connect to server
+[exit 7]
+
+$ docker exec prefixd-fnm-probe /opt/fastnetmon-community/app/bin/fastnetmon_api_client ban 203.0.113.50
+[exit 0]
+
+$ docker exec prefixd-fnm-probe /opt/fastnetmon-community/app/bin/fastnetmon_api_client ban 203.0.113.50
+[exit 0]
+
+$ docker exec prefixd-fnm-probe /opt/fastnetmon-community/app/bin/fastnetmon_api_client get_banlist
+203.0.113.50/32
+[exit 0]
+
+$ docker exec prefixd-fnm-probe /opt/fastnetmon-community/app/bin/fastnetmon_api_client ban 198.51.100.1
+Query failed This IP does not belong to our subnets
+[exit 0]
+
+$ docker exec prefixd-fnm-probe /opt/fastnetmon-community/app/bin/fastnetmon_api_client unban 203.0.113.50
+[exit 0]
+
+$ docker exec prefixd-fnm-probe /opt/fastnetmon-community/app/bin/fastnetmon_api_client unban 203.0.113.50
+Query failed 
+[exit 0]
+
+$ docker exec prefixd-fnm-probe /opt/fastnetmon-community/app/bin/fastnetmon_api_client ban 2001:db8:113::10
+[exit 0]
+
+$ docker exec prefixd-fnm-probe /opt/fastnetmon-community/app/bin/fastnetmon_api_client unban 2001:db8:113::10
+[exit 0]
+
+$ python3 -I lab/interop/netflow_v5.py 172.17.0.3:2055 203.0.113.60 --seconds 45
+[exit 0]
+
+notify calls during the 45 s flood: 1
+notify calls after the flood and the timer unban: 2
+
+$ docker exec prefixd-fnm-probe bash -c 'grep -E '\''detected attack|Call script|Skip unban|API'\'' /var/log/fastnetmon.log'
+2026-11-16 04:10:44,157 [INFO] Launch API server
+2026-11-16 04:10:44,161 [INFO] API server listening on 127.0.0.1:50052
+2026-11-16 04:10:44,213 [INFO] API we asked for banlist
+2026-11-16 04:10:49,437 [INFO] API we asked for ban for IP: 203.0.113.50
+2026-11-16 04:10:49,437 [INFO] API call ban handlers manually
+2026-11-16 04:10:49,438 [INFO] Call script for ban client: 203.0.113.50
+2026-11-16 04:10:49,511 [INFO] API we asked for ban for IP: 203.0.113.50
+2026-11-16 04:10:49,511 [INFO] API call ban handlers manually
+2026-11-16 04:10:49,511 [INFO] Call script for ban client: 203.0.113.50
+2026-11-16 04:10:49,585 [INFO] API we asked for banlist
+2026-11-16 04:10:49,659 [INFO] API we asked for ban for IP: 198.51.100.1
+2026-11-16 04:10:49,729 [INFO] API: We asked for unban for IP: 203.0.113.50
+2026-11-16 04:10:49,729 [INFO] Call script for unban client: 203.0.113.50
+2026-11-16 04:10:49,799 [INFO] API: We asked for unban for IP: 203.0.113.50
+2026-11-16 04:10:49,799 [ERROR] API: Could not find IPv4 address in ban list
+2026-11-16 04:10:49,866 [INFO] API we asked for ban for IP: 2001:db8:113::10
+2026-11-16 04:10:49,866 [INFO] API call ban handlers manually
+2026-11-16 04:10:49,866 [INFO] Call script for ban client: 2001:0db8:0113::0010
+2026-11-16 04:10:49,938 [INFO] API: We asked for unban for IP: 2001:db8:113::10
+2026-11-16 04:10:49,938 [INFO] Call script for unban client: 2001:0db8:0113::0010
+2026-11-16 04:10:50,158 [INFO] We have detected attack for 203.0.113.60 using packets per second threshold in direction unknown host group: global
+2026-11-16 04:10:51,159 [INFO] Call script for ban client: 203.0.113.60
+2026-11-16 04:11:14,158 [INFO] Skip unban operation for 203.0.113.60 because attack is still active
+2026-11-16 04:11:24,158 [INFO] Skip unban operation for 203.0.113.60 because attack is still active
+2026-11-16 04:11:34,158 [INFO] Skip unban operation for 203.0.113.60 because attack is still active
+2026-11-16 04:11:44,158 [INFO] Skip unban operation for 203.0.113.60 because attack is still active
+2026-11-16 04:11:54,158 [INFO] Call script for unban client: 203.0.113.60
+[exit 0]
+
+$ sh -c 'for f in *.args; do printf "%s: " "$f"; tr "\n" " " <"$f"; echo; done; wc -c *.stdin; md5sum *.stdin'
+01-203.0.113.50-ban.args: 203.0.113.50 other 0 ban 
+02-203.0.113.50-ban.args: 203.0.113.50 other 0 ban 
+03-203.0.113.50-unban.args: 203.0.113.50 other 0 unban 
+04-2001-0db8-0113--0010-ban.args: 2001:0db8:0113::0010 other 0 ban 
+05-2001-0db8-0113--0010-unban.args: 2001:0db8:0113::0010 other 0 unban 
+06-203.0.113.60-ban.args: 203.0.113.60 incoming 3625 ban 
+07-203.0.113.60-unban.args: 203.0.113.60 incoming 3625 unban 
+1350 01-203.0.113.50-ban.stdin
+1350 02-203.0.113.50-ban.stdin
+   0 03-203.0.113.50-unban.stdin
+1345 04-2001-0db8-0113--0010-ban.stdin
+   0 05-2001-0db8-0113--0010-unban.stdin
+5607 06-203.0.113.60-ban.stdin
+   0 07-203.0.113.60-unban.stdin
+9652 total
+507ecac6464619b296a84622e3f8fbdf  01-203.0.113.50-ban.stdin
+507ecac6464619b296a84622e3f8fbdf  02-203.0.113.50-ban.stdin
+d41d8cd98f00b204e9800998ecf8427e  03-203.0.113.50-unban.stdin
+6f6569c479ba072c686cac0caa09c769  04-2001-0db8-0113--0010-ban.stdin
+d41d8cd98f00b204e9800998ecf8427e  05-2001-0db8-0113--0010-unban.stdin
+8796dd2a3794a42d80649982641c9bd4  06-203.0.113.60-ban.stdin
+d41d8cd98f00b204e9800998ecf8427e  07-203.0.113.60-unban.stdin
+[exit 0]
+

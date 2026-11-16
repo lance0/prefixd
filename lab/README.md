@@ -174,6 +174,37 @@ reports; FRR 10.7.1 installed none of these rules. The dated
 [FRR amplification receipt](../docs/reference/qualification/amplification-frr-2026-10-19.md)
 records the results.
 
+### FastNetMon Community lane
+
+`just interop-fastnetmon` runs `interop/run-fastnetmon.sh`, and CI runs it as
+the Interop job `FastNetMon Community (rustbgpd/FRR)`. The topology,
+`interop/fastnetmon-rustbgpd.clab.yml`, is the rustbgpd FRR lab plus a
+FastNetMon Community 1.2.9 node. Its image, `interop/fastnetmon.Dockerfile`,
+pins the official image by digest and adds `curl`. FastNetMon runs the
+bundled `scripts/prefixd-fastnetmon.sh` as its notify script and posts to
+prefixd on loopback. Containers are named `prefixd-fnm-*`. prefixd runs in
+`none` auth mode until source-bound ingest tokens land;
+`ingest_credential()` in the runner is the one place that changes.
+
+`interop/fastnetmon_frr.py` waits for the script's outcome line after each
+trigger, then checks the mitigation and FRR's tables with the FlowSpec oracle.
+The steps are:
+
+1. `fastnetmon_api_client ban` and `unban` for an IPv4 victim.
+2. The same ban twice, which extends one mitigation, then an unban.
+3. The script run directly, twice, with captured detected-ban stdin, then an
+   unban.
+4. IPv6 ban and unban.
+5. A NetFlow v5 flood from `interop/netflow_v5.py`, which FastNetMon detects,
+   then FastNetMon's own unban once its 20 s `ban_time` has passed.
+
+The receipt lands in `target/interop/fastnetmon-rustbgpd-<UTC stamp>/`. It
+holds the script log, FastNetMon's log and attack-details files, and prefixd's
+events. `interop/fastnetmon-probe.sh OUT_DIR` answers the FastNetMon lab checks
+in a single recording container. The dated
+[FastNetMon Community receipt](../docs/reference/qualification/fastnetmon-community-2026-11-16.md)
+records both.
+
 ## Nokia
 
 **SR Linux.** `interop/srlinux-probe.clab.yml` peers SR Linux 25.10.1 with
