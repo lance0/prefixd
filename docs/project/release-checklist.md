@@ -164,6 +164,18 @@ Check these on the release candidate before opening the release PR:
 - [ ] Interop, including the FastNetMon lane, passes on the release candidate.
       Record its run URL and commit. After merge, the release gate also requires
       a successful Interop push run on the exact release commit.
+- [ ] The [Compose quickstart](../tutorials/quickstart.md) succeeds on a fresh,
+      isolated stack for each speaker profile, `rustbgpd` and `gobgp`, using the
+      candidate controller and dashboard images. Verify first-Admin creation,
+      scoped-token bootstrap and readiness. Record the profile, image identities
+      and results; `just gate` does not run these stacks.
+- [ ] Browser smoke passes against the candidate controller and dashboard.
+      In **Administration → API tokens**, create and revoke a scoped token as
+      an Admin. Open **Mitigate now**, submit the manual FlowSpec
+      form, and confirm the mitigation records the signed-in operator as actor.
+      Withdraw it through the confirmation flow and inspect the audit record.
+      Record these browser results separately from the dashboard unit tests
+      and build in `just gate`.
 - [ ] The upgrade proof passes. Upgrade from the previous release tag to the
       candidate with a real previous-release database. Build that database
       from the tag; it should hold active manual and detector mitigations and a
@@ -172,9 +184,15 @@ Check these on the release candidate before opening the release PR:
       - migrations apply;
       - any required adoption step runs once;
       - authenticated health is healthy;
-      - the first reconciliation succeeds without repairs;
-      - the same mitigation IDs stay active;
-      - the speaker RIB is unchanged.
+      - the first reconciliation succeeds; record expected leased-rule startup
+        re-adds separately, with no missing-rule or action-drift repairs;
+      - the same mitigation IDs stay active, with pending withdrawal operations
+        retaining their original rule, actor, reason and operation ID;
+      - retained speaker rules keep their payload, owner and lease generation,
+        and foreign rules are neither changed nor renewed;
+      - for leased rules, the first confirmed lease extension finishes before
+        the previous lease deadline, measured from the actual remaining lease
+        at controller stop, with observation gaps stated.
 
       The guide must have a section for this version pair.
 - [ ] Known limitations are reviewed and stated in the release notes.
@@ -193,7 +211,8 @@ is missing, undated or empty.
       first `###` group. It leads the release body.
 - [ ] Keep the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) groups
       already in use: `### Upgrade notes` first when an upgrade needs operator
-      action, then `Security`, `Added`, `Changed`, `Fixed` and `Documentation`.
+      action, then `Known limitations`, `Security`, `Added`, `Changed` and
+      `Fixed`. Omit empty groups.
       Upgrade notes link the matching [upgrade guide](../how-to/upgrading.md)
       section.
 - [ ] Review `git log vPREV..HEAD --oneline`. List every user- or

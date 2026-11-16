@@ -1144,8 +1144,9 @@ async fn victim_inet_function_runs_under_forced_parallelism() {
 /// concurrent build can run while the old controller does.
 #[tokio::test]
 async fn the_guides_concurrent_index_build_matches_migration_023() {
-    let [function, index] = &guide_queries("### Event index build time")[1..] else {
-        panic!("the size query, the function and the index");
+    let [size, function, index, validation] = &guide_queries("### Event index build time")[..]
+    else {
+        panic!("the size query, the function, the index and its validation");
     };
     assert!(VICTIM_MIGRATION.contains(function.as_str()), "{function}");
     assert!(
@@ -1167,12 +1168,61 @@ async fn the_guides_concurrent_index_build_matches_migration_023() {
     .execute(&setup)
     .await
     .unwrap();
-    for (statement, label) in [(function, "function"), (index, "index")] {
-        sqlx::raw_sql(statement)
-            .execute(&setup)
-            .await
-            .unwrap_or_else(|error| panic!("the guide's {label}: {error}"));
-    }
+    sqlx::raw_sql(
+        "INSERT INTO events (event_id, source, event_timestamp, ingested_at, victim_ip, vector,
+             top_dst_ports_json, action)
+         SELECT gen_random_uuid(), 'prebuild', now(), now(), '203.0.113.10', 'udp_flood', '[]', 'ban'
+         FROM generate_series(1, 2);",
+    )
+    .execute(&setup)
+    .await
+    .expect("seed duplicate victim history");
+    let (_, count): (String, i64) = sqlx::query_as(size)
+        .fetch_one(&setup)
+        .await
+        .expect("the guide's size query");
+    assert_eq!(count, 2);
+    sqlx::raw_sql(function)
+        .execute(&setup)
+        .await
+        .expect("the guide's function");
+
+    // A failed concurrent build leaves a real invalid index with the same name.
+    let error = sqlx::raw_sql(&index.replace("CREATE INDEX", "CREATE UNIQUE INDEX"))
+        .execute(&setup)
+        .await
+        .expect_err("duplicate history refuses the unique concurrent index");
+    assert_eq!(
+        error.as_database_error().unwrap().code().as_deref(),
+        Some("23505"),
+        "{error}"
+    );
+    let invalid: Vec<(bool, String)> = sqlx::query_as(validation)
+        .fetch_all(&setup)
+        .await
+        .expect("the guide's validation of the failed build");
+    assert_eq!(invalid.len(), 1, "the failed build left an index");
+    assert!(!invalid[0].0, "the guide must detect the invalid index");
+    sqlx::raw_sql("DROP INDEX CONCURRENTLY idx_events_victim_inet")
+        .execute(&setup)
+        .await
+        .expect("drop the invalid index before rebuilding");
+    sqlx::raw_sql(index)
+        .execute(&setup)
+        .await
+        .expect("the guide's index");
+    let valid: Vec<(bool, String)> = sqlx::query_as(validation)
+        .fetch_all(&setup)
+        .await
+        .expect("the guide's validation of the rebuilt index");
+    assert_eq!(
+        valid,
+        vec![(
+            true,
+            "CREATE INDEX idx_events_victim_inet ON public.events USING btree (prefixd_victim_inet(victim_ip), ingested_at)".to_owned(),
+        )],
+        "the guide must confirm the valid expression and columns"
+    );
     let oid = || async {
         sqlx::query_scalar::<_, i64>("SELECT 'idx_events_victim_inet'::regclass::oid::bigint")
             .fetch_one(&setup)

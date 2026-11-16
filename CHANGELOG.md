@@ -7,7 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.28.0] - 2026-11-16
+
 ### Upgrade notes
+
+- Follow the ordered [0.27.0 → 0.28.0 procedure](docs/how-to/upgrading.md#v0270--0280)
+  for the database-wide maintenance window. Prepare detector scripts and private
+  token-file paths before stopping the old controllers; mint tokens only after
+  migration 022 creates `api_tokens`. `prefixdctl tokens create` does not migrate
+  the database. Include shutdown, migration and the first confirmed lease
+  extension in the downtime budget, and prepare the event index concurrently
+  when needed.
 
 - **Alertmanager notifications identify a firing.** Both firing and resolved
   alerts require a nonblank `fingerprint` and valid RFC3339 `startsAt`; their
@@ -20,9 +30,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Interrupted detector bans.** Migration 026 preserves the original admission
   POP: new incomplete or failed bans with no admitted intent can resume using
   the same event ID on that POP. Another POP refuses the replay; use separate
-  event IDs for separate intended POP admissions. Historical ambiguous attempts return an explicit unknown
-  outcome conflict; inspect their event, mitigation and audit before
-  authorizing a new admission with a new ID. Install `jq` on FastNetMon hosts
+  event IDs for separate intended POP admissions. Historical ambiguous attempts
+  return an explicit unknown outcome conflict; inspect their event, mitigation
+  and audit before authorizing a new admission with a new ID. Install `jq` on FastNetMon hosts
   before reinstalling the script: it requires successful curl completion and
   valid JSON with a recorded admitted outcome and mitigation UUIDs before
   treating a retried `409` as local intent, and logs `INTENT_RECORDED`. See
@@ -67,8 +77,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `prefixd --check`, each naming its removal release, and the controller no
   longer reads `PREFIXD_API_TOKEN`; it logs a warning naming the variable when
   it is still set and starts normally. Before upgrading, inventory every client
-  of the shared token, set `http.auth.mode: credentials`, remove
-  `bearer_token_env` and the variable, and run `prefixd --check`. After the
+  of the shared token, stage `http.auth.mode: credentials`, remove
+  `bearer_token_env` and the variable from the staged configuration and
+  environment, and run the new binary's `prefixd --check`. After the
   upgrade, mint one token per detector and automation with
   `prefixdctl tokens create` and install it; detectors get 401 until then. An
   ingest token cannot read, so a custom detector script that looks up and
@@ -222,9 +233,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the `victim_ip` filter, IP history and incident reports compare addresses,
   so they find every spelling. The migration also adds a function and two
   indexes for those lookups and drops `idx_events_victim_ingested`. Building
-  the events index takes roughly 2 seconds per million events on a warm cache
-  while no controller runs, which counts against leased rules; on a large
-  history, build it concurrently before the window as
+  the events index takes time proportional to stored history while no controller
+  runs, which counts against leased rules. Time it on a restored copy; on a large
+  history, build and validate it concurrently before the window as
   [event index build time](docs/how-to/upgrading.md#event-index-build-time)
   describes. 023 adds no
   rollback constraint of its own; the release is one-way because of
@@ -286,6 +297,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Known limitations
 
+- The leased-risk alert needs a prior complete inventory sample and a stable
+  Prometheus target identity. Its outage lookback is one hour; removing a
+  target from discovery is not covered. With the shipped scrape, evaluation
+  and hold intervals, notification is not guaranteed before lease expiry.
 - `prefixd --check` cannot run checks that need a live speaker, database or
   listener: the speaker connection and version, the playbook checks against the
   speaker's actual capabilities, blackhole, VPN scope and lease support,
@@ -463,8 +478,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the namespace and the `source_id` rule for `fields.action` before saving,
   and a refused save keeps the editor open with the controller's reasons
   instead of closing it behind a raw error toast.
-- The bundled FastNetMon script needs only bash and curl: it no longer uses
-  `jq` or `python3`, takes the victim from its argument and never from stdin,
+- The bundled FastNetMon script needs bash, curl and jq. It validates duplicate
+  responses with jq, takes the victim from its argument and never from stdin,
   keeps no state between ban and unban, and bounds each attempt with
   `EVENT_CONNECT_TIMEOUT_SECONDS` (default 5) and `EVENT_MAX_TIME_SECONDS`
   (default 15).
@@ -564,6 +579,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   schema.
 
 ### Fixed
+
+- FastNetMon troubleshooting uses delivery logs and response status instead of
+  recommending shell tracing, which can expose the ingest token.
 
 - Skip unrelated live-mitigation inventory for an unban with no targets while
   preserving its durable empty replay record.
@@ -4032,7 +4050,8 @@ Startup now refuses the configuration keys removed in 0.20.0, and requires
 - Safelist prevents mitigation of protected infrastructure
 - Guardrails block overly broad mitigations
 
-[Unreleased]: https://github.com/lance0/prefixd/compare/v0.27.0...HEAD
+[Unreleased]: https://github.com/lance0/prefixd/compare/v0.28.0...HEAD
+[0.28.0]: https://github.com/lance0/prefixd/compare/v0.27.0...v0.28.0
 [0.27.0]: https://github.com/lance0/prefixd/compare/v0.26.0...v0.27.0
 [0.26.0]: https://github.com/lance0/prefixd/compare/v0.25.0...v0.26.0
 [0.25.0]: https://github.com/lance0/prefixd/compare/v0.24.0...v0.25.0

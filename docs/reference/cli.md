@@ -14,7 +14,7 @@ cargo build --release
 Or use the Docker image:
 
 ```bash
-docker run --rm --entrypoint prefixdctl ghcr.io/lance0/prefixd:0.27.0 --help
+docker run --rm --entrypoint prefixdctl ghcr.io/lance0/prefixd:0.28.0 --help
 ```
 
 Use the release tag that matches your controller. `latest` and `main` follow
@@ -133,7 +133,7 @@ that exits 2. See
 [configuration validation](configuration.md#validation) for the Compose
 one-liner and the full list of checks.
 
-`prefixd --version` prints the daemon version, such as `prefixd 0.27.0`, and
+`prefixd --version` prints the daemon version, such as `prefixd 0.28.0`, and
 exits.
 
 ## Commands
