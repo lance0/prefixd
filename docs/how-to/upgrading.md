@@ -98,8 +98,13 @@ What changes:
   cookie.
 - **Tokens have scopes.** An `ingest` token reaches only the ingest routes and
   cannot read; `operator` and `admin` tokens reach what those roles reach,
-  except token management, which needs an Admin session. See
+  except identity management. See
   [API tokens](../reference/api.md#api-tokens).
+- **Identity management needs a session.** Token management, operator create
+  and delete, and password set or reset need a signed-in session; tokens,
+  mTLS clients and `none` mode get 403. Automation that managed operators with
+  the shared token, mTLS or `none` mode moves to `prefixdctl operators` on the
+  local database or an Admin session.
 - **Actor IDs.** Mitigations, acknowledgements, safelist entries and audit rows
   created with an operator or admin token record `token:<name>`, where the
   shared token recorded `bearer-token`. Update audit filters and dashboards

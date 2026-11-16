@@ -30,7 +30,7 @@ Each token has a name, one scope and optional bindings:
 |-------|---------|
 | `ingest` | Only `POST /v1/events`, `POST /v1/events/batch`, `POST /v1/signals/fastnetmon`, `POST /v1/signals/alertmanager`, `POST /v1/signals/webhook/{name}` for `auth.type: bearer` adapters and `POST /v1/signals/corroborator`. It requires a bound `source` and has no read access. Every other route refuses it with 403 before reading the request body. |
 | `operator` | Every route the Operator role reaches |
-| `admin` | Every route the Admin role reaches, except [token management](#api-token-management) |
+| `admin` | Every route the Admin role reaches, except identity management: [token management](#api-token-management) and operator create, delete and password changes |
 
 - **Name.** `^[a-z0-9][a-z0-9-]{0,57}$`, unique across every token ever
   created, revoked ones included. Operator and admin tokens act as
@@ -2291,10 +2291,10 @@ Anonymous access does not create an authenticated operator profile.
 
 ## API token management
 
-Token routes need an Admin session. Every token is refused with 403, admin
-tokens included, because a stolen admin token that could mint replacements
-would survive its own revocation. mTLS clients and `none` mode get 403 too;
-manage tokens there with `prefixdctl tokens`. Each create and revoke writes an
+Token routes are identity management and need an Admin session. Every token
+is refused with 403, admin tokens included, because a stolen admin token that
+could mint replacements would survive its own revocation. mTLS clients and
+`none` mode get 403 too; manage tokens there with `prefixdctl tokens`. Each create and revoke writes an
 audit row in the same transaction: action `api_token.create` or
 `api_token.revoke`, target type `api_token`, target ID the token name, details
 `scope`, `source`, `pop` and `expires_at`, and the Admin's username as actor.
@@ -2397,6 +2397,15 @@ token returns the same record and writes no second audit row.
 
 ## Operators (Admin Only)
 
+Creating and deleting operators and setting or resetting a password are
+identity management, like [token management](#api-token-management): they need
+a signed-in session. Every API token is refused with 403, admin tokens
+included, and so are mTLS clients and `none` mode. Without the rule, a stolen
+admin token could create an Admin operator or reset an Admin's password, sign
+in, and keep access after the token is revoked. Automation that manages
+operators uses `prefixdctl operators` on the local database or an Admin
+session. Listing operators stays open to every Admin principal.
+
 ### List Operators
 
 ```http
@@ -2462,7 +2471,7 @@ Content-Type: application/json
 | Status | Reason |
 |--------|--------|
 | 400 | Invalid username or role, or password outside 8–256 UTF-8 bytes |
-| 403 | Caller is not admin |
+| 403 | Not an Admin session (every token, mTLS client and `none` mode is refused) |
 | 409 | Username already exists |
 
 ### Delete Operator
@@ -2478,7 +2487,7 @@ DELETE /v1/operators/{id}
 | Status | Reason |
 |--------|--------|
 | 400 | Cannot delete self |
-| 403 | Caller is not admin |
+| 403 | Not an Admin session (every token, mTLS client and `none` mode is refused) |
 | 404 | Operator not found |
 
 ### Change Password
@@ -2514,7 +2523,7 @@ Admins can change any operator's password without supplying the current password
 |--------|--------|
 | 400 | New password outside 8–256 UTF-8 bytes or incorrect current password |
 | 401 | Not authenticated |
-| 403 | Insufficient permissions (non-admin attempting to change another operator's password) |
+| 403 | Not a session (every token, mTLS client and `none` mode is refused), or a non-admin session changing another operator's password |
 | 404 | Operator not found |
 
 ---

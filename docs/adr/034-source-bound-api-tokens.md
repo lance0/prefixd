@@ -2,8 +2,9 @@
 
 ## Status
 
-Proposed 2026-11-15 and accepted 2026-11-15. Nothing in this ADR is
-implemented yet.
+Proposed 2026-11-15 and accepted 2026-11-15. Amended 2026-11-16: identity
+management needs a session, and three resolution details are settled; see
+[Amendment: identity management needs a session](#amendment-identity-management-needs-a-session).
 
 This ADR amends [ADR 008](008-session-auth-plus-bearer.md): named, hashed,
 revocable API tokens replace the shared bearer token, and the `bearer` auth mode
@@ -180,7 +181,7 @@ and ignores credentials. `mtls` mode is covered in
 | --- | --- | --- |
 | `ingest` | none | `POST /v1/events`, `POST /v1/events/batch`, `POST /v1/signals/fastnetmon`, `POST /v1/signals/alertmanager`, `POST /v1/signals/webhook/{name}` for `auth.type: bearer` adapters, and `POST /v1/signals/corroborator`. It has no read access, and it requires a bound `source`. |
 | `operator` | Operator | Every route the Operator role reaches today, except the ingest routes ([section 4](#4-one-enforcement-point-for-every-ingest-route)) |
-| `admin` | Admin | Every route the Admin role reaches, except token management |
+| `admin` | Admin | Every route the Admin role reaches, except identity management ([amended](#amendment-identity-management-needs-a-session)) |
 
 An ingest token is not a role in the `Viewer < Operator < Admin` order.
 `require_auth` and `require_role` refuse `Principal::Ingest` with 403, and only
@@ -190,7 +191,10 @@ before an ingest token can reach it.
 
 Token management (`/v1/tokens`) requires an Admin session or the local CLI.
 No token can call it, admin tokens included. If a stolen admin token could mint
-replacements, revoking it would not evict the attacker.
+replacements, revoking it would not evict the attacker. The 2026-11-16
+amendment extends the rule to all identity management and refuses ingest
+tokens at extraction
+([amendment](#amendment-identity-management-needs-a-session)).
 
 A token's `source` matches `^[a-z0-9][a-z0-9_-]{0,63}$`. Several tokens may share
 a source: two FastNetMon instances, `fnm-pop1` and `fnm-pop2`, can both be bound
@@ -401,7 +405,8 @@ respect. It is removed, not deprecated.
 #### Admin API
 
 These routes require an Admin session. They are registered in
-`src/api/routes.rs` and in OpenAPI.
+`src/api/routes.rs` and in OpenAPI. The operator account routes need a session
+too ([amendment](#amendment-identity-management-needs-a-session)).
 
 | Route | Effect |
 | --- | --- |
@@ -906,7 +911,9 @@ A compromised detector host held a full Operator credential.
 - Source claims on every ingest route, by one typed check.
 - Detector privileges for Operator sessions and operator tokens.
 - Cross-POP use of a POP-bound token on a shared database.
-- Token self-replication through the management API.
+- Token self-replication through the management API, including through a
+  new Admin operator or a password reset
+  ([amendment](#amendment-identity-management-needs-a-session)).
 - Unauthenticated webhook adapters outside lab mode.
 - Replay of signed bans on blackhole-capable or prefix-capable HMAC
   adapters, by required event IDs.
@@ -1083,8 +1090,72 @@ Negative controls show the spoof succeeding on the unpatched code through
    Operator sessions and operator tokens, and no `dashboard` source is
    reserved.
 6. **Token management** goes through an Admin session or the local CLI. The
-   CLI path is local-database only for now.
+   CLI path is local-database only for now. The 2026-11-16 amendment extends
+   this to all identity management.
 7. **Expiry is optional**, with no default.
 8. **No HTTP Basic auth, and no secret in a URL path or query string.** A
    sender that cannot send a header uses a script or a localhost relay
    ([section 13](#13-credential-delivery-per-detector)).
+
+## Amendment: identity management needs a session
+
+Amended 2026-11-16.
+
+### Context
+
+Section 3 closes `/v1/tokens` to every token so that revoking a stolen admin
+token evicts the attacker. The operator account routes left that eviction
+open. An admin token reached `POST /v1/operators` and
+`PUT /v1/operators/{id}/password`, so a stolen admin token could create an
+Admin operator, or reset an Admin's password, sign in with a session and mint
+tokens from it. Revoking the original token would then evict nobody.
+
+Implementation also settled three details the decision left open.
+
+### Decision
+
+**Identity management needs a signed-in session or the local CLI.** It covers
+every route that creates or changes a principal or its credentials:
+
+| Route | Session |
+| --- | --- |
+| `POST /v1/tokens`, `GET /v1/tokens`, `POST /v1/tokens/{name}/revoke` | Admin |
+| `POST /v1/operators` | Admin |
+| `DELETE /v1/operators/{id}` | Admin |
+| `PUT /v1/operators/{id}/password` | Admin for any operator; any role for its own password |
+
+prefixd has no role-change route and no route that revokes another
+operator's sessions. `POST /v1/auth/logout` ends only the caller's own session
+and is session-only already.
+
+- **Every token is refused** with 403, admin tokens included.
+- **mTLS clients and `none` mode are refused** with 403 as well. Neither is a
+  signed-in session: an mTLS client is Admin by certificate and `none` mode is
+  anonymous Admin. Deny by default keeps their identity changes on the local
+  CLI.
+- **Admin tokens keep every other Admin capability**, including listing
+  operators.
+- **The CLI** (`prefixdctl operators` and `prefixdctl tokens`) stays the
+  database path, which already outranks Admin.
+
+**Ingest tokens are refused at extraction.** The principal extractor every
+non-ingest route uses refuses an ingest token with 403 before the route reads
+its body. The ingest routes extract a separate ingest principal. Without this,
+a route that parses its body before calling `require_role` answers an ingest
+token with 400 or 422 rather than 403, so nothing would show that the token
+was refused. `require_auth` and `require_role` still refuse ingest tokens.
+
+**Several `Authorization` headers with a Bearer among them get 401.** A
+request carries one credential. Choosing one of several headers would let a
+proxy's header and a client's header disagree about who is calling, so such a
+request is refused rather than resolved.
+
+### Consequences
+
+- A stolen admin token can no longer create an Admin operator, reset a
+  password or mint a token. Once it is revoked, nothing it could do survives
+  it.
+- Automation that managed operators with a token, an mTLS certificate or
+  `none` mode moves to `prefixdctl operators` or an Admin session.
+- `none` mode loses operator management through the API; operators there are
+  managed with `prefixdctl`.

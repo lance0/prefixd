@@ -31,6 +31,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   switch credentials when the active controller changes. Rollback is a restore
   of the pre-upgrade backup. Starting 0.27.0 or older against the migrated
   database is a security regression, because it reads the shared token again.
+- Identity management needs a signed-in session: `/v1/tokens`, operator
+  create and delete (`POST /v1/operators`, `DELETE /v1/operators/{id}`) and
+  password set or reset (`PUT /v1/operators/{id}/password`). Every API token
+  gets 403 on these routes, admin tokens included, and so do mTLS clients and
+  `none` mode, which previously could manage operators as Admin. Automation
+  that used a token, mTLS or `none` mode to manage operators must use
+  `prefixdctl operators` on the local database or an Admin session. Admin
+  tokens keep every other Admin capability.
 - `prefixdctl` reads its token from `PREFIXD_TOKEN`, not `PREFIXD_API_TOKEN`,
   and warns when only the old variable is set. A token and a session cookie
   together are a usage error (exit 2).
@@ -137,7 +145,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   SHA-256 is stored, the secret is shown once, and revocation takes effect on
   the next request. A token's scope limits what it reaches: an ingest token is
   refused with 403 on every route but the ingest routes, before its body is
-  read, and no token, admin tokens included, can manage tokens. A token bound
+  read, and no token, admin tokens included, can manage tokens, create or
+  delete operators or set passwords, so a stolen admin token cannot mint a
+  replacement or an Admin account that outlives its revocation. A token bound
   to a POP is refused on another POP's controller on a shared database.
 - A Bearer request has its session cookie removed before the session is
   loaded, so a bad token never falls back to a session and a stale cookie
