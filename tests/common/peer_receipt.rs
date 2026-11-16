@@ -767,7 +767,7 @@ mod tests {
                     rd: Some(go::RouteDistinguisher {
                         rd: Some(go::route_distinguisher::Rd::TwoOctetAsn(
                             go::RouteDistinguisherTwoOctetAsn {
-                                admin: 44407,
+                                admin: 64500,
                                 assigned: 40,
                             },
                         )),
@@ -796,7 +796,7 @@ mod tests {
                                     go::TwoOctetAsSpecificExtended {
                                         is_transitive: true,
                                         sub_type: 2,
-                                        asn: 44407,
+                                        asn: 64500,
                                         local_admin: 777,
                                     },
                                 )),
@@ -822,11 +822,11 @@ mod tests {
 
     #[test]
     fn binary_action_oracle_covers_five_actions_both_families_without_typed_actions() {
-        let scope_rt = 0x0002_ad77_0000_0309u64;
+        let scope_rt = 0x0002_fbf4_0000_0309u64;
         let discard = 0x8006_0000_0000_0000u64;
         let police = discard | u64::from(1_000_000f32.to_bits());
         let marking = 0x8009_0000_0000_002eu64;
-        let redirect_vrf = 0x8008_ad77_0000_0378u64;
+        let redirect_vrf = 0x8008_fbf4_0000_0378u64;
         let redirect_ipv4 = 0x010c_c000_0263_0000u64;
         let mut redirect_ipv6 = [0; 20];
         redirect_ipv6[1] = 0x0c;
@@ -921,7 +921,7 @@ mod tests {
 
     #[test]
     fn binary_community_parser_checks_headers_lengths_widths_and_duplicates() {
-        let value = 0x0002_ad77_0000_0309u64.to_be_bytes();
+        let value = 0x0002_fbf4_0000_0309u64.to_be_bytes();
         let ordinary = binary_attribute(16, &value, false);
         let ipv6 = binary_attribute(25, &[0x55; 20], false);
         assert_eq!(

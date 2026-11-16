@@ -333,10 +333,10 @@ async fn guarded_vpn_scope_keeps_rd_targets_and_held_revision() {
             .await
             .unwrap();
         let mut a = global.clone();
-        a.nlri.scope = Some(VpnFlowSpecIdentity::new(family, "44407:40").unwrap());
-        a.route_targets = vec!["44407:777".into()];
+        a.nlri.scope = Some(VpnFlowSpecIdentity::new(family, "64500:40").unwrap());
+        a.route_targets = vec!["64500:777".into()];
         let mut b = a.clone();
-        b.nlri.scope = Some(VpnFlowSpecIdentity::new(family, "44407:41").unwrap());
+        b.nlri.scope = Some(VpnFlowSpecIdentity::new(family, "64500:41").unwrap());
         speaker.add_guarded(&a, window.stamp, 30).await.unwrap();
         speaker.add_guarded(&b, window.stamp, 30).await.unwrap();
         let inventory = speaker.guarded_inventory().await.unwrap();
@@ -348,7 +348,7 @@ async fn guarded_vpn_scope_keeps_rd_targets_and_held_revision() {
             );
         }
         let mut replaced = a.clone();
-        replaced.route_targets = vec!["44407:778".into()];
+        replaced.route_targets = vec!["64500:778".into()];
         assert!(
             speaker
                 .add_guarded(&replaced, window.stamp, 30)
@@ -403,9 +403,9 @@ async fn guarded_vpn_vrf_redirects_keep_action_and_scope_targets_separate() {
         (VpnFlowSpecFamily::Ipv6, "2001:db8::22/128"),
     ] {
         for (index, (target, expected_action)) in [
-            ("44407:888", 0x8008_ad77_0000_0378u64),
+            ("64500:888", 0x8008_fbf4_0000_0378u64),
             ("192.0.2.1:888", 0x8108_c000_0201_0378),
-            ("0.44407:888", 0x8208_0000_ad77_0378),
+            ("0.64500:888", 0x8208_0000_fbf4_0378),
         ]
         .into_iter()
         .enumerate()
@@ -414,8 +414,8 @@ async fn guarded_vpn_vrf_redirects_keep_action_and_scope_targets_separate() {
             scoped.revision = (index as u64) * 2 + 1;
             scoped.target = None;
             scoped.redirect_route_target = Some(target.into());
-            scoped.nlri.scope = Some(VpnFlowSpecIdentity::new(family, "44407:40").unwrap());
-            scoped.route_targets = vec!["44407:777".into()];
+            scoped.nlri.scope = Some(VpnFlowSpecIdentity::new(family, "64500:40").unwrap());
+            scoped.route_targets = vec!["64500:777".into()];
             speaker
                 .add_guarded(&scoped, window.stamp, 30)
                 .await
@@ -424,12 +424,12 @@ async fn guarded_vpn_vrf_redirects_keep_action_and_scope_targets_separate() {
                 .received_flow_spec(family.afi_safi(), "0.0.0.0")
                 .await;
             let held = raw.received_routes[0].route.as_ref().unwrap();
-            assert_eq!(held.route_targets, ["44407:777"]);
+            assert_eq!(held.route_targets, ["64500:777"]);
             assert_eq!(
                 held.extended_communities,
                 [
                     expected_action,
-                    prefixd::domain::route_target_bytes("44407:777").unwrap()
+                    prefixd::domain::route_target_bytes("64500:777").unwrap()
                 ]
             );
             assert!(
@@ -441,7 +441,7 @@ async fn guarded_vpn_vrf_redirects_keep_action_and_scope_targets_separate() {
                     .any(|entry| entry.rule.same_admission(&scoped))
             );
             let mut replacement = scoped.clone();
-            replacement.redirect_route_target = Some("44407:889".into());
+            replacement.redirect_route_target = Some("64500:889".into());
             assert!(
                 speaker
                     .add_guarded(&replacement, window.stamp, 30)

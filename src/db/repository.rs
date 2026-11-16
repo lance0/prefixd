@@ -743,6 +743,21 @@ impl RepositoryTrait for Repository {
         .await?)
     }
 
+    async fn pending_withdrawal(
+        &self,
+        operation_id: Uuid,
+        pop: &str,
+    ) -> Result<Option<WithdrawalRequest>> {
+        let mut connection = self.bounded_read_connection().await?;
+        Ok(sqlx::query_as::<_, WithdrawalRequest>(
+            "SELECT * FROM withdrawal_requests WHERE operation_id = $1 AND pop = $2 AND completed_at IS NULL",
+        )
+        .bind(operation_id)
+        .bind(pop)
+        .fetch_optional(&mut *connection)
+        .await?)
+    }
+
     async fn finish_withdrawal(&self, request: &WithdrawalRequest) -> Result<Option<Mitigation>> {
         let mut transaction = self.pool.begin().await?;
         let pending = sqlx::query_as::<_, WithdrawalRequest>(

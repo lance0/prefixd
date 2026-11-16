@@ -61,8 +61,8 @@ curl -sS -b cookies.txt -X POST http://localhost/v1/events \
 ```
 
 A `202` with `"status": "accepted"` and a `mitigation_id` means policy created
-a mitigation. The shipped `udp_flood_police_first` playbook selects its first
-step: police at 5 Mbps for 120 seconds. `accepted` without a `mitigation_id`
+a mitigation. The shipped `udp_flood_police_first` playbook has one step:
+police at 5 Mbps for 120 seconds. `accepted` without a `mitigation_id`
 means correlation chose not to act; `accepted_no_mitigation` means the address
 is not in inventory; `accepted_no_playbook` means no playbook matched. See
 [ingest attack event](../reference/api.md#ingest-attack-event).

@@ -189,7 +189,9 @@ see the [trait](../../src/bgp/announcer.rs) and backend reference.
 
 ### PostgreSQL
 
-The [migrations](../../migrations/) are the schema authority:
+The [migrations](../../migrations/) are the schema authority. Startup applies
+only the versions `schema_migrations` does not record, and refuses a database
+migrated by a newer release:
 
 | State | Purpose |
 | --- | --- |

@@ -171,6 +171,12 @@ Existing YAML may omit the client identity fields. Rust callers constructing
 `RustBgpdConfig` literals must add the optional fields, including
 `leased_flowspec`, or use `..Default::default()` for omitted options.
 
+Speaker mutation budgets are fixed and have no configuration key. Requests that
+hold the lifecycle mutex, such as admission, manual creation, withdrawal, unban
+and safelist additions, make one attempt bounded by three seconds; the
+scheduler keeps three 30-second attempts. See the
+[interactive speaker deadline](speaker-backends.md#interactive-speaker-deadline).
+
 #### Leased FlowSpec
 
 ```yaml
@@ -247,6 +253,14 @@ key back to `true` to recover. To turn the lease off:
 - **Lost lease.** A refused renewal, a changed lease generation or a speaker
   restart re-adds every active leased FlowSpec rule and leased blackhole at
   once. Lease expiry is never recorded as a withdrawal.
+- **Database outages.** Renewal is unfenced and needs no database, but it is
+  bounded by leased TTLs: it continues until one margin after the latest
+  `expires_at` among the rows this owner holds, then stops and rustbgpd
+  removes the rules within one more lease. Leased FlowSpec and leased
+  blackholes share the owner-wide bound, so a short rule can outlive its own
+  TTL while a longer leased rule keeps the lease live. See
+  [leased blackholes](#leased-blackholes) and
+  [ADR 003](../adr/003-fail-open-ttl.md#amendment-the-lease-is-bounded-by-leased-ttls).
 - **Unknown rules.** Another owner's rule at a desired match is reported in
   `prefixd_unknown_local_routes{kind="flowspec"}` as a repair error and never
   touched.
@@ -399,8 +413,9 @@ safelist checks as a manual CIDR. A prefix event selects only a
 `udp_flood` prefix police step may match protocol only. Detector events cannot
 select a source prefix, VPN scope or action target; `bgp.default_scope` still
 applies. A customer prefix sub-allocated inside another customer's configured
-aggregate has conflicting ownership and cannot be prefix-mitigated. Startup and
-playbook reload log a warning when a `scope: prefix` playbook is loaded while
+aggregate has conflicting ownership and cannot be prefix-mitigated. Startup,
+playbook reload and `PUT /v1/config/playbooks` log a warning when a
+`scope: prefix` playbook is loaded while
 `allow_detector_prefix` is false or the destination bounds admit hosts only.
 See [detector prefix events](api.md#detector-prefix-events) and
 [ADR 033](../adr/033-detector-prefix-mitigations.md).
@@ -1043,10 +1058,33 @@ routes the network holds can still apply.
   [upgrade guide](../how-to/upgrading.md#mitigation-origin-mode) already asks.
 - **Database outages.** Renewal needs no database and no controller fence, so
   a PostgreSQL outage that puts the controller in standby does not drop leased
-  blackholes. New adds and withdrawals wait for the fence.
+  blackholes while the leased routes are inside their TTL. Renewal is bounded
+  rather than unbounded. The bound is the latest `expires_at` among the rows
+  this owner holds: the read at the start of each reconciliation pass sets it,
+  and every leased admission or TTL extension raises it at once. Renewal stops
+  one margin after it, `max(lease_seconds,
+  timers.reconciliation_interval_seconds + lease_seconds / 3)`, and rustbgpd
+  removes the routes within one more lease. The bound is owner-wide: leased
+  FlowSpec rules and leased blackholes share it, so every leased route lasts
+  as long as the latest leased TTL during an outage. Unleased routes, pending
+  rows and dry-run rows do not extend it. A read that succeeds again refreshes
+  it and renewal resumes at once; expiry still withdraws a row whose TTL
+  passed, and nothing is re-added for it. Before the first read or leased
+  write, renewal is bounded to one margin after startup, so a controller that
+  starts while the database is unreachable lets the adopted lease lapse. New
+  adds and withdrawals wait for the fence. Health reports
+  `renewal_stopped: "ttl_bound"` and `renew_until`; a stop at the bound is not
+  a renewal failure. See
+  [leased TTLs](../adr/003-fail-open-ttl.md#amendment-the-lease-is-bounded-by-leased-ttls).
+- **Standby.** A standby controller reads active intent on the reconciliation
+  interval, without mutating anything, so its unfenced renewal follows the
+  same bound and a live lease stays live through a failover. A standby that
+  cannot read stops renewing at its own bound and reports the lease state as
+  `standby`, not `expired`.
 - **Visibility.** Health detail reports `speaker.lease` (owner, state,
-  generation and the last renewal), and
+  generation, the last renewal, `renew_until` and `renewal_stopped`), and
   [metrics](api.md#metrics) count renewals and report the lease state.
+
 ### Amplification
 
 UDP reflection handling for the `udp_amplification` vector
@@ -1221,10 +1259,10 @@ playbooks:
       - action: police
         rate_bps: 10000000
         ttl_seconds: 120
-      - action: discard
-        ttl_seconds: 300
-        require_confidence_at_least: 0.8
 ```
+
+Use one step per playbook. The controller executes only the first step, so any
+later step is accepted and validated but never run.
 
 ### Match Criteria
 
@@ -1257,7 +1295,8 @@ the key.
 |--------|------|-------------|
 | `rate_bps` | integer | Positive bit rate exactly representable as an `f32` bytes/second traffic rate (police only) |
 | `ttl_seconds` | integer | Mitigation duration |
-| `require_confidence_at_least` | float | Min confidence for this step |
+| `require_confidence_at_least` | float | Min confidence for this step; accepted on steps after the first, which do not run |
+| `require_persistence_seconds` | integer | Min persistence for this step; accepted on steps after the first, which do not run |
 
 Policing rates are preserved exactly by both speaker backends. Fractional
 bytes/second are supported: 1, 7, 8 and 9 bits/second are valid. Missing or zero
@@ -1315,17 +1354,26 @@ playbooks:
 
 ### Step selection
 
-The controller uses the first step of the matching playbook. Later steps and
-`require_confidence_at_least` / `require_persistence_seconds` remain accepted in
-the playbook schema, but automatic progression to later steps is unavailable.
-The second step below is retained configuration, not an automatic fallback:
+The controller uses the first step of the matching playbook and never runs
+later ones. Later steps and `require_confidence_at_least` /
+`require_persistence_seconds` remain accepted in the playbook schema, so an
+existing file with more than one step still loads and validates unchanged, but
+automatic progression to later steps is unavailable. Startup, playbook reload
+and `PUT /v1/config/playbooks` log one warning per playbook with more than one
+step, naming it, stating that later steps are not executed and saying to remove
+them from `playbooks.yaml`. The dashboard playbook editor marks steps after the
+first as not executed.
+
+The shipped `configs/playbooks.yaml` gives every playbook exactly one step, so
+what it says is what runs. The two-step shape below is accepted configuration,
+not an automatic fallback; write one step instead until progression ships:
 
 ```yaml
 steps:
-  - action: police        # Step 1: Rate limit
+  - action: police        # Step 1: the only step that runs
     rate_bps: 10000000
     ttl_seconds: 120
-  - action: discard       # Later step: not selected automatically
+  - action: discard       # Later step: accepted, warned about, never run
     ttl_seconds: 300
     require_confidence_at_least: 0.7
 ```
@@ -1389,7 +1437,7 @@ an unknown vector use the playbook that matches `vector: unknown`.
 
 ```yaml
 playbooks:
-  # UDP flood: police; the later discard step is not selected automatically
+  # UDP flood: police
   - name: udp_flood
     match:
       vector: udp_flood
@@ -1397,9 +1445,6 @@ playbooks:
       - action: police
         rate_bps: 10000000
         ttl_seconds: 120
-      - action: discard
-        ttl_seconds: 300
-        require_confidence_at_least: 0.8
 
   # SYN flood: immediate discard
   - name: syn_flood
@@ -1588,16 +1633,122 @@ curl -X POST http://localhost/v1/config/reload
 
 ## Validation
 
-prefixd validates configuration while loading it at startup. There is no
-validate-only flag; a malformed or invalid file stops startup before the
-controller connects to PostgreSQL or the speaker. Checks that need the
-speaker's capabilities, such as the playbook capability checks, run after it
-connects:
+`prefixd --check` loads and validates the configuration directory and
+exits without connecting to PostgreSQL or the speaker:
 
 ```bash
-RUST_LOG=debug docker compose --profile rustbgpd up -d --no-build
-docker compose logs prefixd-rustbgpd
+prefixd --check --config /etc/prefixd
 ```
+
+It reads `prefixd.yaml`, `inventory.yaml` and `playbooks.yaml`, plus
+`correlation.yaml` and `alerting.yaml` when present, through the loader startup
+uses. It then runs the checks startup makes before it opens the database, which
+startup also runs at that point:
+
+- YAML parsing, removed keys, `${VAR}` placeholders, alerting destinations and
+  secrets, VPN scopes, auth transport, blackhole and amplification limits,
+  scrubber profiles, guardrails, quotas and correlation settings.
+- The database URL, from `DATABASE_URL` or `storage.connection_string`: present
+  and a valid PostgreSQL URL. The error never repeats the URL.
+- The API bearer token variable when `http.auth.mode` is `bearer`, and the
+  `http.tls` certificate, key and (for mTLS) CA files: readable, parseable and
+  matching.
+- The speaker endpoint: the `bgp.rustbgpd` section for the rustbgpd backend, a
+  nonempty `bgp.gobgp_grpc` without userinfo or a path for GoBGP, and the
+  rustbgpd transport rules (plaintext only to a literal loopback address, a set
+  `bearer_token_env`, no TLS options on a Unix socket, a client certificate only
+  with its key, readable TLS files).
+- Scrubber readiness credentials (`readiness_token_env`) and the readiness CA
+  file.
+- The playbook checks against settings: match opt-ins, `max_ports`, blackhole
+  enablement and TTL cap, and VPN default scope. They assume a speaker that
+  supports every FlowSpec match component and the injection lease.
+
+Each error is printed to stderr on its own line with the full path of the file
+it came from, and the exit code is 1. A clean run prints a one-line summary and
+exits 0. The playbook warnings startup logs, for unreachable `scope: prefix`
+playbooks and for steps after the first that are not executed, are printed to
+stderr too and do not change the exit code. Errors use startup's redacted
+text, so a secret is never echoed. A
+command-line usage error, such as `--check` combined with
+`--adopt-legacy-speaker`, exits 2.
+
+Checks that need a speaker, database or listener are skipped and named in the
+output:
+
+- the speaker connection, daemon version and rustbgpd Unix socket ownership;
+- the playbook checks against the speaker's actual FlowSpec match and
+  blackhole-lease capabilities;
+- blackhole, VPN scope and injection-lease support checks against the speaker;
+- scrubber readiness probes and outstanding diversions;
+- the database connection, registration, fencing and migrations;
+- binding the HTTP listen address.
+
+A passing check therefore does not promise that startup succeeds, only that it
+gets past every configuration check it can make without those counterparts.
+
+A refused configuration is not a slow failure. Leased FlowSpec is on in the
+shipped rustbgpd configuration, so a controller that refuses to start leaves the
+speaker to withdraw the rules when the last lease lapses, about
+`blackhole.lease_seconds` (60 by default) after the restart began. With Compose,
+check the new image against the deployment's config volume before replacing the
+controller. Export the image once so the check and the restart use the same one:
+
+```bash
+export PREFIXD_IMAGE=ghcr.io/lance0/prefixd:0.28.0
+docker compose --profile rustbgpd run --rm --no-deps prefixd-rustbgpd --check
+docker compose --profile rustbgpd up -d --no-build
+```
+
+The `gobgp` profile uses `prefixd-gobgp` in the same commands. That service
+shares the `gobgp` container's network (`network_mode: service:gobgp`), so the
+`gobgp` container must be running for the check, though the check does not
+connect to it. `--no-deps` keeps the check from starting PostgreSQL, the speaker
+or the config-volume init step, and `docker compose run` supplies the service
+environment, so `DATABASE_URL` and the token variables are the ones the
+controller sees.
+
+Errors name the file and the key they refuse, for example:
+
+- `failed to load /etc/prefixd/prefixd.yaml: configuration error: blackhole.lease_seconds must be 5..=3600, got 2`
+- `failed to load /etc/prefixd/prefixd.yaml: configuration error: amplification.reflector_ports: port 53 is listed twice`
+- `failed to load /etc/prefixd/inventory.yaml: configuration error: inventory customer acme: invalid prefix "203.0.113.0/33"`
+- `failed to load /etc/prefixd/prefixd.yaml: mode: unknown variant, expected one of dry-run, enforced at line 2 column 7`
+- `/etc/prefixd/prefixd.yaml: auth.mode=bearer but PREFIXD_API_TOKEN is not set or empty`
+- `/etc/prefixd/playbooks.yaml: configuration error: playbook "bh" has a blackhole step, but blackhole.enabled is false`
+
+### Unknown keys
+
+A key the loader does not recognize, such as `guardrails.max_port` or a key
+from another release, is reported with its full path and ignored by this
+release. `--check` prints one line per key:
+
+```text
+/etc/prefixd/prefixd.yaml: unknown key `guardrails.max_port`; ignored in this release, refused in the next
+```
+
+Startup and [reload](#hot-reload) log a warning for each, `unknown
+configuration key ignored; the next release refuses it`, with the file's full
+path in the `file` field and the key path in the `key` field.
+
+The next release refuses these keys instead. Remove every key a check reports
+before upgrading. Alert destination keys are reported under
+`alerting.destinations[N]`, from `alerting.yaml` or the inline `alerting`
+section, so a `chanel:` typo cannot be mistaken for configuration. Webhook
+adapter `auth` and `transforms` keys are reported the same way, such as
+`webhook_adapters[0].auth.heder`. A key is cut at its first character that no
+configuration key uses, so a flow-style typo such as `{token_env:SECRET}`
+reports `token_env` and never the text after it. This covers
+`prefixd.yaml`, `correlation.yaml` and `alerting.yaml`; `inventory.yaml` is not
+checked for unknown keys yet.
+
+These sections already reject unknown keys, which stops startup instead of
+warning: the keys directly under `bgp` (not those inside `bgp.rustbgpd` or a
+`bgp.neighbors` entry, which warn), each `bgp.vpn_scopes` entry, a
+`bgp.default_scope` written as per-family names, `observability`, `blackhole`,
+`amplification` and each `amplification.reflector_ports` entry, `shutdown`,
+`scrubber`, each `scrubber.profiles` entry and its `return_leg`, and
+`playbooks.yaml`. Only key paths are reported, never values.
 
 Configuration API edits count UTF-8 bytes: playbook names allow up to 128 bytes;
 Slack, Discord and Teams `webhook_url`, PagerDuty `events_url` and generic `url`
@@ -1605,13 +1756,10 @@ allow up to 1,024 bytes; Telegram `chat_id` allows up to 64 bytes. Playbook edit
 TTLs must be 1–86,400 seconds.
 
 A startup failure names the file, such as `failed to load
-/etc/prefixd/inventory.yaml`, followed by the reason. YAML parse errors give the
-key path, line and column, as described under [Hot Reload](#hot-reload).
-Checks that run after parsing name the key they refuse, for example:
-
-- `configuration error: blackhole.lease_seconds must be 5..=3600, got 2`
-- `configuration error: amplification.reflector_ports: port 53 is listed twice`
-- `configuration error: inventory customer acme: invalid prefix "203.0.113.0/33"`
+/etc/prefixd/inventory.yaml`, followed by the reason, one line per error. YAML
+parse errors give the key path, line and column, as described under
+[Hot Reload](#hot-reload). Checks that run after parsing name the key they
+refuse, as in the examples above.
 
 ## Scrubber profiles
 

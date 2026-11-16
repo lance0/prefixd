@@ -252,10 +252,16 @@ pub async fn extend_flowspec_lifetime(
     }).await.map_err(|_| PrefixdError::Internal(
         "lifetime read-only preparation timed out; refresh mitigation and audit before retrying".into(),
     ))??;
-    state
+    let outcome = state
         .repo
         .extend_flowspec_lifetime(&request, &state.fence)
-        .await
+        .await?;
+    if outcome.extended
+        && let Some(lease) = state.lease.as_deref()
+    {
+        lease.observe_leased_write(&outcome.mitigation);
+    }
+    Ok(outcome)
 }
 
 pub(crate) fn extension_safelisted(target: &str) -> PrefixdError {
@@ -352,6 +358,40 @@ mod tests {
         })
         .await
         .unwrap()
+    }
+
+    /// An operator extension of a leased rule raises the renewal bound at
+    /// once, with no reconciliation read; a refused extension does not.
+    #[tokio::test]
+    async fn a_leased_extension_raises_the_renewal_bound_and_a_refused_one_does_not() {
+        let repo = Arc::new(MockRepository::new());
+        let owner = "prefixd.test-pop.0123456789abcdef";
+        let lease = Arc::new(crate::domain::LeaseKeeper::new(owner.into(), 60));
+        let state = state(repo.clone(), Arc::new(MockAnnouncer::new()), |_| {})
+            .with_lease(lease.clone())
+            .unwrap();
+        let mut m = rule("203.0.113.10/32");
+        m.action_params.injection_owner = owner.into();
+        repo.insert_mitigation(&m).await.unwrap();
+        let refused =
+            extend_flowspec_lifetime(&state, m.mitigation_id, 600, "alice".into(), " ".into())
+                .await;
+        assert!(refused.is_err());
+        assert_eq!(lease.health().renew_until, None);
+        let outcome = extend_flowspec_lifetime(
+            &state,
+            m.mitigation_id,
+            600,
+            "alice".into(),
+            "ongoing".into(),
+        )
+        .await
+        .unwrap();
+        assert!(outcome.extended);
+        assert_eq!(
+            lease.health().renew_until,
+            Some(outcome.mitigation.expires_at)
+        );
     }
 
     #[tokio::test]

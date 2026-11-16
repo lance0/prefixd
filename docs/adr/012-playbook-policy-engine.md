@@ -37,6 +37,12 @@ playbooks:
         require_confidence_at_least: 0.8
 ```
 
+*Correction, 2026-11-15.* The controller runs only the first step of a
+playbook. Later steps and their `require_confidence_at_least` thresholds are
+accepted and validated but not executed, and startup, reload and
+`PUT /v1/config/playbooks` log a warning for each playbook with more than one
+step.
+
 Playbooks are hot-reloadable via `POST /v1/config/reload` or `prefixdctl reload` without restarting the daemon.
 
 ## Consequences

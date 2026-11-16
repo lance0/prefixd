@@ -1,8 +1,9 @@
 use super::{
     AddOutcome, BlackholeInventory, BlackholeRoute, BlackholeSpeaker, DaemonHealth,
     DaemonHealthObserver, ExportDisposition, ExportObserver, FlowSpecAnnouncer,
-    FlowSpecMatchSupport, FlowSpecReader, FlowSpecWriter, InjectionLeases, LeaseGeneration,
-    PeerExport, PeerObserver, PeerStatus, SessionState, UnrecognizedRoute, rustbgpd_pb as pb,
+    FlowSpecMatchSupport, FlowSpecReader, FlowSpecWriter, GUARDED_RPC_DEADLINE, InjectionLeases,
+    LeaseGeneration, PeerExport, PeerObserver, PeerStatus, RetryPolicy, SessionState,
+    UnrecognizedRoute, rustbgpd_pb as pb,
 };
 use crate::{
     config::RustBgpdConfig,
@@ -33,9 +34,6 @@ enum ScopedRpcError {
     Probe(PrefixdError),
     Mutation(tonic::Status),
 }
-
-/// Capability reads cannot outlive a guarded operation's complete RPC budget.
-const GUARDED_RPC_DEADLINE: Duration = Duration::from_secs(3);
 
 /// The oldest daemon prefixd runs against: 0.79.0 adds the injection lease
 /// (rustbgpd ADR-0141); 0.80.0 scopes link-local export rows by interface and
@@ -111,16 +109,16 @@ fn error_reason(status: &tonic::Status) -> Option<String> {
 
 impl RustBgpdAnnouncer {
     pub async fn connect(config: &RustBgpdConfig) -> anyhow::Result<Self> {
-        let token = if config.bearer_token_env.is_empty() {
-            String::new()
-        } else {
-            std::env::var(&config.bearer_token_env).map_err(|_| {
-                anyhow::anyhow!("rustbgpd bearer token environment variable is missing")
-            })?
-        };
-        let speaker = Self::connect_with_token(config, &token).await?;
+        let speaker = Self::connect_with_token(config, &bearer_token(config)?).await?;
         speaker.require_minimum_version().await?;
         Ok(speaker)
+    }
+
+    /// Every check [`RustBgpdAnnouncer::connect`] makes before it dials: the
+    /// bearer token, endpoint, transport security and TLS files. Startup and
+    /// `prefixd --check` run it before any speaker contact.
+    pub fn check_config(config: &RustBgpdConfig) -> anyhow::Result<()> {
+        prepare(config, &bearer_token(config)?).map(drop)
     }
 
     /// Startup contract check: refuse a daemon older than 0.83.0, or one whose
@@ -147,115 +145,29 @@ impl RustBgpdAnnouncer {
     }
 
     async fn connect_with_token(config: &RustBgpdConfig, token: &str) -> anyhow::Result<Self> {
-        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-        anyhow::ensure!(
-            config.client_cert_path.is_some() == config.client_key_path.is_some(),
-            "rustbgpd client certificate and key must be configured together"
-        );
-        anyhow::ensure!(
-            !token.chars().any(char::is_whitespace),
-            "invalid rustbgpd bearer token"
-        );
-        let token = if token.is_empty() {
-            None
-        } else {
-            let mut value: tonic::metadata::MetadataValue<_> = format!("Bearer {token}")
-                .parse()
-                .map_err(|_| anyhow::anyhow!("invalid rustbgpd bearer token"))?;
-            value.set_sensitive(true);
-            Some(value)
-        };
-        if let Some(path) = config.unix_socket_path()? {
-            anyhow::ensure!(
-                config.ca_cert_path.is_none() && config.client_cert_path.is_none(),
-                "TLS options are not valid for rustbgpd Unix sockets"
-            );
+        let (transport, token) = prepare(config, token)?;
+        let channel = match transport {
             #[cfg(unix)]
-            {
-                let channel = Endpoint::from_static("http://[::]:50051")
-                    .connect_timeout(Duration::from_secs(10))
-                    .timeout(Duration::from_secs(30))
-                    .connect_with_connector(tower::service_fn(move |_| {
-                        let path = path.clone();
-                        async move {
-                            connect_owner_socket(&path)
-                                .await
-                                .map(hyper_util::rt::TokioIo::new)
-                        }
-                    }))
+            Transport::Unix(path) => Endpoint::from_static("http://[::]:50051")
+                .connect_timeout(Duration::from_secs(10))
+                .timeout(Duration::from_secs(30))
+                .connect_with_connector(tower::service_fn(move |_| {
+                    let path = path.clone();
+                    async move {
+                        connect_owner_socket(&path)
+                            .await
+                            .map(hyper_util::rt::TokioIo::new)
+                    }
+                }))
+                .await
+                .map_err(|_| anyhow::anyhow!("rustbgpd Unix connection failed"))?,
+            Transport::Tcp(endpoint) => {
+                tokio::time::timeout(Duration::from_secs(10), endpoint.connect())
                     .await
-                    .map_err(|_| anyhow::anyhow!("rustbgpd Unix connection failed"))?;
-                return Ok(Self::new(channel, token));
+                    .map_err(|_| anyhow::anyhow!("rustbgpd connection timed out"))?
+                    .map_err(|_| anyhow::anyhow!("rustbgpd connection failed"))?
             }
-            #[cfg(not(unix))]
-            anyhow::bail!("rustbgpd Unix sockets are unsupported on this platform");
-        }
-        anyhow::ensure!(
-            !config.endpoint.contains(['@', '?', '#'])
-                && !config
-                    .endpoint
-                    .chars()
-                    .any(|c| c.is_whitespace() || c.is_control()),
-            "invalid rustbgpd endpoint"
-        );
-        let uri: tonic::codegen::http::Uri = config
-            .endpoint
-            .parse()
-            .map_err(|_| anyhow::anyhow!("invalid rustbgpd endpoint"))?;
-        anyhow::ensure!(
-            uri.authority().is_some() && matches!(uri.path(), "" | "/"),
-            "invalid rustbgpd endpoint"
-        );
-        let mut endpoint = Endpoint::from_shared(config.endpoint.clone())
-            .map_err(|_| anyhow::anyhow!("invalid rustbgpd endpoint"))?
-            .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(30));
-        match uri.scheme_str() {
-            Some("http") => {
-                let host = uri
-                    .host()
-                    .unwrap_or_default()
-                    .trim_start_matches('[')
-                    .trim_end_matches(']');
-                anyhow::ensure!(
-                    host.parse::<std::net::IpAddr>()
-                        .is_ok_and(|ip| ip.is_loopback()),
-                    "plaintext rustbgpd requires a literal loopback address"
-                );
-                anyhow::ensure!(
-                    config.ca_cert_path.is_none() && config.client_cert_path.is_none(),
-                    "TLS options require HTTPS"
-                );
-                anyhow::ensure!(token.is_some(), "rustbgpd bearer token is required");
-            }
-            Some("https") => {
-                anyhow::ensure!(
-                    token.is_some() || config.client_cert_path.is_some(),
-                    "rustbgpd bearer token or client certificate is required"
-                );
-                let mut tls = ClientTlsConfig::new()
-                    .with_native_roots()
-                    .timeout(Duration::from_secs(10));
-                if let Some(path) = &config.ca_cert_path {
-                    tls = tls.ca_certificate(Certificate::from_pem(read_tls_file(path).await?));
-                }
-                if let (Some(cert), Some(key)) = (&config.client_cert_path, &config.client_key_path)
-                {
-                    tls = tls.identity(Identity::from_pem(
-                        read_tls_file(cert).await?,
-                        read_tls_file(key).await?,
-                    ));
-                }
-                endpoint = endpoint
-                    .tls_config(tls)
-                    .map_err(|_| anyhow::anyhow!("invalid rustbgpd TLS configuration"))?;
-            }
-            _ => anyhow::bail!("rustbgpd endpoint must use unix, http or https"),
-        }
-        let channel = tokio::time::timeout(Duration::from_secs(10), endpoint.connect())
-            .await
-            .map_err(|_| anyhow::anyhow!("rustbgpd connection timed out"))?
-            .map_err(|_| anyhow::anyhow!("rustbgpd connection failed"))?;
+        };
         Ok(Self::new(channel, token))
     }
 
@@ -300,36 +212,64 @@ impl RustBgpdAnnouncer {
         acknowledge_local_intent(&response)
     }
 
-    /// Each scoped retry probes again before dispatch; reconnects may change capability.
+    /// Each durable retry probes again before dispatch; reconnects may change
+    /// capability. A bounded policy makes one attempt whose probes and mutation
+    /// share one deadline, so a caller holding the lifecycle mutex waits once.
     async fn call_with_probes<T, F, Fut>(
         &self,
         operation: &str,
         families: &[i32],
+        policy: RetryPolicy,
         mut call: F,
     ) -> std::result::Result<T, ScopedRpcError>
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = std::result::Result<tonic::Response<T>, tonic::Status>>,
     {
+        if policy.is_bounded() {
+            // Probes and the mutation share the caller's single interactive wait.
+            let deadline = tokio::time::Instant::now() + policy.attempt_deadline();
+            for family in families {
+                match tokio::time::timeout_at(deadline, self.probe_vpn_family(*family)).await {
+                    Ok(result) => result.map_err(ScopedRpcError::Probe)?,
+                    Err(_) => {
+                        return Err(ScopedRpcError::Probe(invalid(
+                            "capability probe deadline elapsed",
+                        )));
+                    }
+                }
+            }
+            let result = tokio::time::timeout_at(deadline, call())
+                .await
+                .unwrap_or_else(|_| {
+                    Err(tonic::Status::deadline_exceeded(
+                        "interactive mutation deadline elapsed",
+                    ))
+                });
+            return match result {
+                Ok(response) => Ok(response.into_inner()),
+                Err(status) => Err(ScopedRpcError::Mutation(status)),
+            };
+        }
         if families.is_empty() {
             return self
-                .call(operation, call)
+                .call_with_policy(operation, policy, call)
                 .await
                 .map_err(ScopedRpcError::Mutation);
         }
-        for attempt in 0..3 {
+        for attempt in 0..policy.attempts() {
             for family in families {
                 self.probe_vpn_family(*family)
                     .await
                     .map_err(ScopedRpcError::Probe)?;
             }
-            let result = tokio::time::timeout(Duration::from_secs(30), call())
+            let result = tokio::time::timeout(policy.attempt_deadline(), call())
                 .await
                 .unwrap_or_else(|_| Err(tonic::Status::deadline_exceeded("RPC deadline elapsed")));
             match result {
                 Ok(response) => return Ok(response.into_inner()),
                 Err(status)
-                    if attempt < 2
+                    if attempt + 1 < policy.attempts()
                         && matches!(status.code(), Code::Unavailable | Code::DeadlineExceeded) =>
                 {
                     tracing::warn!(operation, attempt = attempt + 1, code = ?status.code(), "retrying rustbgpd RPC");
@@ -345,13 +285,14 @@ impl RustBgpdAnnouncer {
         &self,
         operation: &str,
         families: &[i32],
+        policy: RetryPolicy,
         call: F,
     ) -> Result<T>
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = std::result::Result<tonic::Response<T>, tonic::Status>>,
     {
-        self.call_with_probes(operation, families, call)
+        self.call_with_probes(operation, families, policy, call)
             .await
             .map_err(|error| match error {
                 ScopedRpcError::Probe(error) => error,
@@ -384,8 +325,14 @@ impl RustBgpdAnnouncer {
     }
 
     fn request<T>(&self, value: T) -> Request<T> {
+        self.request_within(value, RetryPolicy::Durable.attempt_deadline())
+    }
+
+    /// The client deadline matches the attempt budget, so the daemon and this
+    /// call agree on when an outcome became unconfirmed.
+    fn request_within<T>(&self, value: T, deadline: Duration) -> Request<T> {
         let mut request = Request::new(value);
-        request.set_timeout(Duration::from_secs(30));
+        request.set_timeout(deadline);
         if let Some(token) = &self.token {
             request
                 .metadata_mut()
@@ -409,20 +356,36 @@ impl RustBgpdAnnouncer {
     async fn call<T, F, Fut>(
         &self,
         operation: &str,
+        call: F,
+    ) -> std::result::Result<T, tonic::Status>
+    where
+        F: FnMut() -> Fut,
+        Fut: Future<Output = std::result::Result<tonic::Response<T>, tonic::Status>>,
+    {
+        self.call_with_policy(operation, RetryPolicy::Durable, call)
+            .await
+    }
+
+    /// Spends `policy` on one logical operation: `attempts` dispatches, each
+    /// bounded by `policy.attempt_deadline()`.
+    async fn call_with_policy<T, F, Fut>(
+        &self,
+        operation: &str,
+        policy: RetryPolicy,
         mut call: F,
     ) -> std::result::Result<T, tonic::Status>
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = std::result::Result<tonic::Response<T>, tonic::Status>>,
     {
-        for attempt in 0..3 {
-            let result = tokio::time::timeout(Duration::from_secs(30), call())
+        for attempt in 0..policy.attempts() {
+            let result = tokio::time::timeout(policy.attempt_deadline(), call())
                 .await
                 .unwrap_or_else(|_| Err(tonic::Status::deadline_exceeded("RPC deadline elapsed")));
             match result {
                 Ok(value) => return Ok(value.into_inner()),
                 Err(status)
-                    if attempt < 2
+                    if attempt + 1 < policy.attempts()
                         && matches!(status.code(), Code::Unavailable | Code::DeadlineExceeded) =>
                 {
                     tracing::warn!(operation, attempt = attempt + 1, code = ?status.code(), "retrying rustbgpd RPC");
@@ -478,10 +441,125 @@ fn generation(value: Option<pb::LeaseGeneration>) -> Result<LeaseGeneration> {
         .ok_or_else(|| invalid("missing lease generation"))
 }
 
-async fn read_tls_file(path: &str) -> anyhow::Result<Vec<u8>> {
-    tokio::fs::read(path)
-        .await
-        .map_err(|_| anyhow::anyhow!("cannot read rustbgpd TLS credential file"))
+/// How to reach the daemon, decided from configuration alone.
+enum Transport {
+    #[cfg(unix)]
+    Unix(std::path::PathBuf),
+    Tcp(Box<Endpoint>),
+}
+
+type BearerMetadata = tonic::metadata::MetadataValue<tonic::metadata::Ascii>;
+
+fn bearer_token(config: &RustBgpdConfig) -> anyhow::Result<String> {
+    if config.bearer_token_env.is_empty() {
+        return Ok(String::new());
+    }
+    std::env::var(&config.bearer_token_env)
+        .map_err(|_| anyhow::anyhow!("rustbgpd bearer token environment variable is missing"))
+}
+
+/// Everything connecting checks before it dials, with no network or socket
+/// access: the token, endpoint, transport security and TLS files.
+fn prepare(
+    config: &RustBgpdConfig,
+    token: &str,
+) -> anyhow::Result<(Transport, Option<BearerMetadata>)> {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    anyhow::ensure!(
+        config.client_cert_path.is_some() == config.client_key_path.is_some(),
+        "rustbgpd client certificate and key must be configured together"
+    );
+    anyhow::ensure!(
+        !token.chars().any(char::is_whitespace),
+        "invalid rustbgpd bearer token"
+    );
+    let token = if token.is_empty() {
+        None
+    } else {
+        let mut value: BearerMetadata = format!("Bearer {token}")
+            .parse()
+            .map_err(|_| anyhow::anyhow!("invalid rustbgpd bearer token"))?;
+        value.set_sensitive(true);
+        Some(value)
+    };
+    if let Some(path) = config.unix_socket_path()? {
+        anyhow::ensure!(
+            config.ca_cert_path.is_none() && config.client_cert_path.is_none(),
+            "TLS options are not valid for rustbgpd Unix sockets"
+        );
+        #[cfg(unix)]
+        return Ok((Transport::Unix(path), token));
+        #[cfg(not(unix))]
+        anyhow::bail!("rustbgpd Unix sockets are unsupported on this platform");
+    }
+    anyhow::ensure!(
+        !config.endpoint.contains(['@', '?', '#'])
+            && !config
+                .endpoint
+                .chars()
+                .any(|c| c.is_whitespace() || c.is_control()),
+        "invalid rustbgpd endpoint"
+    );
+    let uri: tonic::codegen::http::Uri = config
+        .endpoint
+        .parse()
+        .map_err(|_| anyhow::anyhow!("invalid rustbgpd endpoint"))?;
+    anyhow::ensure!(
+        uri.authority().is_some() && matches!(uri.path(), "" | "/"),
+        "invalid rustbgpd endpoint"
+    );
+    let mut endpoint = Endpoint::from_shared(config.endpoint.clone())
+        .map_err(|_| anyhow::anyhow!("invalid rustbgpd endpoint"))?
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(30));
+    match uri.scheme_str() {
+        Some("http") => {
+            let host = uri
+                .host()
+                .unwrap_or_default()
+                .trim_start_matches('[')
+                .trim_end_matches(']');
+            anyhow::ensure!(
+                host.parse::<std::net::IpAddr>()
+                    .is_ok_and(|ip| ip.is_loopback()),
+                "plaintext rustbgpd requires a literal loopback address"
+            );
+            anyhow::ensure!(
+                config.ca_cert_path.is_none() && config.client_cert_path.is_none(),
+                "TLS options require HTTPS"
+            );
+            anyhow::ensure!(token.is_some(), "rustbgpd bearer token is required");
+        }
+        Some("https") => {
+            anyhow::ensure!(
+                token.is_some() || config.client_cert_path.is_some(),
+                "rustbgpd bearer token or client certificate is required"
+            );
+            let mut tls = ClientTlsConfig::new()
+                .with_native_roots()
+                .timeout(Duration::from_secs(10));
+            if let Some(path) = &config.ca_cert_path {
+                tls = tls.ca_certificate(Certificate::from_pem(read_tls_file(path)?));
+            }
+            if let (Some(cert), Some(key)) = (&config.client_cert_path, &config.client_key_path) {
+                tls = tls.identity(Identity::from_pem(
+                    read_tls_file(cert)?,
+                    read_tls_file(key)?,
+                ));
+            }
+            endpoint = endpoint
+                .tls_config(tls)
+                .map_err(|_| anyhow::anyhow!("invalid rustbgpd TLS configuration"))?;
+        }
+        _ => anyhow::bail!("rustbgpd endpoint must use unix, http or https"),
+    }
+    Ok((Transport::Tcp(Box::new(endpoint)), token))
+}
+
+/// Small credential files, read once at startup; synchronous so the check can
+/// run them without a runtime.
+fn read_tls_file(path: &str) -> anyhow::Result<Vec<u8>> {
+    std::fs::read(path).map_err(|_| anyhow::anyhow!("cannot read rustbgpd TLS credential file"))
 }
 
 #[cfg(unix)]
@@ -1087,6 +1165,150 @@ impl FlowSpecAnnouncer for RustBgpdAnnouncer {
     }
 }
 
+impl RustBgpdAnnouncer {
+    /// One logical FlowSpec add under `policy`: the reconciler retries durable
+    /// intent, a caller holding the lifecycle mutex spends one bounded attempt.
+    async fn add_flowspec(&self, rule: &FlowSpecRule, policy: RetryPolicy) -> Result<()> {
+        if !rule.owner.is_empty() {
+            return Err(invalid("a leased rule needs AddLeasedFlowSpec"));
+        }
+        let payload = encode(rule)?;
+        let response = self
+            .mutation_call(
+                "AddFlowSpec",
+                rule.nlri
+                    .scope
+                    .as_ref()
+                    .map(|scope| scope.family.afi_safi())
+                    .as_slice(),
+                policy,
+                || async {
+                    pb::injection_service_client::InjectionServiceClient::new(self.channel.clone())
+                        .add_flow_spec(
+                            self.request_within(payload.clone(), policy.attempt_deadline()),
+                        )
+                        .await
+                },
+            )
+            .await?;
+        match pb::FlowSpecInjectOutcome::try_from(response.outcome) {
+            Ok(
+                pb::FlowSpecInjectOutcome::Created
+                | pb::FlowSpecInjectOutcome::Replaced
+                | pb::FlowSpecInjectOutcome::Unchanged,
+            ) => {
+                tracing::debug!(outcome = response.outcome, dst_prefix = %rule.nlri.dst_prefix, routing_scope = ?rule.nlri.scope, route_targets = ?rule.route_targets, "rustbgpd injection accepted");
+                Ok(())
+            }
+            _ => Err(invalid("unsupported rustbgpd injection outcome")),
+        }
+    }
+
+    async fn add_leased_flowspec(
+        &self,
+        rule: &FlowSpecRule,
+        lease_seconds: u32,
+        policy: RetryPolicy,
+    ) -> Result<LeaseGeneration> {
+        // Never AddFlowSpec: a rejected leased add creates nothing and never falls back.
+        if rule.owner.is_empty() {
+            return Err(invalid("a leased add needs an injection owner"));
+        }
+        let encoded = encode(rule)?;
+        let payload = pb::AddLeasedFlowSpecRequest {
+            rule: Some(encoded),
+            lease: Some(pb::InjectionLease {
+                owner: rule.owner.clone(),
+                lease_seconds,
+            }),
+        };
+        let response = self
+            .mutation_call(
+                "AddLeasedFlowSpec",
+                rule.nlri
+                    .scope
+                    .as_ref()
+                    .map(|scope| scope.family.afi_safi())
+                    .as_slice(),
+                policy,
+                || async {
+                    pb::injection_service_client::InjectionServiceClient::new(self.channel.clone())
+                        .add_leased_flow_spec(
+                            self.request_within(payload.clone(), policy.attempt_deadline()),
+                        )
+                        .await
+                },
+            )
+            .await?;
+        match response
+            .result
+            .map(|result| pb::FlowSpecInjectOutcome::try_from(result.outcome))
+        {
+            Some(Ok(
+                pb::FlowSpecInjectOutcome::Created
+                | pb::FlowSpecInjectOutcome::Replaced
+                | pb::FlowSpecInjectOutcome::Unchanged,
+            )) => {
+                let generation = generation(response.generation)?;
+                tracing::debug!(dst_prefix = %rule.nlri.dst_prefix, routing_scope = ?rule.nlri.scope, route_targets = ?rule.route_targets, "rustbgpd leased injection accepted");
+                Ok(generation)
+            }
+            _ => Err(invalid("unsupported rustbgpd leased injection outcome")),
+        }
+    }
+
+    async fn delete_flowspec(&self, rule: &FlowSpecRule, policy: RetryPolicy) -> Result<()> {
+        let (afi_safi, components) = encode_match(&rule.nlri)?;
+        // The recorded owner and never override_owner: a mismatch is FAILED_PRECONDITION.
+        let payload = pb::DeleteFlowSpecRequest {
+            afi_safi,
+            components,
+            allow_missing: true,
+            owner: rule.owner.clone(),
+            rd: rule
+                .nlri
+                .scope
+                .as_ref()
+                .map_or_else(String::new, |scope| scope.rd().to_owned()),
+            ..Default::default()
+        };
+        let response = self
+            .mutation_call(
+                "DeleteFlowSpec",
+                rule.nlri
+                    .scope
+                    .as_ref()
+                    .map(|scope| scope.family.afi_safi())
+                    .as_slice(),
+                policy,
+                || {
+                    let mut client = pb::injection_service_client::InjectionServiceClient::new(
+                        self.channel.clone(),
+                    );
+                    let request = self.request_within(payload.clone(), policy.attempt_deadline());
+                    async move {
+                        match client.delete_flow_spec(request).await {
+                            Err(status) if status.code() == Code::NotFound => {
+                                Ok(tonic::Response::new(pb::DeleteFlowSpecResponse {
+                                    outcome: 2,
+                                }))
+                            }
+                            result => result,
+                        }
+                    }
+                },
+            )
+            .await?;
+        match pb::FlowSpecDeleteOutcome::try_from(response.outcome) {
+            Ok(pb::FlowSpecDeleteOutcome::Deleted | pb::FlowSpecDeleteOutcome::NotPresent) => {
+                tracing::debug!(outcome = response.outcome, dst_prefix = %rule.nlri.dst_prefix, routing_scope = ?rule.nlri.scope, route_targets = ?rule.route_targets, "rustbgpd withdrawal accepted");
+                Ok(())
+            }
+            _ => Err(invalid("unsupported rustbgpd deletion outcome")),
+        }
+    }
+}
+
 #[async_trait]
 impl FlowSpecWriter for RustBgpdAnnouncer {
     fn register_scope(&self, scope: Option<&VpnFlowSpecIdentity>) -> Result<()> {
@@ -1114,36 +1336,11 @@ impl FlowSpecWriter for RustBgpdAnnouncer {
     }
 
     async fn announce(&self, rule: &FlowSpecRule) -> Result<()> {
-        if !rule.owner.is_empty() {
-            return Err(invalid("a leased rule needs AddLeasedFlowSpec"));
-        }
-        let payload = encode(rule)?;
-        let response = self
-            .mutation_call(
-                "AddFlowSpec",
-                rule.nlri
-                    .scope
-                    .as_ref()
-                    .map(|scope| scope.family.afi_safi())
-                    .as_slice(),
-                || async {
-                    pb::injection_service_client::InjectionServiceClient::new(self.channel.clone())
-                        .add_flow_spec(self.request(payload.clone()))
-                        .await
-                },
-            )
-            .await?;
-        match pb::FlowSpecInjectOutcome::try_from(response.outcome) {
-            Ok(
-                pb::FlowSpecInjectOutcome::Created
-                | pb::FlowSpecInjectOutcome::Replaced
-                | pb::FlowSpecInjectOutcome::Unchanged,
-            ) => {
-                tracing::debug!(outcome = response.outcome, dst_prefix = %rule.nlri.dst_prefix, routing_scope = ?rule.nlri.scope, route_targets = ?rule.route_targets, "rustbgpd injection accepted");
-                Ok(())
-            }
-            _ => Err(invalid("unsupported rustbgpd injection outcome")),
-        }
+        self.add_flowspec(rule, RetryPolicy::Durable).await
+    }
+
+    async fn announce_bounded(&self, rule: &FlowSpecRule) -> Result<()> {
+        self.add_flowspec(rule, RetryPolicy::Bounded).await
     }
 
     async fn announce_leased(
@@ -1151,98 +1348,25 @@ impl FlowSpecWriter for RustBgpdAnnouncer {
         rule: &FlowSpecRule,
         lease_seconds: u32,
     ) -> Result<LeaseGeneration> {
-        // Never AddFlowSpec: a rejected leased add creates nothing and never falls back.
-        if rule.owner.is_empty() {
-            return Err(invalid("a leased add needs an injection owner"));
-        }
-        let encoded = encode(rule)?;
-        let payload = pb::AddLeasedFlowSpecRequest {
-            rule: Some(encoded),
-            lease: Some(pb::InjectionLease {
-                owner: rule.owner.clone(),
-                lease_seconds,
-            }),
-        };
-        let response = self
-            .mutation_call(
-                "AddLeasedFlowSpec",
-                rule.nlri
-                    .scope
-                    .as_ref()
-                    .map(|scope| scope.family.afi_safi())
-                    .as_slice(),
-                || async {
-                    pb::injection_service_client::InjectionServiceClient::new(self.channel.clone())
-                        .add_leased_flow_spec(self.request(payload.clone()))
-                        .await
-                },
-            )
-            .await?;
-        match response
-            .result
-            .map(|result| pb::FlowSpecInjectOutcome::try_from(result.outcome))
-        {
-            Some(Ok(
-                pb::FlowSpecInjectOutcome::Created
-                | pb::FlowSpecInjectOutcome::Replaced
-                | pb::FlowSpecInjectOutcome::Unchanged,
-            )) => {
-                let generation = generation(response.generation)?;
-                tracing::debug!(dst_prefix = %rule.nlri.dst_prefix, routing_scope = ?rule.nlri.scope, route_targets = ?rule.route_targets, "rustbgpd leased injection accepted");
-                Ok(generation)
-            }
-            _ => Err(invalid("unsupported rustbgpd leased injection outcome")),
-        }
+        self.add_leased_flowspec(rule, lease_seconds, RetryPolicy::Durable)
+            .await
+    }
+
+    async fn announce_leased_bounded(
+        &self,
+        rule: &FlowSpecRule,
+        lease_seconds: u32,
+    ) -> Result<LeaseGeneration> {
+        self.add_leased_flowspec(rule, lease_seconds, RetryPolicy::Bounded)
+            .await
     }
 
     async fn withdraw(&self, rule: &FlowSpecRule) -> Result<()> {
-        let (afi_safi, components) = encode_match(&rule.nlri)?;
-        // The recorded owner and never override_owner: a mismatch is FAILED_PRECONDITION.
-        let payload = pb::DeleteFlowSpecRequest {
-            afi_safi,
-            components,
-            allow_missing: true,
-            owner: rule.owner.clone(),
-            rd: rule
-                .nlri
-                .scope
-                .as_ref()
-                .map_or_else(String::new, |scope| scope.rd().to_owned()),
-            ..Default::default()
-        };
-        let response = self
-            .mutation_call(
-                "DeleteFlowSpec",
-                rule.nlri
-                    .scope
-                    .as_ref()
-                    .map(|scope| scope.family.afi_safi())
-                    .as_slice(),
-                || {
-                    let mut client = pb::injection_service_client::InjectionServiceClient::new(
-                        self.channel.clone(),
-                    );
-                    let request = self.request(payload.clone());
-                    async move {
-                        match client.delete_flow_spec(request).await {
-                            Err(status) if status.code() == Code::NotFound => {
-                                Ok(tonic::Response::new(pb::DeleteFlowSpecResponse {
-                                    outcome: 2,
-                                }))
-                            }
-                            result => result,
-                        }
-                    }
-                },
-            )
-            .await?;
-        match pb::FlowSpecDeleteOutcome::try_from(response.outcome) {
-            Ok(pb::FlowSpecDeleteOutcome::Deleted | pb::FlowSpecDeleteOutcome::NotPresent) => {
-                tracing::debug!(outcome = response.outcome, dst_prefix = %rule.nlri.dst_prefix, routing_scope = ?rule.nlri.scope, route_targets = ?rule.route_targets, "rustbgpd withdrawal accepted");
-                Ok(())
-            }
-            _ => Err(invalid("unsupported rustbgpd deletion outcome")),
-        }
+        self.delete_flowspec(rule, RetryPolicy::Durable).await
+    }
+
+    async fn withdraw_bounded(&self, rule: &FlowSpecRule) -> Result<()> {
+        self.delete_flowspec(rule, RetryPolicy::Bounded).await
     }
 }
 #[async_trait]
@@ -1289,18 +1413,21 @@ impl FlowSpecReader for RustBgpdAnnouncer {
         Ok(rules)
     }
 }
-#[async_trait]
-impl BlackholeSpeaker for RustBgpdAnnouncer {
-    async fn announce_blackhole(&self, route: &BlackholeRoute) -> Result<AddOutcome> {
+impl RustBgpdAnnouncer {
+    async fn add_blackhole(
+        &self,
+        route: &BlackholeRoute,
+        policy: RetryPolicy,
+    ) -> Result<AddOutcome> {
         if !route.owner().is_empty() {
             return Err(invalid("a leased route needs AddLeasedPath"));
         }
         let payload = encode_blackhole(route);
         // OK is local Adj-RIB-In acceptance only.
         let response = self
-            .call("AddPath", || async {
+            .call_with_policy("AddPath", policy, || async {
                 pb::injection_service_client::InjectionServiceClient::new(self.channel.clone())
-                    .add_path(self.request(payload.clone()))
+                    .add_path(self.request_within(payload.clone(), policy.attempt_deadline()))
                     .await
             })
             .await
@@ -1308,10 +1435,11 @@ impl BlackholeSpeaker for RustBgpdAnnouncer {
         path_add_outcome("AddPath", Some(response))
     }
 
-    async fn announce_leased_blackhole(
+    async fn add_leased_blackhole(
         &self,
         route: &BlackholeRoute,
         lease_seconds: u32,
+        policy: RetryPolicy,
     ) -> Result<(LeaseGeneration, AddOutcome)> {
         // Never AddPath: a rejected leased add creates nothing and never falls back.
         if route.owner().is_empty() {
@@ -1325,9 +1453,11 @@ impl BlackholeSpeaker for RustBgpdAnnouncer {
             }),
         };
         let response = self
-            .call("AddLeasedPath", || async {
+            .call_with_policy("AddLeasedPath", policy, || async {
                 pb::injection_service_client::InjectionServiceClient::new(self.channel.clone())
-                    .add_leased_path(self.request(payload.clone()))
+                    .add_leased_path(
+                        self.request_within(payload.clone(), policy.attempt_deadline()),
+                    )
                     .await
             })
             .await
@@ -1336,7 +1466,12 @@ impl BlackholeSpeaker for RustBgpdAnnouncer {
         Ok((generation(response.generation)?, outcome))
     }
 
-    async fn withdraw_blackhole(&self, prefix: &ipnet::IpNet, owner: &str) -> Result<()> {
+    async fn delete_blackhole(
+        &self,
+        prefix: &ipnet::IpNet,
+        owner: &str,
+        policy: RetryPolicy,
+    ) -> Result<()> {
         super::require_host_route(prefix)?;
         // The recorded owner and never override_owner: a mismatch is FAILED_PRECONDITION.
         let payload = pb::DeletePathRequest {
@@ -1348,9 +1483,9 @@ impl BlackholeSpeaker for RustBgpdAnnouncer {
             ..Default::default()
         };
         let response = self
-            .call("DeletePath", || async {
+            .call_with_policy("DeletePath", policy, || async {
                 pb::injection_service_client::InjectionServiceClient::new(self.channel.clone())
-                    .delete_path(self.request(payload.clone()))
+                    .delete_path(self.request_within(payload.clone(), policy.attempt_deadline()))
                     .await
             })
             .await
@@ -1365,6 +1500,45 @@ impl BlackholeSpeaker for RustBgpdAnnouncer {
             }
             _ => Err(invalid("unsupported rustbgpd deletion outcome")),
         }
+    }
+}
+
+#[async_trait]
+impl BlackholeSpeaker for RustBgpdAnnouncer {
+    async fn announce_blackhole(&self, route: &BlackholeRoute) -> Result<AddOutcome> {
+        self.add_blackhole(route, RetryPolicy::Durable).await
+    }
+
+    async fn announce_blackhole_bounded(&self, route: &BlackholeRoute) -> Result<AddOutcome> {
+        self.add_blackhole(route, RetryPolicy::Bounded).await
+    }
+
+    async fn announce_leased_blackhole(
+        &self,
+        route: &BlackholeRoute,
+        lease_seconds: u32,
+    ) -> Result<(LeaseGeneration, AddOutcome)> {
+        self.add_leased_blackhole(route, lease_seconds, RetryPolicy::Durable)
+            .await
+    }
+
+    async fn announce_leased_blackhole_bounded(
+        &self,
+        route: &BlackholeRoute,
+        lease_seconds: u32,
+    ) -> Result<(LeaseGeneration, AddOutcome)> {
+        self.add_leased_blackhole(route, lease_seconds, RetryPolicy::Bounded)
+            .await
+    }
+
+    async fn withdraw_blackhole(&self, prefix: &ipnet::IpNet, owner: &str) -> Result<()> {
+        self.delete_blackhole(prefix, owner, RetryPolicy::Durable)
+            .await
+    }
+
+    async fn withdraw_blackhole_bounded(&self, prefix: &ipnet::IpNet, owner: &str) -> Result<()> {
+        self.delete_blackhole(prefix, owner, RetryPolicy::Bounded)
+            .await
     }
 
     async fn list_blackholes(&self) -> Result<BlackholeInventory> {
@@ -1480,7 +1654,7 @@ impl InjectionLeases for RustBgpdAnnouncer {
             .filter(|family| *family > 4)
             .collect();
         match self
-            .call_with_probes("RenewLease", &families, || async {
+            .call_with_probes("RenewLease", &families, RetryPolicy::Durable, || async {
                 pb::injection_service_client::InjectionServiceClient::new(self.channel.clone())
                     .renew_lease(self.request(request.clone()))
                     .await
@@ -2090,7 +2264,7 @@ mod tests {
         for family in [VpnFlowSpecFamily::Ipv4, VpnFlowSpecFamily::Ipv6] {
             let rule = FlowSpecRule::new(
                 FlowSpecNlri {
-                    scope: Some(VpnFlowSpecIdentity::new(family, "44407:40").unwrap()),
+                    scope: Some(VpnFlowSpecIdentity::new(family, "64500:40").unwrap()),
                     dst_prefix: if family == VpnFlowSpecFamily::Ipv4 {
                         "192.0.2.1/32"
                     } else {
@@ -2101,7 +2275,7 @@ mod tests {
                 },
                 FlowSpecAction::discard(),
             )
-            .with_route_targets(vec!["44407:777".into()]);
+            .with_route_targets(vec!["64500:777".into()]);
             service.mode.store(0, SeqCst);
             let before = service.probes.load(SeqCst);
             speaker.announce(&rule).await.unwrap();
@@ -2160,17 +2334,17 @@ mod tests {
             for destination in [destination, ""] {
                 let rule = FlowSpecRule::new(
                     FlowSpecNlri {
-                        scope: Some(VpnFlowSpecIdentity::new(family, "44407:40").unwrap()),
+                        scope: Some(VpnFlowSpecIdentity::new(family, "64500:40").unwrap()),
                         dst_prefix: destination.into(),
                         src_prefix: Some(source.into()),
                         ..Default::default()
                     },
                     FlowSpecAction::discard(),
                 )
-                .with_route_targets(vec!["44407:777".into(), "0.44407:777".into()]);
+                .with_route_targets(vec!["64500:777".into(), "0.64500:777".into()]);
                 let encoded = encode(&rule).unwrap();
                 assert_eq!(encoded.afi_safi, family.afi_safi());
-                assert_eq!(encoded.rd, "44407:40");
+                assert_eq!(encoded.rd, "64500:40");
                 assert!(encoded.extended_communities.is_empty());
                 assert_eq!(encoded.route_targets, rule.route_targets);
                 assert_eq!(
@@ -2219,7 +2393,7 @@ mod tests {
 
     #[test]
     fn raw_duplicate_scope_targets_replay_without_typed_twins() {
-        let scope = VpnFlowSpecIdentity::new(VpnFlowSpecFamily::Ipv4, "44407:40").unwrap();
+        let scope = VpnFlowSpecIdentity::new(VpnFlowSpecFamily::Ipv4, "64500:40").unwrap();
         let mut rule = FlowSpecRule::new(
             FlowSpecNlri {
                 scope: Some(scope),
@@ -2228,12 +2402,12 @@ mod tests {
             },
             FlowSpecAction::discard(),
         )
-        .with_route_targets(vec!["44407:777".into(); 2]);
+        .with_route_targets(vec!["64500:777".into(); 2]);
         let encoded = encode(&rule).unwrap();
         assert!(encoded.route_targets.is_empty());
         assert_eq!(
             encoded.extended_communities,
-            vec![route_target_bytes("44407:777").unwrap(); 2]
+            vec![route_target_bytes("64500:777").unwrap(); 2]
         );
         rule.nlri.scope = None;
         assert!(encode(&rule).is_err());
@@ -2273,8 +2447,8 @@ mod tests {
                             },
                         ));
                     }
-                    5 => bad.rd = "44407:40".into(),
-                    6 => bad.route_targets = vec!["44407:777".into()],
+                    5 => bad.rd = "64500:40".into(),
+                    6 => bad.route_targets = vec!["64500:777".into()],
                     _ => unreachable!(),
                 }
                 assert!(decode(bad, original.afi_safi).is_err(), "case {case}");
@@ -2630,13 +2804,13 @@ mod tests {
             for dscp in [0, 63] {
                 let rule = FlowSpecRule::new(
                     FlowSpecNlri {
-                        scope: Some(VpnFlowSpecIdentity::new(family, "44407:40").unwrap()),
+                        scope: Some(VpnFlowSpecIdentity::new(family, "64500:40").unwrap()),
                         dst_prefix: prefix.into(),
                         ..Default::default()
                     },
                     FlowSpecAction::mark(dscp),
                 )
-                .with_route_targets(vec!["44407:777".into()]);
+                .with_route_targets(vec!["64500:777".into()]);
                 let encoded = encode(&rule).unwrap();
                 assert!(
                     matches!(encoded.actions[0].action,Some(pb::flow_spec_action::Action::TrafficMarking(ref mark)) if mark.dscp==u32::from(dscp))
@@ -2656,7 +2830,7 @@ mod tests {
                     peer_address: "0.0.0.0".into(),
                     extended_communities: vec![
                         (0x8009_u64 << 48) | u64::from(dscp),
-                        crate::domain::route_target_bytes("44407:777").unwrap(),
+                        crate::domain::route_target_bytes("64500:777").unwrap(),
                     ],
                     ..Default::default()
                 };
