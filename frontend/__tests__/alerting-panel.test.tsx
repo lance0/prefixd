@@ -1,17 +1,28 @@
 import { cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react"
-import { afterEach, beforeEach, describe, expect, it } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { AlertingConfigPanel } from "@/components/dashboard/alerting-config-panel"
 import type { AlertingDestination } from "@/lib/api"
 import { deferred, settle, json, operatorResponse, renderApp, signIn, useFakeController } from "./support/fake-controller"
 
 const controller = useFakeController()
 
+// jsdom lacks the pointer-capture and scrolling APIs Radix Select calls while opening.
+const pointerApis = ["hasPointerCapture", "releasePointerCapture", "scrollIntoView"] as const
+const originals = new Map(pointerApis.map((name) => [name, Object.getOwnPropertyDescriptor(Element.prototype, name)]))
+
 beforeEach(() => {
   signIn(controller, "credentials", operatorResponse("admin"))
+
+  for (const name of pointerApis) Object.defineProperty(Element.prototype, name, { configurable: true, value: vi.fn(() => false) })
 })
 
 afterEach(() => {
   cleanup()
+
+  for (const [name, descriptor] of originals) {
+    if (descriptor) Object.defineProperty(Element.prototype, name, descriptor)
+    else Reflect.deleteProperty(Element.prototype, name)
+  }
 })
 
 const destinations: AlertingDestination[] = [
@@ -41,6 +52,35 @@ describe("alerting panel test results", () => {
     // Negative control: the old position-based match showed it on the first card.
     expect(within(destinationRow("PagerDuty")).queryByText("slack returned 404")).toBeNull()
   })
+})
+
+it("matches edit-mode results to the saved destination each card came from", async () => {
+  controller.route("GET", "/v1/config/alerting", () => json({ destinations, events: [] }))
+  // Test runs the saved configuration, so results name saved positions.
+  controller.route("POST", "/v1/config/alerting/test", () =>
+    json({
+      results: [
+        { index: 0, destination: "pagerduty", status: "error", error: "pagerduty test failure" },
+        { index: 1, destination: "slack", status: "error", error: "slack test failure" },
+      ],
+    }),
+  )
+  renderApp(<AlertingConfigPanel />)
+  fireEvent.click(await screen.findByRole("button", { name: "Edit" }))
+  fireEvent.click(screen.getByRole("button", { name: "Remove PagerDuty destination 1" }))
+  fireEvent.keyDown(screen.getByRole("combobox"), { key: "Enter" })
+  fireEvent.click(await screen.findByRole("option", { name: "Discord" }))
+  fireEvent.click(screen.getByRole("button", { name: "Done" }))
+
+  fireEvent.click(screen.getByRole("button", { name: "Test" }))
+
+  // Slack is now draft card 0 and still saved destination 1.
+  expect(await within(destinationRow("Slack")).findByText("slack test failure")).toBeVisible()
+  // Negative controls: draft-position matching put saved destination 0's
+  // result on Slack and saved destination 1's on the added Discord card.
+  expect(screen.queryByText("pagerduty test failure")).toBeNull()
+  expect(within(destinationRow("Discord")).queryByText("slack test failure")).toBeNull()
+  expect(within(destinationRow("Discord")).queryByText(/test failure/)).toBeNull()
 })
 
 it("discards an in-flight test result when configuration is saved", async () => {

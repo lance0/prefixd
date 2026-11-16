@@ -1541,18 +1541,8 @@ controller's environment, such as `DATABASE_URL`, to a URL of their choosing.
 
 Startup, reload and the alerting configuration editor require HTTPS for
 Slack, Discord, Teams, PagerDuty `events_url` and generic webhook URLs.
-Alert tests bypass event filters and return a configuration `index` for each
-result. They use event type `test` and unique `prefixd-test-<UUID>` incident IDs;
-PagerDuty resolves the test incident, while Opsgenie confirms asynchronous
-creation before closing and confirming the close (10 seconds per action).
-Failed cleanup remains an error and may require cleanup at the provider.
-HTTP failure bodies are omitted from logs and test results. Opsgenie JSON
-responses needed for confirmation are limited to 16 KiB.
-
-Only `mitigation.created`, `mitigation.withdrawn` and `mitigation.expired` are
-offered by the editor. Legacy `config.reloaded` and `guardrail.rejected` filters
-still parse. Slack `channel` is legacy-only; app webhooks use their bound
-channel. Dry-run mitigation alerts are marked in all destination formats.
+Event filters, test alerts and delivery behavior are described in the
+[alerting guide](../how-to/alerting.md#choose-events-per-destination).
 
 Startup and reload check `alerting.yaml` or, without it, the `alerting`
 section of `prefixd.yaml`. A refusal names the file and the key but not the

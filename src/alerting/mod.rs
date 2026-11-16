@@ -51,9 +51,10 @@ pub enum AlertEventType {
     ConfigReloaded,
     #[serde(rename = "guardrail.rejected")]
     GuardrailRejected,
-    // The dashboard's test alert. It bypasses every event filter and is never
-    // offered as a filter value, so a test reaches each configured destination.
-    #[serde(rename = "test")]
+    // The dashboard's test alert. It bypasses every event filter and never
+    // deserializes, so `events: [test]` is refused instead of loading as a
+    // filter that matches no real event and silently mutes the destination.
+    #[serde(rename = "test", skip_deserializing)]
     Test,
 }
 
@@ -281,6 +282,20 @@ fn platform_error(platform: &str, status: reqwest::StatusCode) -> String {
         "{platform} returned HTTP {} (response body omitted)",
         status.as_u16()
     )
+}
+
+/// A failed delivery attempt and whether another attempt may succeed.
+#[derive(Debug)]
+pub(crate) struct Failure {
+    pub error: String,
+    pub retry: bool,
+}
+
+/// Senders that do not classify their errors keep the three-attempt retry.
+impl From<String> for Failure {
+    fn from(error: String) -> Self {
+        Self { error, retry: true }
+    }
 }
 
 /// Configuration for a single alert destination. Each secret is given inline
@@ -1406,22 +1421,25 @@ impl AlertingService {
             }
             match self.send_once(dest, alert).await {
                 Ok(()) => return Ok(()),
-                Err(e) => {
-                    last_err = e;
+                Err(Failure { error, retry }) => {
+                    last_err = error;
                     tracing::debug!(
                         destination = %dest.destination_type(),
                         attempt = attempt + 1,
                         error = %last_err,
                         "alert delivery attempt failed"
                     );
+                    if !retry {
+                        break;
+                    }
                 }
             }
         }
         Err(last_err)
     }
 
-    async fn send_once(&self, dest: &DestinationConfig, alert: &Alert) -> Result<(), String> {
-        match dest {
+    async fn send_once(&self, dest: &DestinationConfig, alert: &Alert) -> Result<(), Failure> {
+        let result = match dest {
             DestinationConfig::Slack {
                 webhook_url,
                 webhook_url_env,
@@ -1472,7 +1490,7 @@ impl AlertingService {
                 ..
             } => {
                 let api_key = resolve_secret(api_key, api_key_env)?;
-                opsgenie::send(&self.http_client, &api_key, region, alert).await
+                return opsgenie::send(&self.http_client, &api_key, region, alert).await;
             }
             DestinationConfig::Generic {
                 url,
@@ -1489,7 +1507,8 @@ impl AlertingService {
                 };
                 generic::send(&self.http_client, &url, secret.as_deref(), headers, alert).await
             }
-        }
+        };
+        result.map_err(Failure::from)
     }
 }
 
@@ -1530,9 +1549,24 @@ mod tests {
         ] {
             assert!(AlertEventType::ALL_STRINGS.contains(&legacy), "{legacy}");
         }
-        // The test alert is an operator request, not a routable event.
+        for legacy in AlertEventType::ALL_STRINGS {
+            let parsed: AlertEventType = serde_json::from_value(serde_json::json!(legacy))
+                .unwrap_or_else(|e| panic!("{legacy}: {e}"));
+            assert_eq!(parsed.to_string(), *legacy);
+        }
+        // The test alert is an operator request, not a routable event: it is
+        // never offered, and a filter that names it does not load.
         assert!(!AlertEventType::ALL_STRINGS.contains(&"test"));
         assert!(!AlertEventType::ALL.contains(&AlertEventType::Test));
+        assert!(serde_json::from_value::<AlertEventType>(serde_json::json!("test")).is_err());
+        // It still serializes, so test payloads carry `event_type: test`.
+        assert_eq!(
+            serde_json::to_value(AlertEventType::Test).unwrap(),
+            serde_json::json!("test")
+        );
+        let yaml = "destinations:\n  - type: generic\n    url: https://hooks.example.com/x\n    events: [test]\n";
+        assert!(AlertingConfig::from_yaml(yaml).is_err());
+        assert!(AlertingConfig::from_yaml("events: [test]\n").is_err());
     }
 
     /// [`DESTINATION_KEYS`] is the runtime source of truth for which destination

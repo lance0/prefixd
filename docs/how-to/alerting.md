@@ -316,13 +316,19 @@ destinations:
 `region: eu` sends to `api.eu.opsgenie.com`; anything else is refused. prefixd
 creates an alert whose alias is the mitigation ID. A later
 `mitigation.withdrawn` or `mitigation.expired` closes that alert through
-Opsgenie's close API, using the same alias, instead of creating another alert.
-Opsgenie processes create and close requests asynchronously. prefixd polls the
-[request status API](https://docs.opsgenie.com/docs/alert-api) before reporting
-success or moving from test creation to cleanup. Each action has a 10-second
-deadline; status responses are limited to 16 KiB. A failed action, missing
-alert, malformed response or timeout is a delivery error. To alert only on new mitigations,
-send only `mitigation.created` there.
+Opsgenie's close API, using the same alias. It never creates an alert, so a
+destination whose filter lists only withdrawal or expiry opens no alerts at
+all. To alert only on new mitigations, send only `mitigation.created` there.
+
+Opsgenie accepts create and close requests with HTTP 202 and processes them
+later. For withdrawal, expiry and creation, prefixd treats the 202 as delivery
+and does not wait for the outcome, so closing an alert someone already closed
+by hand is not an error. These actions retry only after a connection failure,
+a 5xx or a 429; any other rejection fails at once. Only the
+[test alert](#send-a-test-alert) polls Opsgenie's
+[request status API](https://docs.opsgenie.com/docs/alert-api): it waits for
+the create to succeed before closing, then waits for the close. Each action
+has a 10-second deadline, and status responses are limited to 16 KiB.
 
 ### Generic webhook
 
@@ -401,7 +407,8 @@ prefixd sends these events:
 Filters still accept `config.reloaded`, `guardrail.rejected` and
 `mitigation.escalated` so configuration files written by older releases keep
 loading, but prefixd sends no alert for any of them and the editor does not
-offer them.
+offer them. `test` is not a filter value: the test alert ignores filters, and a
+file or editor save that lists `test` is refused.
 
 A destination with a nonempty `events` list receives only those events. A
 destination whose list is absent or empty, including `events: []`, uses the
@@ -443,7 +450,7 @@ of the cookie. `prefixdctl` has no test command.
 {
   "results": [
     {"index": 0, "destination": "slack", "status": "ok", "error": null},
-    {"index": 1, "destination": "pagerduty", "status": "error", "error": "pagerduty returned 400 Bad Request — ..."}
+    {"index": 1, "destination": "pagerduty", "status": "error", "error": "pagerduty returned HTTP 400 (response body omitted)"}
   ]
 }
 ```
@@ -458,12 +465,15 @@ in the `results` array. The request waits for every delivery,
 including [retries](#current-limits), so a failing destination can hold it for
 up to about 36 seconds (66 seconds for two-action PagerDuty/Opsgenie tests).
 
-A test opens a real PagerDuty incident and a real Opsgenie alert, keyed by the
-unique `prefixd-test-<UUID>` ID per invocation, stable across retries. prefixd
-resolves the PagerDuty incident and confirms creation and closure of the
-Opsgenie alert. Concurrent test invocations cannot resolve one another. The result is an error if either the create or the follow-up
-resolve fails. A failed or timed-out test can leave an incident open; check
-the provider before retrying if cleanup could not be confirmed.
+A test opens a real PagerDuty incident and a real Opsgenie alert, keyed by a
+`prefixd-test-<UUID>` ID that is unique to the invocation and stable across its
+retries. The PagerDuty incident pages the service's on-call responders before
+prefixd resolves it moments later, so warn them before testing. prefixd
+confirms creation and closure of the Opsgenie alert. Concurrent test
+invocations cannot resolve one another. The result is an error if either the
+create or the follow-up resolve fails. A failed or timed-out test can leave an
+incident open; check the provider before retrying if cleanup could not be
+confirmed.
 
 ## What alerts look like
 
@@ -597,6 +607,14 @@ Opsgenie success/status JSON is bounded to 16 KiB and never echoed on failure.
 | `429` | The platform is rate limiting; see below |
 | `... request failed: ...` | prefixd could not connect; check DNS, egress firewall and proxies from the controller host |
 
+A proxy in front of prefixd can give up first. Destinations are tested one
+after another, and each can take up to 36 seconds, or 66 for PagerDuty and
+Opsgenie, while it retries. A full test can therefore outlast a 60-second
+upstream read timeout, nginx's default, and the client sees `504` while the
+controller is still sending. The shipped nginx configuration allows longer.
+Raise the proxy's read timeout for `/v1/`, or read each destination's outcome
+under `alert delivery failed` in the controller log.
+
 ### Nothing arrives
 
 - Run a test alert. It reaches every configured destination, so an empty
@@ -626,13 +644,12 @@ busy chat channels, or point busy events at a generic webhook that aggregates.
 
 ## Current limits
 
-- **One way only.** delivery confirmations do not control mitigations. Chat replies,
-  reactions, and PagerDuty or Opsgenie acknowledgements do not change a
-  mitigation.
+- **One way only.** Chat replies, reactions, and PagerDuty or Opsgenie
+  acknowledgements do not change a mitigation.
 - **No durable delivery.** A failed post is retried twice, after 2 and then 4
-  more seconds, each HTTP call with a 10-second timeout. Opsgenie bounds each
-  complete asynchronous action to 10 seconds, including polling; a test has
-  two actions. After that the alert is
+  more seconds, each HTTP call with a 10-second timeout. Opsgenie retries only
+  connection failures, 5xx, 429 and test confirmation timeouts, and bounds each
+  test action to 10 seconds, including polling; a test has two actions. After that the alert is
   dropped and logged. Alerts waiting in memory are lost when the controller
   restarts, and above 64 alerts in flight new ones are dropped. A durable
   outbox with retry and dead-letter visibility is planned.

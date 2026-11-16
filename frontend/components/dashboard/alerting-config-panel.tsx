@@ -53,6 +53,10 @@ const DEST_COLORS: Record<DestType, string> = {
 
 interface DraftDestination extends AlertingDestination {
   _id: string
+  // Position in the saved configuration, which Test runs and its results name.
+  // Absent for a card added in this draft: the saved configuration has no
+  // such destination, so no result belongs to it.
+  _source?: number
 }
 
 function newId(): string {
@@ -73,12 +77,12 @@ function emptyDest(type: DestType): DraftDestination {
   }
 }
 
-function toDraft(d: AlertingDestination): DraftDestination {
-  return { ...d, _id: newId() }
+function toDraft(d: AlertingDestination, source: number): DraftDestination {
+  return { ...d, _id: newId(), _source: source }
 }
 
 function stripDraftId(d: DraftDestination): AlertingDestination {
-  const { _id, ...rest } = d
+  const { _id, _source, ...rest } = d
 
   return rest
 }
@@ -428,6 +432,7 @@ export function AlertingConfigPanel() {
     return data.destinations.map((dest, i) => ({
       ...dest,
       _id: `readonly-${dest.type}-${destSummary(dest)}-${i}`,
+      _source: i,
     }))
   }, [data])
 
@@ -588,9 +593,12 @@ export function AlertingConfigPanel() {
           ) : (
             destinations.map((dest, i) => {
               const isEditingThis = isEditing && editingIndex === i
-              // Key by configuration position: filter skips shift the results
-              // array, so its position does not name this card.
-              const result = testResults?.find((entry) => entry.index === i)
+              // Match the saved-configuration position the card came from:
+              // filter skips shift the results array, and draft removals and
+              // additions shift card positions, so neither names this card.
+              const result = dest._source === undefined
+                ? undefined
+                : testResults?.find((entry) => entry.index === dest._source)
 
               if (isEditingThis) {
                 return (
@@ -621,6 +629,20 @@ export function AlertingConfigPanel() {
                     <span className="text-xs font-medium">{DEST_LABELS[dest.type] ?? dest.type}</span>
                     {destSummary(dest) ? <span className="text-xs font-mono text-muted-foreground ml-2">{destSummary(dest)}</span> : null}
                   </div>
+                  {result && (
+                    result.status === "ok" ? (
+                      <CheckCircle2 className="h-4 w-4 text-success shrink-0" />
+                    ) : (
+                      <div className="flex items-center gap-1 shrink-0">
+                        <XCircle className="h-4 w-4 text-destructive" />
+                        {result.error ? (
+                          <span className="text-xs text-destructive max-w-[150px] truncate">
+                            {result.error}
+                          </span>
+                        ) : null}
+                      </div>
+                    )
+                  )}
                   {isEditing ? (
                     <div className="flex items-center gap-1 shrink-0">
                       <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => setEditingIndex(i)} aria-label={`Edit ${DEST_LABELS[dest.type] ?? dest.type} destination ${i + 1}`}>
@@ -630,22 +652,7 @@ export function AlertingConfigPanel() {
                         <Trash2 className="h-3.5 w-3.5" />
                       </Button>
                     </div>
-                  ) : (
-                    result && (
-                      result.status === "ok" ? (
-                        <CheckCircle2 className="h-4 w-4 text-success shrink-0" />
-                      ) : (
-                        <div className="flex items-center gap-1 shrink-0">
-                          <XCircle className="h-4 w-4 text-destructive" />
-                          {result.error ? (
-                            <span className="text-xs text-destructive max-w-[150px] truncate">
-                              {result.error}
-                            </span>
-                          ) : null}
-                        </div>
-                      )
-                    )
-                  )}
+                  ) : null}
                 </div>
               )
             })

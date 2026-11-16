@@ -1,4 +1,4 @@
-use super::{Alert, AlertEventType};
+use super::{Alert, AlertEventType, Failure};
 
 /// One Opsgenie API call: an alert create or a close by alias.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -19,91 +19,139 @@ pub async fn send(
     api_key: &str,
     region: &str,
     alert: &Alert,
-) -> Result<(), String> {
+) -> Result<(), Failure> {
     send_to(client, api_key, base_url(region), alert).await
 }
 
+/// Lifecycle creates and closes trust Opsgenie's 202: confirming each would
+/// turn a close of an alert an operator already closed by hand into a failed,
+/// retried delivery and multiply API calls during a mass expiry. Only the test
+/// sequence confirms each step, because its close must follow a processed
+/// create and its result claims the alert is gone.
 async fn send_to(
     client: &reqwest::Client,
     api_key: &str,
     base: &str,
     alert: &Alert,
-) -> Result<(), String> {
+) -> Result<(), Failure> {
+    let confirm = alert.event_type == AlertEventType::Test;
     for request in requests_at(alert, base) {
-        let action = match request.action {
-            Action::Create => "create",
-            Action::Close => "close",
-        };
-        // Bound the entire asynchronous action, including response reads and polling.
-        tokio::time::timeout(std::time::Duration::from_secs(10), async {
-            let response = client
-                .post(&request.url)
-                .header("Authorization", format!("GenieKey {}", api_key))
-                .json(&request.payload)
-                .send()
+        // One 10-second deadline per complete action. The POST is bounded by
+        // the client's own timeout and reports as a request failure.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        let response = client
+            .post(&request.url)
+            .header("Authorization", format!("GenieKey {}", api_key))
+            .json(&request.payload)
+            .send()
+            .await
+            .map_err(|e| Failure {
+                error: format!("opsgenie request failed: {}", e.without_url()),
+                retry: true,
+            })?;
+        let status = response.status();
+        if status != reqwest::StatusCode::ACCEPTED {
+            return Err(status_failure(status));
+        }
+        if confirm {
+            let action = match request.action {
+                Action::Create => "create",
+                Action::Close => "close",
+            };
+            tokio::time::timeout_at(deadline, confirm_request(client, api_key, base, response))
                 .await
-                .map_err(|_| "opsgenie request failed".to_string())?;
-            if !response.status().is_success() {
-                return Err(super::platform_error("opsgenie", response.status()));
-            }
-            if response.status() != reqwest::StatusCode::ACCEPTED {
-                return Err("opsgenie response did not confirm acceptance".into());
-            }
-            let body = bounded_json(response).await?;
-            let request_id = body["requestId"]
-                .as_str()
-                .filter(|id| !id.is_empty() && id.len() <= 128)
-                .ok_or("opsgenie response missing request ID")?;
-            let url = format!(
-                "{base}/v2/alerts/requests/{}",
-                urlencoding::encode(request_id)
-            );
-            loop {
-                let response = client
-                    .get(&url)
-                    .header("Authorization", format!("GenieKey {}", api_key))
-                    .send()
-                    .await
-                    .map_err(|_| "opsgenie status request failed".to_string())?;
-                // Request status may not be visible yet; this is NOT a close success.
-                if response.status() != reqwest::StatusCode::NOT_FOUND {
-                    if !response.status().is_success() {
-                        return Err(super::platform_error("opsgenie", response.status()));
-                    }
-                    let body = bounded_json(response).await?;
-                    match body["data"]["isSuccess"].as_bool() {
-                        Some(true) => return Ok(()),
-                        Some(false) => {
-                            return Err(
-                                "opsgenie asynchronous action failed (response body omitted)"
-                                    .into(),
-                            );
-                        }
-                        None => return Err("opsgenie status response missing result".into()),
-                    }
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-            }
-        })
-        .await
-        .map_err(|_| format!("opsgenie {action} confirmation timed out"))??;
+                .map_err(|_| Failure {
+                    error: format!("opsgenie {action} confirmation timed out"),
+                    retry: true,
+                })??;
+        }
     }
     Ok(())
 }
 
-async fn bounded_json(mut response: reqwest::Response) -> Result<serde_json::Value, String> {
+/// Only transport errors, 5xx and 429 may succeed on another attempt.
+fn status_failure(status: reqwest::StatusCode) -> Failure {
+    if status.is_success() {
+        return Failure {
+            error: "opsgenie response did not confirm acceptance".into(),
+            retry: false,
+        };
+    }
+    Failure {
+        error: super::platform_error("opsgenie", status),
+        retry: status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS,
+    }
+}
+
+/// Poll the accepted request's status until Opsgenie reports its outcome.
+async fn confirm_request(
+    client: &reqwest::Client,
+    api_key: &str,
+    base: &str,
+    response: reqwest::Response,
+) -> Result<(), Failure> {
+    let body = bounded_json(response).await?;
+    let request_id = body["requestId"]
+        .as_str()
+        .filter(|id| !id.is_empty() && id.len() <= 128)
+        .ok_or_else(|| Failure {
+            error: "opsgenie response missing request ID".into(),
+            retry: false,
+        })?;
+    let url = format!(
+        "{base}/v2/alerts/requests/{}",
+        urlencoding::encode(request_id)
+    );
+    loop {
+        let response = client
+            .get(&url)
+            .header("Authorization", format!("GenieKey {}", api_key))
+            .send()
+            .await
+            .map_err(|e| Failure {
+                error: format!("opsgenie status request failed: {}", e.without_url()),
+                retry: true,
+            })?;
+        // Observed behavior, not a documented contract: Opsgenie answers 404
+        // until the request's status is visible. It is never a close success.
+        if response.status() != reqwest::StatusCode::NOT_FOUND {
+            if !response.status().is_success() {
+                return Err(status_failure(response.status()));
+            }
+            let body = bounded_json(response).await?;
+            return match body["data"]["isSuccess"].as_bool() {
+                Some(true) => Ok(()),
+                Some(false) => Err(Failure {
+                    error: "opsgenie asynchronous action failed (response body omitted)".into(),
+                    retry: false,
+                }),
+                None => Err(Failure {
+                    error: "opsgenie status response missing result".into(),
+                    retry: false,
+                }),
+            };
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+}
+
+async fn bounded_json(mut response: reqwest::Response) -> Result<serde_json::Value, Failure> {
+    let failure = |error: &str, retry| Failure {
+        error: error.into(),
+        retry,
+    };
     let mut body = Vec::new();
     while let Some(chunk) = response
         .chunk()
         .await
-        .map_err(|_| "opsgenie response read failed")?
+        .map_err(|_| failure("opsgenie response read failed", true))?
     {
         if body.len() + chunk.len() > 16 * 1024 {
-            return Err("opsgenie response exceeds 16384 bytes".into());
+            return Err(failure("opsgenie response exceeds 16384 bytes", false));
         }
         body.extend_from_slice(&chunk);
     }
-    serde_json::from_slice(&body).map_err(|_| "opsgenie returned invalid JSON".into())
+    serde_json::from_slice(&body).map_err(|_| failure("opsgenie returned invalid JSON", false))
 }
 
 /// The calls this alert needs. A withdrawal or expiry closes the mitigation's
@@ -302,7 +350,7 @@ mod tests {
             ],
         ] {
             let (base, _, server) = mock(replies).await;
-            let error = send_to(
+            let failure = send_to(
                 &reqwest::Client::new(),
                 "secret",
                 &base,
@@ -311,33 +359,93 @@ mod tests {
             .await
             .unwrap_err();
             assert_eq!(
-                error,
+                failure.error,
                 "opsgenie asynchronous action failed (response body omitted)"
             );
+            assert!(!failure.retry);
+            server.abort();
+        }
+    }
+
+    fn lifecycle(event: AlertEventType) -> Alert {
+        let mut alert = Alert::test_alert();
+        alert.event_type = event;
+        alert.mitigation_id = Some("stable-mitigation".into());
+        alert
+    }
+
+    #[tokio::test]
+    async fn lifecycle_actions_trust_the_202_without_polling() {
+        // An alert an operator already closed by hand still answers the close
+        // with 202; only its request status would report failure. The mock
+        // answers any further call with 404, so a poll would fail the send.
+        for event in [
+            AlertEventType::MitigationCreated,
+            AlertEventType::MitigationWithdrawn,
+            AlertEventType::MitigationExpired,
+        ] {
+            let (base, calls, server) = mock(vec![accepted("already-closed")]).await;
+            send_to(&reqwest::Client::new(), "secret", &base, &lifecycle(event))
+                .await
+                .unwrap();
+            let calls = calls.lock().await;
+            assert_eq!(calls.len(), 1, "{event}: {calls:?}");
+            assert!(!calls[0].0.contains("/requests/"));
             server.abort();
         }
     }
 
     #[tokio::test]
-    async fn lifecycle_close_is_confirmed_and_404_is_not_success() {
-        for event in [
-            AlertEventType::MitigationWithdrawn,
-            AlertEventType::MitigationExpired,
+    async fn lifecycle_rejections_retry_only_when_transient() {
+        for (status, retry) in [
+            (404, false),
+            (422, false),
+            (200, false),
+            (429, true),
+            (503, true),
         ] {
-            for (replies, success) in [
-                (vec![accepted("close"), completed(true)], true),
-                (vec![(404, "secret-canary".into())], false),
-            ] {
-                let (base, calls, server) = mock(replies).await;
-                let mut alert = Alert::test_alert();
-                alert.event_type = event;
-                alert.mitigation_id = Some("stable-mitigation".into());
-                let result = send_to(&reqwest::Client::new(), "secret", &base, &alert).await;
-                assert_eq!(result.is_ok(), success);
-                assert!(calls.lock().await[0].0.contains("/stable-mitigation/close"));
-                server.abort();
-            }
+            let (base, calls, server) = mock(vec![(status, "secret-canary".into())]).await;
+            let failure = send_to(
+                &reqwest::Client::new(),
+                "secret",
+                &base,
+                &lifecycle(AlertEventType::MitigationWithdrawn),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(failure.retry, retry, "{status}: {}", failure.error);
+            assert!(!failure.error.contains("secret-canary"));
+            assert!(calls.lock().await[0].0.contains("/stable-mitigation/close"));
+            server.abort();
         }
+    }
+
+    #[tokio::test]
+    async fn hung_request_is_a_retryable_request_failure_not_a_confirmation_timeout() {
+        // Accept connections and never answer.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((socket, _)) = listener.accept().await {
+                held.push(socket);
+            }
+        });
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_millis(200))
+            .build()
+            .unwrap();
+        let failure = send_to(&client, "secret", &base, &Alert::test_alert())
+            .await
+            .unwrap_err();
+        assert!(
+            failure.error.starts_with("opsgenie request failed: "),
+            "{}",
+            failure.error
+        );
+        assert!(!failure.error.contains(&base), "{}", failure.error);
+        assert!(failure.retry);
+        server.abort();
     }
 
     #[tokio::test]
@@ -356,7 +464,8 @@ mod tests {
                 &Alert::test_alert(),
             )
             .await
-            .unwrap_err();
+            .unwrap_err()
+            .error;
             assert!(!error.contains("secret-canary"));
             assert!(error.len() < 100);
             server.abort();
@@ -366,7 +475,7 @@ mod tests {
     #[tokio::test]
     async fn pending_request_times_out_without_attempting_close() {
         let (base, calls, server) = mock(vec![accepted("pending")]).await;
-        let error = send_to(
+        let failure = send_to(
             &reqwest::Client::new(),
             "secret",
             &base,
@@ -374,7 +483,8 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert_eq!(error, "opsgenie create confirmation timed out");
+        assert_eq!(failure.error, "opsgenie create confirmation timed out");
+        assert!(failure.retry);
         assert!(
             calls
                 .lock()
