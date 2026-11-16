@@ -362,25 +362,22 @@ class FastNetMonLab(Lab):
         detected_rule = police(detected, 5_000_000, proto=17, dst_ports=(53, 123))
 
         def detect():
-            sender = subprocess.Popen(
-                [
-                    sys.executable,
-                    "-I",
-                    str(NETFLOW),
-                    self.collector,
-                    detected,
-                    "--seconds",
-                    str(DETECT_SECONDS),
-                ]
-            )
-            self.log(
-                f"$ {sys.executable} -I {NETFLOW.name} {self.collector} {detected} --seconds {DETECT_SECONDS}"
-            )
+            senders = []
+
+            # The trigger, so banned() reads the script-log cursor before any
+            # flow is sent and cannot skip a ban logged in the meantime.
+            def flood():
+                command = [sys.executable, "-I", str(NETFLOW), self.collector, detected]
+                command += ["--seconds", str(DETECT_SECONDS)]
+                self.log("$ " + " ".join(command))
+                senders.append(subprocess.Popen(command))
+
             try:
-                m = self.banned(lambda: None, detected, "09-detected-ban")
+                m = self.banned(flood, detected, "09-detected-ban")
             finally:
-                sender.terminate()
-                sender.wait(timeout=10)
+                for sender in senders:
+                    sender.terminate()
+                    sender.wait(timeout=10)
             self.check(m, "udp_flood", "police", 5_000_000)
             event = self.event(m["triggering_event_id"])
             raw = event["raw_details"]

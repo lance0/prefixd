@@ -39,8 +39,10 @@ collect() {
     # The attack details FastNetMon writes for each ban: the notify script's stdin.
     # Their names carry colons, which CI artifact upload refuses.
     docker cp "$(node fastnetmon):/var/log/fastnetmon_attacks/." "$receipt/fastnetmon/" >/dev/null 2>&1 || true
+    # With no files the glob stays literal; an `&&` test here would make that
+    # collect()'s status and stop finish() under set -e.
     for file in "$receipt"/fastnetmon/*:*; do
-        [ -e "$file" ] && mv "$file" "${file//:/-}"
+        if [ -e "$file" ]; then mv "$file" "${file//:/-}"; fi
     done
 }
 

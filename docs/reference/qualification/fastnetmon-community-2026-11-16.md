@@ -20,7 +20,7 @@ not covered here.
 
 | Item | Value |
 | --- | --- |
-| Run | 2026-11-16T04:13:09Z, local, Linux 7.0.0-30-generic, containerlab 0.74.3, lab nodes pinned to 16 CPUs, on this change's final lane code. Ten steps, 34 s of steps |
+| Run | 2026-11-16T04:25:06Z, local, Linux 7.0.0-30-generic, containerlab 0.74.3, lab nodes pinned to 16 CPUs, on this change's final lane code. Ten steps, 33.5 s of steps |
 | CI | The Interop job `FastNetMon Community (rustbgpd/FRR)` runs the same lane on every head of a change that touches `lab/**` or the notify script, and nightly. This receipt's text was written before the run on its own head; the change's description links that run |
 | prefixd | 0.27.0, local image `sha256:71c99a06881d…` built from main `583e200` plus this change's lab files |
 | FastNetMon | Community 1.2.9, `ghcr.io/pavel-odintsov/fastnetmon-community:1.2.9@sha256:c154b5b5fd74286719c1c1b97d02157a559926b7749fb5afa958d5faccbd5a0e` (index digest, image built 2026-05-31). [`fastnetmon.Dockerfile`](../../../lab/interop/fastnetmon.Dockerfile) adds `curl` with an unversioned `apt-get install`, so each build takes Ubuntu 24.04's current package: `curl 8.5.0-2ubuntu10.16` in this run. The lane records the installed version in `receipt.json` |
@@ -65,17 +65,17 @@ unmatched. The step qualifies the notify path and the route lifecycle, not that
 the resulting rule matches the attack. A manual ban carries no protocol, so its
 rule matches only the destination.
 
-Step 09 took 2.4 s from starting the exporter to FRR holding the rule:
+Step 09 took 2.3 s from starting the exporter to FRR holding the rule:
 FastNetMon crossed `threshold_pps`, collected `ban_details_records_count`
-(20) flow records in 0.73 s, then ran the script. This is one synthetic flow
+(20) flow records in 0.51 s, then ran the script. This is one synthetic flow
 pattern at one threshold, not a detection-quality or timing claim.
 
 Step 10 is FastNetMon's own unban of a detected ban. FastNetMon logged
-`Call script for ban client: 203.0.113.30` at 04:13:23.532 and
-`Call script for unban client: 203.0.113.30` at 04:13:48.531, 25 s later:
+`Call script for ban client: 203.0.113.30` at 04:25:20.263 and
+`Call script for unban client: 203.0.113.30` at 04:25:45.262, 25 s later:
 `ban_time` of 20 s, then the next wakeup of the cleanup thread, which runs every
 `ban_time / 2` seconds. The exporter had stopped, so the attack counted as
-finished. The step took 25.1 s. The withdrawal reason carries the direction
+finished. The step took 25.2 s. The withdrawal reason carries the direction
 FastNetMon passed (`incoming`); the probe below records the call's full
 arguments and stdin.
 
@@ -104,6 +104,21 @@ still failed (2026-11-16T04:14:12Z, exit 1), with the receipt deleted:
 a lab secret reached the receipt; deleting it
 receipt: target/interop/fastnetmon-rustbgpd-20261116T041412Z (exit 1)
 ```
+
+**Failure before any ban.** With the driver pointed once at a missing
+FastNetMon container, step 01 failed before FastNetMon wrote any attack
+details. `finish()` still collected the logs, destroyed the lab, removed the
+per-run credentials and scanned the receipt (2026-11-16T04:24:45Z, exit 1):
+
+```text
+FAIL: Command '['docker', 'exec', '-i', 'prefixd-fnm-missing', '/opt/fastnetmon-community/app/bin/fastnetmon_api_client', 'ban', '203.0.113.10']' returned non-zero exit status 1.
+receipt: target/interop/fastnetmon-rustbgpd-20261116T042445Z (exit 1)
+```
+
+With `collect()`'s earlier `[ -e "$file" ] && mv …` loop, the same failure
+printed no receipt line. The unmatched glob made that test `collect()`'s
+status, `set -e` stopped `finish()`, and all five `prefixd-fnm-*`
+containers and the run directory's credential files were left behind.
 
 **Outcome parser.** The unit tests in
 [`test_fastnetmon_frr.py`](../../../lab/interop/test_fastnetmon_frr.py) cover
@@ -331,7 +346,7 @@ FastNetMon's log for that address:
 
 Yes. With `netflow = on`, the lab networks in `networks_list` and
 `threshold_pps = 1000`, a NetFlow v5 export of 20 UDP flows of 1000 packets
-each per second toward one host was detected within 2.4 s (lane step 09) and
+each per second toward one host was detected within 2.3 s (lane step 09) and
 about 1 s after the probe's export began (log above).
 FastNetMon reported `3625 pps 14 mbps` from its five-second average, then
 waited for 20 flow records before calling the script. The exporter is a
