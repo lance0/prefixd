@@ -44,7 +44,7 @@ skip() { printf "\033[1;33m  SKIP\033[0m %s\n" "$*"; SKIP=$((SKIP + 1)); }
 
 wait_healthy() {
     local retries=${1:-30}
-    for i in $(seq 1 "$retries"); do
+    for _ in $(seq 1 "$retries"); do
         if op_curl -sf "$API/v1/health" >/dev/null 2>&1; then
             return 0
         fi
@@ -56,7 +56,7 @@ wait_healthy() {
 wait_container() {
     local container=$1
     local retries=${2:-30}
-    for i in $(seq 1 "$retries"); do
+    for _ in $(seq 1 "$retries"); do
         if docker inspect --format='{{.State.Running}}' "$container" 2>/dev/null | grep -q true; then
             return 0
         fi
@@ -280,7 +280,7 @@ run_prefixd_tests() {
     # Test 2: Rapid restart (simulate OOM kill / watchdog restart)
     log "Test: Rapid restart resilience"
 
-    for i in 1 2 3; do
+    for _ in 1 2 3; do
         docker restart prefixd >/dev/null 2>&1
         sleep 3
     done
