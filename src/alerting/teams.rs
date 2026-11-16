@@ -4,7 +4,7 @@ pub async fn send(
     client: &reqwest::Client,
     webhook_url: &str,
     alert: &Alert,
-) -> Result<(), String> {
+) -> Result<(), super::Failure> {
     let payload = build_payload(alert);
 
     let response = client
@@ -12,12 +12,11 @@ pub async fn send(
         .json(&payload)
         .send()
         .await
-        .map_err(|e| format!("teams request failed: {}", e.without_url()))?;
+        .map_err(|e| super::request_failure("teams", e))?;
 
     if !response.status().is_success() {
         let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        return Err(format!("teams returned {} — {}", status, body));
+        return Err(super::platform_failure("teams", status));
     }
 
     Ok(())
@@ -30,6 +29,9 @@ pub fn build_payload(alert: &Alert) -> serde_json::Value {
         serde_json::json!({"title": "Event", "value": alert.event_type.to_string()}),
     ];
 
+    if alert.dry_run {
+        facts.push(serde_json::json!({"title": "Mode", "value": "dry run, not announced"}));
+    }
     if let Some(ref ip) = alert.victim_ip {
         facts.push(serde_json::json!({"title": "Victim IP", "value": ip}));
     }

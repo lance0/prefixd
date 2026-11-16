@@ -507,8 +507,9 @@ pub async fn test_alerting(
 
     let outcomes: Vec<serde_json::Value> = results
         .into_iter()
-        .map(|(dest, result)| {
+        .map(|(index, dest, result)| {
             serde_json::json!({
+                "index": index,
                 "destination": dest,
                 "status": if result.is_ok() { "ok" } else { "error" },
                 "error": result.err(),

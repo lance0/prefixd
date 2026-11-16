@@ -21,6 +21,9 @@ describe("notification preferences with a legacy escalated mute", { timeout: 10_
 
     fireEvent.click(await screen.findByLabelText(/Mitigation expired/))
     expect(screen.queryByText(/escalated/i)).toBeNull()
+    // Never emitted, so it is not offered; config.reloaded is the resync mute.
+    expect(screen.queryByText(/Guardrail rejected/)).toBeNull()
+    expect(screen.getByLabelText(/Connection resync/)).toBeVisible()
     fireEvent.click(screen.getByRole("button", { name: "Save preferences" }))
 
     await waitFor(() => expect(fetch).toHaveBeenCalledWith(

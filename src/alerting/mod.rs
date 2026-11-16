@@ -44,13 +44,23 @@ pub enum AlertEventType {
     MitigationWithdrawn,
     #[serde(rename = "mitigation.expired")]
     MitigationExpired,
+    // Never emitted: prefixd sends no configuration-reload or guardrail alert.
+    // Kept so stored destination filters and notification mutes that list them
+    // still parse; the editor and preferences no longer offer them.
     #[serde(rename = "config.reloaded")]
     ConfigReloaded,
     #[serde(rename = "guardrail.rejected")]
     GuardrailRejected,
+    // The dashboard's test alert. It bypasses every event filter and never
+    // deserializes, so `events: [test]` is refused instead of loading as a
+    // filter that matches no real event and silently mutes the destination.
+    #[serde(rename = "test", skip_deserializing)]
+    Test,
 }
 
 impl AlertEventType {
+    /// Values a destination filter or notification mute may hold. Test is
+    /// absent: it is not an event an operator routes.
     pub const ALL: &[AlertEventType] = &[
         Self::MitigationCreated,
         Self::MitigationEscalated,
@@ -81,6 +91,7 @@ impl std::fmt::Display for AlertEventType {
             Self::MitigationExpired => write!(f, "mitigation.expired"),
             Self::ConfigReloaded => write!(f, "config.reloaded"),
             Self::GuardrailRejected => write!(f, "guardrail.rejected"),
+            Self::Test => write!(f, "test"),
         }
     }
 }
@@ -141,6 +152,14 @@ pub struct Alert {
     pub action_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pop: Option<String>,
+    /// True for a mitigation that recorded a dry-run origin and was never
+    /// announced, so every consumer can tell simulation from enforcement.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub dry_run: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl Alert {
@@ -161,7 +180,9 @@ impl Alert {
             vector: Some(m.vector.to_string()),
             action_type: Some(m.action_type.to_string()),
             pop: Some(m.pop.clone()),
+            dry_run: false,
         }
+        .mark_dry_run(m.is_dry_run_origin())
     }
 
     pub fn mitigation_escalated(m: &Mitigation) -> Self {
@@ -181,6 +202,7 @@ impl Alert {
             vector: Some(m.vector.to_string()),
             action_type: Some(m.action_type.to_string()),
             pop: Some(m.pop.clone()),
+            dry_run: false,
         }
     }
 
@@ -198,7 +220,9 @@ impl Alert {
             vector: Some(m.vector.to_string()),
             action_type: Some(m.action_type.to_string()),
             pop: Some(m.pop.clone()),
+            dry_run: false,
         }
+        .mark_dry_run(m.is_dry_run_origin())
     }
 
     pub fn mitigation_expired(m: &Mitigation) -> Self {
@@ -215,41 +239,79 @@ impl Alert {
             vector: Some(m.vector.to_string()),
             action_type: Some(m.action_type.to_string()),
             pop: Some(m.pop.clone()),
+            dry_run: false,
         }
+        .mark_dry_run(m.is_dry_run_origin())
     }
 
-    pub fn config_reloaded(items: &[String]) -> Self {
-        Self {
-            event_type: AlertEventType::ConfigReloaded,
-            severity: AlertSeverity::Info,
-            title: "Config Reloaded".into(),
-            message: format!("Reloaded: {}", items.join(", ")),
-            source: "prefixd".into(),
-            timestamp: chrono::Utc::now(),
-            mitigation_id: None,
-            victim_ip: None,
-            customer_id: None,
-            vector: None,
-            action_type: None,
-            pop: None,
+    /// Marks a simulated mitigation in the title and text as well as the
+    /// structured field, so an operator reading chat, a page or a webhook
+    /// cannot mistake it for an announced rule.
+    fn mark_dry_run(mut self, dry_run: bool) -> Self {
+        if dry_run {
+            self.dry_run = true;
+            self.title = format!("Dry Run: {}", self.title);
+            self.message = format!("{} — dry run, not announced", self.message);
         }
+        self
     }
 
     pub fn test_alert() -> Self {
         Self {
-            event_type: AlertEventType::MitigationCreated,
+            event_type: AlertEventType::Test,
             severity: AlertSeverity::Info,
             title: "Test Alert".into(),
             message: "This is a test alert from prefixd".into(),
             source: "prefixd".into(),
             timestamp: chrono::Utc::now(),
-            mitigation_id: None,
+            mitigation_id: Some(format!("prefixd-test-{}", uuid::Uuid::new_v4())),
             victim_ip: Some("203.0.113.1".into()),
             customer_id: Some("test_customer".into()),
             vector: Some("udp_flood".into()),
             action_type: Some("discard".into()),
             pop: Some("test".into()),
+            dry_run: false,
         }
+    }
+}
+
+/// A failed delivery attempt and whether another attempt may succeed.
+#[derive(Debug)]
+pub(crate) struct Failure {
+    pub error: String,
+    pub retry: bool,
+}
+
+impl Failure {
+    /// A failure that another attempt with the same input cannot fix.
+    fn permanent(error: impl Into<String>) -> Self {
+        Self {
+            error: error.into(),
+            retry: false,
+        }
+    }
+}
+
+/// A non-success HTTP status. Only 5xx and 429 may succeed on another attempt;
+/// any other rejection is deterministic. Never read or echo an untrusted
+/// platform error body: it may contain credentials, signed URLs, terminal
+/// controls, or arbitrarily large content.
+fn platform_failure(platform: &str, status: reqwest::StatusCode) -> Failure {
+    Failure {
+        error: format!(
+            "{platform} returned HTTP {} (response body omitted)",
+            status.as_u16()
+        ),
+        retry: status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS,
+    }
+}
+
+/// A request that never produced a response, which another attempt may fix.
+/// The URL can hold a secret, so it is dropped from the cause.
+fn request_failure(what: &str, error: reqwest::Error) -> Failure {
+    Failure {
+        error: format!("{what} request failed: {}", error.without_url()),
+        retry: true,
     }
 }
 
@@ -264,6 +326,9 @@ pub enum DestinationConfig {
         webhook_url: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         webhook_url_env: Option<String>,
+        /// Legacy only: an app's incoming webhook always posts to the channel
+        /// it was created for and ignores this. Kept in the payload for older
+        /// custom integrations that still read it.
         #[serde(default)]
         channel: Option<String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1321,6 +1386,11 @@ impl AlertingService {
     }
 
     fn should_send(&self, dest: &DestinationConfig, event_type: &AlertEventType) -> bool {
+        // A test alert is an explicit operator request: it reaches every
+        // destination whatever its filter, so the editor can check them all.
+        if matches!(event_type, AlertEventType::Test) {
+            return true;
+        }
         let dest_events = dest.events();
         if !dest_events.is_empty() {
             return dest_events.contains(event_type);
@@ -1335,10 +1405,13 @@ impl AlertingService {
             .any(|d| self.should_send(d, event_type))
     }
 
-    /// Send to all destinations, collecting results
-    pub async fn dispatch(&self, alert: &Alert) -> Vec<(String, Result<(), String>)> {
+    /// Send to all destinations, collecting each result with the destination's
+    /// position in the running configuration, which identifies its card in the
+    /// editor. The position travels with the result because filters can skip
+    /// destinations, so a result's array index does not name a destination.
+    pub async fn dispatch(&self, alert: &Alert) -> Vec<(usize, String, Result<(), String>)> {
         let mut results = Vec::new();
-        for dest in &self.config.destinations {
+        for (index, dest) in self.config.destinations.iter().enumerate() {
             if !self.should_send(dest, &alert.event_type) {
                 continue;
             }
@@ -1348,10 +1421,10 @@ impl AlertingService {
             ALERTS_SENT
                 .with_label_values(&[dest_type.as_str(), status])
                 .inc();
-            if let Err(ref e) = result {
+            if let Err(e) = &result {
                 tracing::warn!(destination = %dest_type, error = %e, "alert delivery failed");
             }
-            results.push((dest_type, result));
+            results.push((index, dest_type, result));
         }
         results
     }
@@ -1365,21 +1438,24 @@ impl AlertingService {
             }
             match self.send_once(dest, alert).await {
                 Ok(()) => return Ok(()),
-                Err(e) => {
-                    last_err = e;
+                Err(Failure { error, retry }) => {
+                    last_err = error;
                     tracing::debug!(
                         destination = %dest.destination_type(),
                         attempt = attempt + 1,
                         error = %last_err,
                         "alert delivery attempt failed"
                     );
+                    if !retry {
+                        break;
+                    }
                 }
             }
         }
         Err(last_err)
     }
 
-    async fn send_once(&self, dest: &DestinationConfig, alert: &Alert) -> Result<(), String> {
+    async fn send_once(&self, dest: &DestinationConfig, alert: &Alert) -> Result<(), Failure> {
         match dest {
             DestinationConfig::Slack {
                 webhook_url,
@@ -1387,7 +1463,8 @@ impl AlertingService {
                 channel,
                 ..
             } => {
-                let webhook_url = resolve_secret(webhook_url, webhook_url_env)?;
+                let webhook_url =
+                    resolve_secret(webhook_url, webhook_url_env).map_err(Failure::permanent)?;
                 slack::send(&self.http_client, &webhook_url, channel.as_deref(), alert).await
             }
             DestinationConfig::Discord {
@@ -1395,7 +1472,8 @@ impl AlertingService {
                 webhook_url_env,
                 ..
             } => {
-                let webhook_url = resolve_secret(webhook_url, webhook_url_env)?;
+                let webhook_url =
+                    resolve_secret(webhook_url, webhook_url_env).map_err(Failure::permanent)?;
                 discord::send(&self.http_client, &webhook_url, alert).await
             }
             DestinationConfig::Teams {
@@ -1403,7 +1481,8 @@ impl AlertingService {
                 webhook_url_env,
                 ..
             } => {
-                let webhook_url = resolve_secret(webhook_url, webhook_url_env)?;
+                let webhook_url =
+                    resolve_secret(webhook_url, webhook_url_env).map_err(Failure::permanent)?;
                 teams::send(&self.http_client, &webhook_url, alert).await
             }
             DestinationConfig::Telegram {
@@ -1412,7 +1491,8 @@ impl AlertingService {
                 chat_id,
                 ..
             } => {
-                let bot_token = resolve_secret(bot_token, bot_token_env)?;
+                let bot_token =
+                    resolve_secret(bot_token, bot_token_env).map_err(Failure::permanent)?;
                 telegram::send(&self.http_client, &bot_token, chat_id, alert).await
             }
             DestinationConfig::Pagerduty {
@@ -1421,7 +1501,8 @@ impl AlertingService {
                 events_url,
                 ..
             } => {
-                let routing_key = resolve_secret(routing_key, routing_key_env)?;
+                let routing_key =
+                    resolve_secret(routing_key, routing_key_env).map_err(Failure::permanent)?;
                 pagerduty::send(&self.http_client, events_url, &routing_key, alert).await
             }
             DestinationConfig::Opsgenie {
@@ -1430,7 +1511,7 @@ impl AlertingService {
                 region,
                 ..
             } => {
-                let api_key = resolve_secret(api_key, api_key_env)?;
+                let api_key = resolve_secret(api_key, api_key_env).map_err(Failure::permanent)?;
                 opsgenie::send(&self.http_client, &api_key, region, alert).await
             }
             DestinationConfig::Generic {
@@ -1441,9 +1522,9 @@ impl AlertingService {
                 headers,
                 ..
             } => {
-                let url = resolve_secret(url, url_env)?;
+                let url = resolve_secret(url, url_env).map_err(Failure::permanent)?;
                 let secret = match secret_env {
-                    Some(_) => Some(resolve_secret("", secret_env)?),
+                    Some(_) => Some(resolve_secret("", secret_env).map_err(Failure::permanent)?),
                     None => secret.clone(),
                 };
                 generic::send(&self.http_client, &url, secret.as_deref(), headers, alert).await
@@ -1476,6 +1557,37 @@ mod tests {
             AlertEventType::MitigationExpired.to_string(),
             "mitigation.expired"
         );
+        assert_eq!(AlertEventType::Test.to_string(), "test");
+    }
+
+    #[test]
+    fn legacy_events_stay_accepted_and_test_is_not_filterable() {
+        // Stored filters and mutes written by older releases must keep loading.
+        for legacy in [
+            "config.reloaded",
+            "guardrail.rejected",
+            "mitigation.escalated",
+        ] {
+            assert!(AlertEventType::ALL_STRINGS.contains(&legacy), "{legacy}");
+        }
+        for legacy in AlertEventType::ALL_STRINGS {
+            let parsed: AlertEventType = serde_json::from_value(serde_json::json!(legacy))
+                .unwrap_or_else(|e| panic!("{legacy}: {e}"));
+            assert_eq!(parsed.to_string(), *legacy);
+        }
+        // The test alert is an operator request, not a routable event: it is
+        // never offered, and a filter that names it does not load.
+        assert!(!AlertEventType::ALL_STRINGS.contains(&"test"));
+        assert!(!AlertEventType::ALL.contains(&AlertEventType::Test));
+        assert!(serde_json::from_value::<AlertEventType>(serde_json::json!("test")).is_err());
+        // It still serializes, so test payloads carry `event_type: test`.
+        assert_eq!(
+            serde_json::to_value(AlertEventType::Test).unwrap(),
+            serde_json::json!("test")
+        );
+        let yaml = "destinations:\n  - type: generic\n    url: https://hooks.example.com/x\n    events: [test]\n";
+        assert!(AlertingConfig::from_yaml(yaml).is_err());
+        assert!(AlertingConfig::from_yaml("events: [test]\n").is_err());
     }
 
     /// [`DESTINATION_KEYS`] is the runtime source of truth for which destination
@@ -1705,8 +1817,122 @@ mod tests {
     fn test_alert_serialization() {
         let alert = Alert::test_alert();
         let json = serde_json::to_string(&alert).unwrap();
-        assert!(json.contains("mitigation.created"));
+        assert!(json.contains(r#""event_type":"test""#));
         assert!(json.contains("203.0.113.1"));
+        // An enforced alert has no dry-run key, so consumers read it as real.
+        assert!(!json.contains("dry_run"));
+    }
+
+    #[test]
+    fn test_alert_reaches_destinations_whose_filter_excludes_mitigation_created() {
+        let config = AlertingConfig {
+            destinations: vec![],
+            events: vec![AlertEventType::MitigationCreated],
+        };
+        let svc = AlertingService::new(config);
+        // Negative control: before test alerts had their own event type, a
+        // destination filtered to withdrawals never received one.
+        let dest = DestinationConfig::Slack {
+            webhook_url: "https://hooks.slack.com/test".into(),
+            webhook_url_env: None,
+            channel: None,
+            events: vec![AlertEventType::MitigationWithdrawn],
+        };
+        assert!(!svc.should_send(&dest, &AlertEventType::MitigationCreated));
+        assert!(svc.should_send(&dest, &AlertEventType::Test));
+    }
+
+    fn dry_run_mitigation() -> Mitigation {
+        use crate::config::OperationMode;
+        use crate::domain::{
+            ActionParams, ActionType, AttackVector, MatchCriteria, MitigationIntent,
+        };
+        let mut mitigation = Mitigation::from_intent(
+            MitigationIntent {
+                event_id: uuid::Uuid::new_v4(),
+                customer_id: Some("cust_example".into()),
+                service_id: None,
+                pop: "iad1".into(),
+                match_criteria: MatchCriteria {
+                    dst_prefix: "203.0.113.10/32".into(),
+                    protocol: Some(17),
+                    dst_ports: vec![53],
+                    ..Default::default()
+                },
+                action_type: ActionType::Discard,
+                action_params: ActionParams::default(),
+                ttl_seconds: 60,
+                reason: "test".into(),
+            },
+            "203.0.113.10".into(),
+            AttackVector::UdpFlood,
+        );
+        mitigation.origin_mode = Some(OperationMode::DryRun);
+        mitigation
+    }
+
+    #[test]
+    fn dry_run_mitigation_alerts_are_marked_in_every_field() {
+        let mut mitigation = dry_run_mitigation();
+        for alert in [
+            Alert::mitigation_created(&mitigation),
+            Alert::mitigation_withdrawn(&mitigation),
+            Alert::mitigation_expired(&mitigation),
+        ] {
+            assert!(alert.dry_run);
+            assert!(alert.title.starts_with("Dry Run: "), "{}", alert.title);
+            assert!(alert.message.ends_with("dry run, not announced"));
+            let json = serde_json::to_value(&alert).unwrap();
+            assert_eq!(json["dry_run"], serde_json::json!(true));
+        }
+
+        // An enforced mitigation keeps the unchanged title, text and payload.
+        mitigation.origin_mode = None;
+        let alert = Alert::mitigation_created(&mitigation);
+        assert!(!alert.dry_run);
+        assert_eq!(alert.title, "Mitigation Created");
+        assert!(
+            serde_json::to_value(&alert)
+                .unwrap()
+                .get("dry_run")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn slack_payload_annotates_dry_run_alerts() {
+        let alert = Alert::mitigation_created(&dry_run_mitigation());
+        let payload = slack::build_payload(&alert, None);
+        let fields = payload["blocks"][2]["fields"].as_array().unwrap();
+        assert!(
+            fields
+                .iter()
+                .any(|field| field["text"] == "*Mode:* dry run, not announced")
+        );
+    }
+
+    #[test]
+    fn every_chat_format_marks_dry_run_without_marking_enforced_alerts() {
+        let mut mitigation = dry_run_mitigation();
+        for dry_run in [true, false] {
+            if !dry_run {
+                mitigation.origin_mode = None;
+            }
+            let alert = Alert::mitigation_created(&mitigation);
+            for payload in [
+                slack::build_payload(&alert, None).to_string(),
+                discord::build_payload(&alert).to_string(),
+                teams::build_payload(&alert).to_string(),
+                telegram::build_message(&alert),
+            ] {
+                assert_eq!(
+                    payload.contains("dry run, not announced"),
+                    dry_run,
+                    "{payload}"
+                );
+                assert_eq!(payload.contains("Dry Run:"), dry_run, "{payload}");
+            }
+        }
     }
 
     #[test]
@@ -2429,7 +2655,8 @@ mod tests {
         assert!(raw.to_string().contains("hook-secret-canary"), "{raw}");
         let error = generic::send(&client, url, None, &HashMap::new(), &Alert::test_alert())
             .await
-            .unwrap_err();
+            .unwrap_err()
+            .error;
         assert!(error.starts_with("webhook request failed"), "{error}");
         assert!(!error.contains("hook-secret-canary"), "{error}");
     }
@@ -2553,5 +2780,252 @@ mod tests {
               matching Generic destinations"
             ]
         );
+    }
+
+    #[test]
+    fn each_test_invocation_has_a_unique_incident_identity() {
+        let first = Alert::test_alert();
+        let second = Alert::test_alert();
+        assert!(
+            first
+                .mitigation_id
+                .as_deref()
+                .unwrap()
+                .starts_with("prefixd-test-")
+        );
+        assert_ne!(first.mitigation_id, second.mitigation_id);
+    }
+
+    /// Every sender's HTTP rejection names only the platform and status, and
+    /// only 5xx and 429 are retried. 429 and 503 are the negative control: a
+    /// classification that never retried would fail them.
+    #[tokio::test]
+    async fn platform_errors_never_echo_untrusted_bodies_and_retry_only_when_transient() {
+        for (status, retry) in [
+            (400, false),
+            (403, false),
+            (404, false),
+            (429, true),
+            (503, true),
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let app = axum::Router::new().fallback(move || async move {
+                (
+                    axum::http::StatusCode::from_u16(status).unwrap(),
+                    "secret-canary\u{001b}[31m".repeat(100_000),
+                )
+            });
+            let server = tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            let client = reqwest::Client::new();
+            let alert = Alert::test_alert();
+            let results = [
+                slack::send(&client, &url, None, &alert).await,
+                discord::send(&client, &url, &alert).await,
+                teams::send(&client, &url, &alert).await,
+                telegram::send_to(&client, &url, "chat", &alert).await,
+                pagerduty::send(&client, &url, "key", &alert).await,
+                opsgenie::send_to(&client, "key", &url, &alert).await,
+                generic::send(&client, &url, None, &HashMap::new(), &alert).await,
+            ];
+            for result in results {
+                let Failure {
+                    error,
+                    retry: retried,
+                } = result.unwrap_err();
+                assert!(
+                    error.ends_with(&format!("returned HTTP {status} (response body omitted)")),
+                    "{error}"
+                );
+                assert_eq!(retried, retry, "{error}");
+                assert!(error.len() < 100);
+                assert!(!error.contains("secret-canary"));
+            }
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn unusable_secrets_are_final_for_every_destination() {
+        let service = AlertingService::default();
+        let missing = Some("PREFIXD_TEST_UNSET_ALERT_SECRET".to_string());
+        let destinations = [
+            DestinationConfig::Slack {
+                webhook_url: String::new(),
+                webhook_url_env: missing.clone(),
+                channel: None,
+                events: vec![],
+            },
+            DestinationConfig::Discord {
+                webhook_url: String::new(),
+                webhook_url_env: missing.clone(),
+                events: vec![],
+            },
+            DestinationConfig::Teams {
+                webhook_url: String::new(),
+                webhook_url_env: missing.clone(),
+                events: vec![],
+            },
+            DestinationConfig::Telegram {
+                bot_token: String::new(),
+                bot_token_env: missing.clone(),
+                chat_id: "chat".into(),
+                events: vec![],
+            },
+            DestinationConfig::Pagerduty {
+                routing_key: String::new(),
+                routing_key_env: missing.clone(),
+                events_url: default_pagerduty_url(),
+                events: vec![],
+            },
+            DestinationConfig::Opsgenie {
+                api_key: String::new(),
+                api_key_env: missing.clone(),
+                region: default_opsgenie_region(),
+                events: vec![],
+            },
+            DestinationConfig::Generic {
+                url: "https://hooks.example.com/x".into(),
+                url_env: None,
+                secret: None,
+                secret_env: missing.clone(),
+                headers: HashMap::new(),
+                events: vec![],
+            },
+        ];
+        for dest in &destinations {
+            let failure = service
+                .send_once(dest, &Alert::test_alert())
+                .await
+                .unwrap_err();
+            assert!(
+                !failure.retry,
+                "{}: {}",
+                dest.destination_type(),
+                failure.error
+            );
+        }
+    }
+
+    #[derive(Debug)]
+    struct Recorded {
+        path: String,
+        body: serde_json::Value,
+    }
+
+    #[derive(Clone, Default)]
+    struct Captures(Arc<tokio::sync::Mutex<Vec<Recorded>>>);
+
+    async fn record(
+        axum::extract::State(captures): axum::extract::State<Captures>,
+        uri: axum::http::Uri,
+        body: String,
+    ) -> axum::http::StatusCode {
+        captures.0.lock().await.push(Recorded {
+            path: uri.path().to_string(),
+            body: serde_json::from_str(&body).unwrap_or(serde_json::Value::Null),
+        });
+        axum::http::StatusCode::OK
+    }
+
+    /// A local webhook sink. Destinations in these tests skip `validate`, which
+    /// would refuse a loopback URL, so the sender path itself is under test.
+    async fn capture_server() -> (String, Arc<tokio::sync::Mutex<Vec<Recorded>>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let recorded: Arc<tokio::sync::Mutex<Vec<Recorded>>> = Default::default();
+        let app = axum::Router::new()
+            .fallback(record)
+            .with_state(Captures(Arc::clone(&recorded)));
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (format!("http://{address}"), recorded)
+    }
+
+    fn generic_dest(url: String, events: Vec<AlertEventType>) -> DestinationConfig {
+        DestinationConfig::Generic {
+            url,
+            url_env: None,
+            secret: None,
+            secret_env: None,
+            headers: HashMap::new(),
+            events,
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_reports_the_configuration_index_of_each_destination() {
+        let (base, recorded) = capture_server().await;
+        let service = AlertingService::new(AlertingConfig {
+            destinations: vec![
+                generic_dest(
+                    format!("{base}/created"),
+                    vec![AlertEventType::MitigationCreated],
+                ),
+                generic_dest(
+                    format!("{base}/expired"),
+                    vec![AlertEventType::MitigationExpired],
+                ),
+            ],
+            events: vec![],
+        });
+        let mut alert = Alert::test_alert();
+        alert.event_type = AlertEventType::MitigationExpired;
+
+        let results = service.dispatch(&alert).await;
+
+        // The first destination is filtered out, so the only result's array
+        // position is 0 but its identity is configuration position 1.
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, 1);
+        assert_eq!(results[0].1, "generic");
+        assert!(results[0].2.is_ok(), "{:?}", results[0].2);
+        let recorded = recorded.lock().await;
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].path, "/expired");
+    }
+
+    #[tokio::test]
+    async fn test_alert_reaches_every_destination_and_closes_the_pagerduty_incident() {
+        let (base, recorded) = capture_server().await;
+        let service = AlertingService::new(AlertingConfig {
+            destinations: vec![
+                DestinationConfig::Pagerduty {
+                    routing_key: "routing-key".into(),
+                    routing_key_env: None,
+                    events_url: format!("{base}/pagerduty"),
+                    // Neither destination lists `test`, and both list an event
+                    // the test alert is not: the explicit request still arrives.
+                    events: vec![AlertEventType::MitigationWithdrawn],
+                },
+                generic_dest(
+                    format!("{base}/generic"),
+                    vec![AlertEventType::MitigationCreated],
+                ),
+            ],
+            events: vec![AlertEventType::MitigationWithdrawn],
+        });
+
+        let results = service.dispatch(&Alert::test_alert()).await;
+
+        assert_eq!(results.len(), 2);
+        assert!(
+            results.iter().all(|(_, _, result)| result.is_ok()),
+            "{results:?}"
+        );
+        assert_eq!(results[0].0, 0);
+        assert_eq!(results[1].0, 1);
+        let recorded = recorded.lock().await;
+        assert_eq!(recorded.len(), 3);
+        assert_eq!(recorded[0].path, "/pagerduty");
+        assert_eq!(recorded[0].body["event_action"], "trigger");
+        assert_eq!(recorded[1].path, "/pagerduty");
+        assert_eq!(recorded[1].body["event_action"], "resolve");
+        assert_eq!(recorded[1].body["dedup_key"], recorded[0].body["dedup_key"]);
+        assert_eq!(recorded[2].path, "/generic");
+        assert_eq!(recorded[2].body["event_type"], "test");
     }
 }

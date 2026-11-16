@@ -88,7 +88,7 @@ describe("operator configuration accessible names", () => {
   })
 
   const destinations: Array<{ destination: AlertingDestination; label: string; fields: string[] }> = [
-    { destination: { type: "slack", webhook_url: "***", channel: "#alerts" }, label: "Slack", fields: ["Webhook URL", "Channel (optional)"] },
+    { destination: { type: "slack", webhook_url: "***", channel: "#alerts" }, label: "Slack", fields: ["Webhook URL", "Channel (legacy only)"] },
     { destination: { type: "discord", webhook_url: "***" }, label: "Discord", fields: ["Webhook URL"] },
     { destination: { type: "teams", webhook_url: "***" }, label: "Microsoft Teams", fields: ["Webhook URL"] },
     { destination: { type: "telegram", bot_token: "***", chat_id: "123" }, label: "Telegram", fields: ["Bot token", "Chat ID"] },

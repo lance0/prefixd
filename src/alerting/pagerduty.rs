@@ -5,23 +5,34 @@ pub async fn send(
     events_url: &str,
     routing_key: &str,
     alert: &Alert,
-) -> Result<(), String> {
-    let payload = build_payload(alert, routing_key);
+) -> Result<(), super::Failure> {
+    for payload in build_requests(alert, routing_key) {
+        let response = client
+            .post(events_url)
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|e| super::request_failure("pagerduty", e))?;
 
-    let response = client
-        .post(events_url)
-        .json(&payload)
-        .send()
-        .await
-        .map_err(|e| format!("pagerduty request failed: {}", e.without_url()))?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        return Err(format!("pagerduty returned {} — {}", status, body));
+        if !response.status().is_success() {
+            let status = response.status();
+            return Err(super::platform_failure("pagerduty", status));
+        }
     }
 
     Ok(())
+}
+
+/// The events to post for this alert. A withdrawal or expiry resolves its
+/// mitigation's incident. A test alert triggers one and immediately resolves
+/// it with the same deduplication key, because PagerDuty has no test event and
+/// an operator asked only for a delivery check.
+pub fn build_requests(alert: &Alert, routing_key: &str) -> Vec<serde_json::Value> {
+    let mut requests = vec![build_payload(alert, routing_key)];
+    if alert.event_type == AlertEventType::Test {
+        requests.push(build_resolve_payload(alert, routing_key));
+    }
+    requests
 }
 
 pub fn build_payload(alert: &Alert, routing_key: &str) -> serde_json::Value {
@@ -36,6 +47,9 @@ pub fn build_payload(alert: &Alert, routing_key: &str) -> serde_json::Value {
         "event_type": alert.event_type.to_string(),
     });
 
+    if alert.dry_run {
+        custom_details["dry_run"] = serde_json::json!(true);
+    }
     if let Some(ref ip) = alert.victim_ip {
         custom_details["victim_ip"] = serde_json::json!(ip);
     }
@@ -67,6 +81,14 @@ pub fn build_payload(alert: &Alert, routing_key: &str) -> serde_json::Value {
     })
 }
 
+/// A resolve for the same deduplication key as `alert`, used to close the
+/// incident a test alert opened.
+pub fn build_resolve_payload(alert: &Alert, routing_key: &str) -> serde_json::Value {
+    let mut payload = build_payload(alert, routing_key);
+    payload["event_action"] = serde_json::json!("resolve");
+    payload
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -86,11 +108,26 @@ mod tests {
     }
 
     #[test]
+    fn test_alert_triggers_then_resolves_the_same_incident() {
+        let alert = Alert::test_alert();
+        let requests = build_requests(&alert, "key");
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0]["event_action"], "trigger");
+        assert_eq!(requests[1]["event_action"], "resolve");
+        assert_eq!(
+            requests[0]["dedup_key"],
+            alert.mitigation_id.as_deref().unwrap()
+        );
+        assert_eq!(requests[1]["dedup_key"], requests[0]["dedup_key"]);
+    }
+
+    #[test]
     fn test_pagerduty_resolve_on_withdraw() {
         let mut alert = Alert::test_alert();
         alert.event_type = AlertEventType::MitigationWithdrawn;
         let payload = build_payload(&alert, "key");
         assert_eq!(payload["event_action"], "resolve");
+        assert_eq!(build_requests(&alert, "key").len(), 1);
     }
 
     #[test]
@@ -99,5 +136,19 @@ mod tests {
         alert.event_type = AlertEventType::MitigationExpired;
         let payload = build_payload(&alert, "key");
         assert_eq!(payload["event_action"], "resolve");
+        assert_eq!(build_requests(&alert, "key").len(), 1);
+    }
+
+    #[test]
+    fn dry_run_mitigation_is_annotated_in_custom_details() {
+        let mut alert = Alert::test_alert();
+        alert.event_type = AlertEventType::MitigationCreated;
+        assert!(build_payload(&alert, "key")["payload"]["custom_details"]["dry_run"].is_null());
+        alert.dry_run = true;
+        let payload = build_payload(&alert, "key");
+        assert_eq!(
+            payload["payload"]["custom_details"]["dry_run"],
+            serde_json::json!(true)
+        );
     }
 }

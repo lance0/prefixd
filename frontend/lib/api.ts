@@ -1527,6 +1527,8 @@ export interface AlertingConfigResponse {
 }
 
 export interface AlertingTestResult {
+  /** Position of the destination in the running configuration; clients key results by it. */
+  index: number
   destination: string
   status: "ok" | "error"
   error: string | null

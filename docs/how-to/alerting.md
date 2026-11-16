@@ -188,8 +188,9 @@ destinations:
 ```
 
 An app's webhook always posts to the channel chosen when it was created. Slack
-documents that the payload cannot override it, so prefixd's optional `channel`
-key does not move app webhook messages. Create one webhook per channel instead.
+documents that the payload cannot override it, so the optional `channel` key is
+legacy-only: prefixd still sends it for older custom integrations, but it does
+not move app webhook messages. Create one webhook per channel instead.
 Slack revokes webhook URLs it finds published, so keep the URL out of
 repositories.
 
@@ -313,11 +314,21 @@ destinations:
 ```
 
 `region: eu` sends to `api.eu.opsgenie.com`; anything else is refused. prefixd
-creates an alert whose alias is the mitigation ID and never closes it. A later
-`mitigation.withdrawn` or `mitigation.expired` alert reuses the alias. Opsgenie
-folds it into the alert while that is open and raises its count, or opens a new
-alert if it was closed. Close alerts in Opsgenie, and send only
-`mitigation.created` there to avoid the follow-up alerts.
+creates an alert whose alias is the mitigation ID. A later
+`mitigation.withdrawn` or `mitigation.expired` closes that alert through
+Opsgenie's close API, using the same alias. It never creates an alert, so a
+destination whose filter lists only withdrawal or expiry opens no alerts at
+all. To alert only on new mitigations, send only `mitigation.created` there.
+
+Opsgenie accepts create and close requests with HTTP 202 and processes them
+later. For withdrawal, expiry and creation, prefixd treats the 202 as delivery
+and does not wait for the outcome, so closing an alert someone already closed
+by hand is not an error. Like every destination, they retry only after a
+connection failure, a 5xx or a 429; any other rejection fails at once. Only the
+[test alert](#send-a-test-alert) polls Opsgenie's
+[request status API](https://docs.opsgenie.com/docs/alert-api): it waits for
+the create to succeed before closing, then waits for the close. Each action
+has a 10-second deadline, and status responses are limited to 16 KiB.
 
 ### Generic webhook
 
@@ -393,9 +404,11 @@ prefixd sends these events:
 | `mitigation.withdrawn` | An operator withdraws a mitigation, a detector sends an unban, a safelist addition withdraws one, or the controller completes a pending withdrawal. |
 | `mitigation.expired` | A mitigation's TTL expires and the controller withdraws it. Expiry needs the running controller. |
 
-Filters also accept `config.reloaded` and `guardrail.rejected`, and the editor
-offers them, but prefixd sends no alert for either today. `mitigation.escalated`
-is accepted so older files still load; it is never sent.
+Filters still accept `config.reloaded`, `guardrail.rejected` and
+`mitigation.escalated` so configuration files written by older releases keep
+loading, but prefixd sends no alert for any of them and the editor does not
+offer them. `test` is not a filter value: the test alert ignores filters, and a
+file or editor save that lists `test` is refused.
 
 A destination with a nonempty `events` list receives only those events. A
 destination whose list is absent or empty, including `events: []`, uses the
@@ -436,22 +449,31 @@ of the cookie. `prefixdctl` has no test command.
 ```json
 {
   "results": [
-    {"destination": "slack", "status": "ok", "error": null},
-    {"destination": "pagerduty", "status": "error", "error": "pagerduty returned 400 Bad Request — ..."}
+    {"index": 0, "destination": "slack", "status": "ok", "error": null},
+    {"index": 1, "destination": "pagerduty", "status": "error", "error": "pagerduty returned HTTP 400 (response body omitted)"}
   ]
 }
 ```
 
-The test is a `mitigation.created` alert titled **Test Alert** at `info`
-severity, for `203.0.113.1`, `udp_flood`, `discard`, customer `test_customer`
-and POP `test`. It goes only to destinations whose filter includes
-`mitigation.created`, and `results` lists only those, in configuration order. A
-destination missing from the list did not receive it. The request waits for
-every delivery, including [retries](#current-limits), so a failing destination
-can hold it for up to about 36 seconds.
+The test is sent as a `test` event titled **Test Alert** at `info` severity, for
+`203.0.113.1`, `udp_flood`, `discard`, customer `test_customer` and POP `test`.
+It reaches every configured destination, whatever its event filter, and
+`results` lists one entry per destination: `index` is the destination's position
+in the running configuration, counted from 0, which identifies its card in the
+editor. The dashboard keys each result by `index`, not by the entry's position
+in the `results` array. The request waits for every delivery,
+including [retries](#current-limits), so a failing destination can hold it for
+up to about 36 seconds (66 seconds for two-action PagerDuty/Opsgenie tests).
 
-A test opens a real PagerDuty incident and a real Opsgenie alert, keyed by the
-title `Test Alert`. No later event resolves them; close them by hand.
+A test opens a real PagerDuty incident and a real Opsgenie alert, keyed by a
+`prefixd-test-<UUID>` ID that is unique to the invocation and stable across its
+retries. The PagerDuty incident pages the service's on-call responders before
+prefixd resolves it moments later, so warn them before testing. prefixd
+confirms creation and closure of the Opsgenie alert. Concurrent test
+invocations cannot resolve one another. The result is an error if either the
+create or the follow-up resolve fails. A failed or timed-out test can leave an
+incident open; check the provider before retrying if cleanup could not be
+confirmed.
 
 ## What alerts look like
 
@@ -474,9 +496,13 @@ details.
 | Opsgenie | Alert with priority P3 for warning and P5 for info, tags `prefixd` and the event, and the details |
 | Generic | The JSON [shown above](#generic-webhook) |
 
-Customer and POP appear only when the mitigation has them. Alerts do not say who
-acted, whether the controller is in dry-run, or whether a router enforced the
-rule.
+Customer and POP appear only when the mitigation has them. A dry-run
+mitigation's alerts say so: the title starts with `Dry Run: `, the message ends
+with `— dry run, not announced`, and the generic webhook JSON adds
+`"dry_run": true`. Chat, incident and webhook payloads carry the same marker in
+their details, and Opsgenie adds a `dry-run` tag, so an operator cannot mistake
+a simulation for an announced rule. Alerts do not say who acted or whether a
+router enforced the rule.
 
 ## Rules prefixd enforces
 
@@ -565,21 +591,34 @@ The running alert configuration stays as it was.
 
 ### The test alert returns an error
 
-The `error` field has the form `<type> returned <status> — <response body>`,
-so the platform's own error text is in it.
+The HTTP `error` field has the form
+`<type> returned HTTP <status> (response body omitted)`.
+
+Platform HTTP errors expose only the destination type and numeric status. Raw
+response bodies are neither read nor included in test results or delivery logs,
+so echoed credentials, control characters and large bodies cannot leak there.
+Opsgenie success/status JSON is bounded to 16 KiB and never echoed on failure.
 
 | Error | Likely cause |
 |-------|--------------|
-| `400` from Slack, Discord or Teams | The platform rejected the payload; check the body text |
+| `400` from Slack, Discord or Teams | The platform rejected the payload; check the provider configuration and logs |
 | `401` or `403` | Wrong or revoked key or webhook, a Teams workflow that requires sign-in, or a turned-off Opsgenie integration |
 | `404` | Deleted webhook, workflow or channel, or a mistyped URL |
 | `429` | The platform is rate limiting; see below |
 | `... request failed: ...` | prefixd could not connect; check DNS, egress firewall and proxies from the controller host |
 
+A proxy in front of prefixd can give up first. Destinations are tested one
+after another, and each can take up to 36 seconds, or 66 for PagerDuty and
+Opsgenie, while it retries. A full test can therefore outlast a 60-second
+upstream read timeout, nginx's default, and the client sees `504` while the
+controller is still sending. The shipped nginx configuration allows longer.
+Raise the proxy's read timeout for `/v1/`, or read each destination's outcome
+under `alert delivery failed` in the controller log.
+
 ### Nothing arrives
 
-- Run a test alert. If `results` is empty, no destination accepts
-  `mitigation.created`; check the event filters.
+- Run a test alert. It reaches every configured destination, so an empty
+  `results` list means no destination is configured.
 - Check the event filters for the event you expected. Withdrawal and expiry go
   only to destinations that list them, or to all when no filter applies.
 - Search the controller log for `alert delivery failed`, which names the
@@ -587,9 +626,10 @@ so the platform's own error text is in it.
 - Watch `prefixd_alerts_sent_total{destination,status}`, where `status` is
   `success` or `error`. It counts each final outcome, not each attempt.
 - A Slack app webhook ignores `channel`; look in the channel it was created for.
-- prefixd ignores keys it does not know inside a destination, without an
-  error. A misspelled optional key, such as `event:` for `events:`, silently
-  has no effect. Compare the file with `GET /v1/config/alerting`.
+- prefixd names each key it does not know in a startup or reload warning and
+  ignores it, so a misspelled optional key, such as `event:` for `events:`,
+  has no effect. Unknown keys become errors in a later release; see
+  [unknown keys](#unknown-keys).
 - `mitigation.expired` needs the running controller. If prefixd was stopped when
   a TTL passed, the alert is sent when it returns and expires the mitigation.
 
@@ -605,18 +645,19 @@ busy chat channels, or point busy events at a generic webhook that aggregates.
 
 ## Current limits
 
-- **One way only.** prefixd posts; it reads nothing back. Chat replies,
-  reactions, and PagerDuty or Opsgenie acknowledgements do not change a
-  mitigation.
-- **No durable delivery.** A failed post is retried twice, after 2 and then 4
-  more seconds, each attempt with a 10-second timeout. After that the alert is
+- **One way only.** Chat replies, reactions, and PagerDuty or Opsgenie
+  acknowledgements do not change a mitigation.
+- **No durable delivery.** A post that fails with a connection error, a 5xx or
+  a 429 is retried twice, after 2 and then 4 more seconds, each HTTP call with
+  a 10-second timeout; an Opsgenie test also retries a confirmation timeout.
+  Any other 4xx, and a secret whose environment variable is unset or empty,
+  fails at once. Opsgenie bounds each action to 10 seconds, including the
+  test's polling; a test has two actions. After that the alert is
   dropped and logged. Alerts waiting in memory are lost when the controller
   restarts, and above 64 alerts in flight new ones are dropped. A durable
   outbox with retry and dead-letter visibility is planned.
 - **No actor in the payload.** Alerts do not say which operator, detector or
   controller task caused the change. Use the audit log; naming the origin and
   actor in alerts is planned.
-- **No dry-run marker.** Dry-run mitigations send the same alerts as enforced
-  ones.
 - **No router evidence.** An alert reports the controller's decision, not that
   a router installed or enforced the rule.
