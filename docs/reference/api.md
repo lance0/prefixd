@@ -28,7 +28,7 @@ Each token has a name, one scope and optional bindings:
 
 | Scope | Reaches |
 |-------|---------|
-| `ingest` | Only `POST /v1/events`, `POST /v1/events/batch`, `POST /v1/signals/fastnetmon`, `POST /v1/signals/alertmanager`, `POST /v1/signals/webhook/{name}` for `auth.type: bearer` adapters and `POST /v1/signals/corroborator`. It requires a bound `source` and has no read access. Every other route refuses it with 403 before reading the request body. |
+| `ingest` | Only `POST /v1/events`, `POST /v1/events/batch`, `POST /v1/signals/fastnetmon`, `POST /v1/signals/alertmanager`, `POST /v1/signals/webhook/{name}` for `auth.type: bearer` adapters and `POST /v1/signals/corroborator`. It requires a bound `source` and has no read access. Every other route refuses it with 403 before reading the request body, except the session-only `GET /v1/ws/feed` and `/v1/auth/*`, which answer any token with 401. |
 | `operator` | Every route the Operator role reaches |
 | `admin` | Every route the Admin role reaches, except identity management: [token management](#api-token-management) and operator create, delete and password changes |
 
@@ -52,15 +52,20 @@ credential, and it replaces the session:
 - Other schemes, such as `Basic` added by a proxy in front of the dashboard,
   are not token credentials; the session applies.
 - More than one `Authorization` header with a Bearer among them is refused
-  with 401.
+  with 401. A token therefore cannot pass through a proxy that adds its own
+  `Authorization: Basic` header; terminate that proxy's authentication without
+  forwarding the header, or reach the API without the proxy. For the same
+  reason `prefixdctl` refuses a token together with `user:password` in
+  `--api`, which it would send as Basic auth.
 - HMAC webhook adapters ignore `Authorization`; the signature is their
   credential.
-- `GET /v1/ws/feed` and `/v1/auth/*` stay session-only.
+- `GET /v1/ws/feed` and `/v1/auth/*` stay session-only: the cookie of a token
+  request is removed, so they answer any token with 401.
 
 | Status | Token failure |
 |--------|---------------|
 | 401 | Unknown, malformed, revoked or expired; the error names `revoked` or `expired` |
-| 403 | Bound to another POP, or a scope the route does not accept |
+| 403 | Bound to another POP, a scope the route does not accept, or an identity or preferences route, which need a signed-in session |
 | 503 | The token store could not be read (`credential store unavailable; retry`) |
 
 Error bodies and logs never carry the token or its hash; a revoked or expired
@@ -2726,7 +2731,7 @@ no credentials. An ingest token gets 403.
       "observed_at": "2026-10-18T12:00:00Z"
     }
   },
-  "auth_mode": "bearer"
+  "auth_mode": "credentials"
 }
 ```
 
@@ -3783,7 +3788,9 @@ GET /v1/preferences
 Authorization: Bearer <token>
 ```
 
-Returns the current operator's notification preferences. Defaults to all toasts enabled, no quiet hours. `quiet_hours_start` and `quiet_hours_end` are always present (as integers or `null`).
+Returns the current operator's notification preferences. Preferences belong to
+an operator account, so both preference routes need a signed-in session; a
+token, an mTLS client and `none` mode get `403`. Defaults to all toasts enabled, no quiet hours. `quiet_hours_start` and `quiet_hours_end` are always present (as integers or `null`).
 
 **Response (operator with preferences):**
 

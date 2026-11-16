@@ -46,6 +46,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `token:<name>` instead of `bearer-token`, in audit rows, `acknowledged_by`,
   mitigation creators and safelist `added_by`. Update audit log filters,
   `GET /v1/audit` consumers and dashboards that match `bearer-token`.
+- Notification preferences (`GET` and `PUT /v1/preferences`) need a signed-in
+  session; a token, an mTLS client and `none` mode get 403. A token or `none`
+  mode had no operator account to store them under.
+- A token cannot pass through a proxy that adds `Authorization: Basic`: two
+  `Authorization` headers are refused with 401. `prefixdctl` refuses a token
+  together with `user:password` in `--api` (exit 2).
 - A request with `Authorization: Bearer` is authenticated by its token alone:
   its session cookie is ignored, and an invalid token gets 401 even beside a
   valid session. Clients that sent both now act as the token.

@@ -69,7 +69,9 @@ lands in shell history.
 Help output names these variables but never prints their values. prefixdctl
 never sends both credentials: a token and a session cookie together, from flags
 or the environment, is a usage error (exit 2) before any request. The
-controller would use only the token.
+controller would use only the token. A token together with `user:password` in
+`--api` (`PREFIXD_API`) is a usage error too: the userinfo would become an
+`Authorization: Basic` header beside the token, which the controller refuses.
 
 `PREFIXD_API_TOKEN` is no longer read. When it is set and `PREFIXD_TOKEN` is
 not, prefixdctl warns `PREFIXD_API_TOKEN is set but no longer read; set
