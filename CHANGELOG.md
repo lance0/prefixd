@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrade notes
 
+- **Compose needs `POSTGRES_PASSWORD`.** `docker-compose.yml` no longer falls
+  back to the published `prefixd_secret`; every Compose command refuses to run
+  until the variable is set. Before upgrading an existing Compose stack, put
+  the password its database was created with into `.env`, mode 0600:
+  `POSTGRES_PASSWORD=prefixd_secret` if you never set one. A different value
+  locks the controller out of PostgreSQL, and with leased FlowSpec its rules
+  lapse within one lease while it cannot start. `scripts/compose-bootstrap.sh
+  env` generates a password for a fresh checkout only, and refuses when a
+  PostgreSQL volume exists. See
+  [Compose database password](docs/how-to/upgrading.md#compose-database-password).
+- **The FastNetMon script needs `PREFIXD_API`.** It no longer defaults to
+  `http://localhost:8080`; without the variable it logs an error and posts
+  nothing. Set it in `/etc/default/prefixd` to the controller's ingress before
+  installing the new script.
 - **The shared bearer token is removed.** `http.auth.mode: bearer` and
   `http.auth.bearer_token_env` are refused at startup, on reload and by
   `prefixd --check`, each naming its removal release, and the controller no
@@ -268,6 +282,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- The Compose stack has no default database password, and the repository's
+  `.gitignore` covers `.env` and the bootstrap's `.prefixd/` token directory,
+  so neither secret is committed by accident.
 - Named, hashed, revocable API tokens replace the shared bearer token. Only the
   SHA-256 is stored, the secret is shown once, and revocation takes effect on
   the next request. A token's scope limits what it reaches: an ingest token is
@@ -336,27 +353,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The detected ban's rule polices the service's allowed UDP ports, not the
   flood's port, because the script sends none. The lane runs prefixd in
   `credentials` mode with API tokens minted by `prefixdctl`: the script holds
-  an operator token, because its unban still reads and withdraws mitigations,
-  so the lane covers the notify contract, the route lifecycle and token
-  authentication, not source binding. The
+  an ingest token bound to `fastnetmon`, the driver an operator token for its
+  reads, and an ingest token bound to another source and the operator token
+  must both get 403 on `/v1/events` with nothing stored. The
   [dated receipt](docs/reference/qualification/fastnetmon-community-2026-11-16.md)
   and `lab/interop/fastnetmon-probe.sh` record the image's missing `curl`,
   each notify call's arguments and stdin, and what is unqualified for
   FastNetMon Advanced.
-- `scripts/compose-bootstrap.sh rustbgpd` (or `gobgp`) bootstraps a fresh
-  Compose stack with no shared secret. In the running controller service it
-  creates the first Admin at a hidden password prompt, unless one exists, and
-  mints an ingest token bound to `fastnetmon` and an operator token for
-  `prefixdctl` into `.prefixd/` (directory 0700, files 0600). It never prints
-  a token or passes one on a command line, keeps existing token files, and
-  stops on any failure without leaving a partial file. The quickstart uses it,
-  then rehearses one detector event and its unban in dry-run with the ingest
-  token through `curl -K -`. The
+- `scripts/compose-bootstrap.sh` bootstraps a fresh Compose stack with no
+  shared secret. `env` writes a random `POSTGRES_PASSWORD` into a 0600 `.env`
+  before the first start. `rustbgpd` or `gobgp` then creates the first Admin at
+  a hidden password prompt, unless one exists, and mints an ingest token bound
+  to `fastnetmon` and an operator token for `prefixdctl` into `.prefixd/`
+  (directory 0700, files 0600, each token's name beside it). It never prints a
+  token or passes one on a command line, allows one run at a time, accepts only
+  a single canonical token line, and names any token it minted but could not
+  store so it can be revoked. A rerun keeps token files, resets their mode, and
+  stops if a recorded token was deleted or revoked. The quickstart uses it,
+  then confirms dry-run and rehearses one detector event and its unban with
+  the ingest token through `curl -K -`. The
   [dated receipt](docs/reference/qualification/compose-onboarding-2026-11-16.md)
   walks it on a fresh stack for both profiles.
 
 ### Changed
 
+- `prefixdctl` reads its token from a file with `--token-file` or
+  `PREFIXD_TOKEN_FILE`, `/dev/stdin` included, so `docker compose exec -T -e
+  PREFIXD_TOKEN_FILE=/dev/stdin ... < .prefixd/cli.token` keeps the token out
+  of the container's environment. A token file with `--token` or
+  `PREFIXD_TOKEN`, an unreadable file and a file of more than one line are usage
+  errors (exit 2) that name the file, never its contents.
+- `prefixdctl status` shows the running mode, `Mode: enforced` or
+  `Mode: dry-run`, and `--format json` adds `mode`. It reads
+  `GET /v1/config/settings`, so status makes two requests.
 - The Administration **Users** tab lists accounts read-only, with a note to
   use `prefixdctl operators`, unless the viewer is an Admin with a signed-in
   session; in `none` and `mtls` mode its create, delete and password actions
@@ -474,13 +503,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `prefixdctl` works in the Compose controller. Both controller services set
   `PREFIXD_API=http://127.0.0.1:8080`, so `docker compose exec` runs no longer
-  fail against the CLI's default port 80. The repository's `.gitignore` now
-  covers `.env` and `.prefixd/`.
+  fail against the CLI's default port 80.
 - The deployment guide's FastNetMon setup put the API token in
   `notify_script_args`, where the process list shows it, and said the bundled
   script needs an operator token. It now points to the FastNetMon guide, whose
   script needs only an ingest token from a file. The FastNetMon guide notes
-  that the Compose stack does not publish port 8080, the script's default.
+  that the Compose stack does not publish the controller's port 8080.
 - One victim sent in different spellings is now one victim. FastNetMon sends
   IPv6 zero-padded (`2001:0db8:0113::0010`) while other detectors send the
   canonical form, so the two never correlated toward `min_sources`, the
