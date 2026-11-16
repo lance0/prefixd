@@ -5,7 +5,7 @@ pub async fn send(
     webhook_url: &str,
     channel: Option<&str>,
     alert: &Alert,
-) -> Result<(), String> {
+) -> Result<(), super::Failure> {
     let payload = build_payload(alert, channel);
 
     let response = client
@@ -13,11 +13,11 @@ pub async fn send(
         .json(&payload)
         .send()
         .await
-        .map_err(|e| format!("slack request failed: {}", e.without_url()))?;
+        .map_err(|e| super::request_failure("slack", e))?;
 
     if !response.status().is_success() {
         let status = response.status();
-        return Err(super::platform_error("slack", status));
+        return Err(super::platform_failure("slack", status));
     }
 
     Ok(())

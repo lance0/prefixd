@@ -12,9 +12,9 @@ pub async fn send(
     secret: Option<&str>,
     headers: &HashMap<String, String>,
     alert: &Alert,
-) -> Result<(), String> {
-    let body =
-        serde_json::to_vec(alert).map_err(|e| format!("json serialization failed: {}", e))?;
+) -> Result<(), super::Failure> {
+    let body = serde_json::to_vec(alert)
+        .map_err(|e| super::Failure::permanent(format!("json serialization failed: {e}")))?;
 
     let mut request = client
         .post(url)
@@ -35,11 +35,11 @@ pub async fn send(
         .body(body)
         .send()
         .await
-        .map_err(|e| format!("webhook request failed: {}", e.without_url()))?;
+        .map_err(|e| super::request_failure("webhook", e))?;
 
     if !response.status().is_success() {
         let status = response.status();
-        return Err(super::platform_error("webhook", status));
+        return Err(super::platform_failure("webhook", status));
     }
 
     Ok(())

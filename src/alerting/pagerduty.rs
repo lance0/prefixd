@@ -5,18 +5,18 @@ pub async fn send(
     events_url: &str,
     routing_key: &str,
     alert: &Alert,
-) -> Result<(), String> {
+) -> Result<(), super::Failure> {
     for payload in build_requests(alert, routing_key) {
         let response = client
             .post(events_url)
             .json(&payload)
             .send()
             .await
-            .map_err(|e| format!("pagerduty request failed: {}", e.without_url()))?;
+            .map_err(|e| super::request_failure("pagerduty", e))?;
 
         if !response.status().is_success() {
             let status = response.status();
-            return Err(super::platform_error("pagerduty", status));
+            return Err(super::platform_failure("pagerduty", status));
         }
     }
 

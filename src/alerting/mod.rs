@@ -275,15 +275,6 @@ impl Alert {
     }
 }
 
-/// Never read or echo an untrusted platform error body: it may contain
-/// credentials, signed URLs, terminal controls, or arbitrarily large content.
-fn platform_error(platform: &str, status: reqwest::StatusCode) -> String {
-    format!(
-        "{platform} returned HTTP {} (response body omitted)",
-        status.as_u16()
-    )
-}
-
 /// A failed delivery attempt and whether another attempt may succeed.
 #[derive(Debug)]
 pub(crate) struct Failure {
@@ -291,10 +282,36 @@ pub(crate) struct Failure {
     pub retry: bool,
 }
 
-/// Senders that do not classify their errors keep the three-attempt retry.
-impl From<String> for Failure {
-    fn from(error: String) -> Self {
-        Self { error, retry: true }
+impl Failure {
+    /// A failure that another attempt with the same input cannot fix.
+    fn permanent(error: impl Into<String>) -> Self {
+        Self {
+            error: error.into(),
+            retry: false,
+        }
+    }
+}
+
+/// A non-success HTTP status. Only 5xx and 429 may succeed on another attempt;
+/// any other rejection is deterministic. Never read or echo an untrusted
+/// platform error body: it may contain credentials, signed URLs, terminal
+/// controls, or arbitrarily large content.
+fn platform_failure(platform: &str, status: reqwest::StatusCode) -> Failure {
+    Failure {
+        error: format!(
+            "{platform} returned HTTP {} (response body omitted)",
+            status.as_u16()
+        ),
+        retry: status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS,
+    }
+}
+
+/// A request that never produced a response, which another attempt may fix.
+/// The URL can hold a secret, so it is dropped from the cause.
+fn request_failure(what: &str, error: reqwest::Error) -> Failure {
+    Failure {
+        error: format!("{what} request failed: {}", error.without_url()),
+        retry: true,
     }
 }
 
@@ -1439,14 +1456,15 @@ impl AlertingService {
     }
 
     async fn send_once(&self, dest: &DestinationConfig, alert: &Alert) -> Result<(), Failure> {
-        let result = match dest {
+        match dest {
             DestinationConfig::Slack {
                 webhook_url,
                 webhook_url_env,
                 channel,
                 ..
             } => {
-                let webhook_url = resolve_secret(webhook_url, webhook_url_env)?;
+                let webhook_url =
+                    resolve_secret(webhook_url, webhook_url_env).map_err(Failure::permanent)?;
                 slack::send(&self.http_client, &webhook_url, channel.as_deref(), alert).await
             }
             DestinationConfig::Discord {
@@ -1454,7 +1472,8 @@ impl AlertingService {
                 webhook_url_env,
                 ..
             } => {
-                let webhook_url = resolve_secret(webhook_url, webhook_url_env)?;
+                let webhook_url =
+                    resolve_secret(webhook_url, webhook_url_env).map_err(Failure::permanent)?;
                 discord::send(&self.http_client, &webhook_url, alert).await
             }
             DestinationConfig::Teams {
@@ -1462,7 +1481,8 @@ impl AlertingService {
                 webhook_url_env,
                 ..
             } => {
-                let webhook_url = resolve_secret(webhook_url, webhook_url_env)?;
+                let webhook_url =
+                    resolve_secret(webhook_url, webhook_url_env).map_err(Failure::permanent)?;
                 teams::send(&self.http_client, &webhook_url, alert).await
             }
             DestinationConfig::Telegram {
@@ -1471,7 +1491,8 @@ impl AlertingService {
                 chat_id,
                 ..
             } => {
-                let bot_token = resolve_secret(bot_token, bot_token_env)?;
+                let bot_token =
+                    resolve_secret(bot_token, bot_token_env).map_err(Failure::permanent)?;
                 telegram::send(&self.http_client, &bot_token, chat_id, alert).await
             }
             DestinationConfig::Pagerduty {
@@ -1480,7 +1501,8 @@ impl AlertingService {
                 events_url,
                 ..
             } => {
-                let routing_key = resolve_secret(routing_key, routing_key_env)?;
+                let routing_key =
+                    resolve_secret(routing_key, routing_key_env).map_err(Failure::permanent)?;
                 pagerduty::send(&self.http_client, events_url, &routing_key, alert).await
             }
             DestinationConfig::Opsgenie {
@@ -1489,8 +1511,8 @@ impl AlertingService {
                 region,
                 ..
             } => {
-                let api_key = resolve_secret(api_key, api_key_env)?;
-                return opsgenie::send(&self.http_client, &api_key, region, alert).await;
+                let api_key = resolve_secret(api_key, api_key_env).map_err(Failure::permanent)?;
+                opsgenie::send(&self.http_client, &api_key, region, alert).await
             }
             DestinationConfig::Generic {
                 url,
@@ -1500,15 +1522,14 @@ impl AlertingService {
                 headers,
                 ..
             } => {
-                let url = resolve_secret(url, url_env)?;
+                let url = resolve_secret(url, url_env).map_err(Failure::permanent)?;
                 let secret = match secret_env {
-                    Some(_) => Some(resolve_secret("", secret_env)?),
+                    Some(_) => Some(resolve_secret("", secret_env).map_err(Failure::permanent)?),
                     None => secret.clone(),
                 };
                 generic::send(&self.http_client, &url, secret.as_deref(), headers, alert).await
             }
-        };
-        result.map_err(Failure::from)
+        }
     }
 }
 
@@ -2634,7 +2655,8 @@ mod tests {
         assert!(raw.to_string().contains("hook-secret-canary"), "{raw}");
         let error = generic::send(&client, url, None, &HashMap::new(), &Alert::test_alert())
             .await
-            .unwrap_err();
+            .unwrap_err()
+            .error;
         assert!(error.starts_with("webhook request failed"), "{error}");
         assert!(!error.contains("hook-secret-canary"), "{error}");
     }
@@ -2774,39 +2796,117 @@ mod tests {
         assert_ne!(first.mitigation_id, second.mitigation_id);
     }
 
+    /// Every sender's HTTP rejection names only the platform and status, and
+    /// only 5xx and 429 are retried. 429 and 503 are the negative control: a
+    /// classification that never retried would fail them.
     #[tokio::test]
-    async fn platform_errors_never_echo_untrusted_bodies() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}", listener.local_addr().unwrap());
-        let app = axum::Router::new().fallback(|| async {
-            (
-                axum::http::StatusCode::BAD_REQUEST,
-                "secret-canary\u{001b}[31m".repeat(100_000),
-            )
-        });
-        let server = tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
-        });
-        let client = reqwest::Client::new();
-        let alert = Alert::test_alert();
-        let results = [
-            slack::send(&client, &url, None, &alert).await,
-            discord::send(&client, &url, &alert).await,
-            teams::send(&client, &url, &alert).await,
-            telegram::send_to(&client, &url, "chat", &alert).await,
-            pagerduty::send(&client, &url, "key", &alert).await,
-            generic::send(&client, &url, None, &HashMap::new(), &alert).await,
-        ];
-        for result in results {
-            let error = result.unwrap_err();
-            assert!(
-                error.ends_with("returned HTTP 400 (response body omitted)"),
-                "{error}"
-            );
-            assert!(error.len() < 100);
-            assert!(!error.contains("secret-canary"));
+    async fn platform_errors_never_echo_untrusted_bodies_and_retry_only_when_transient() {
+        for (status, retry) in [
+            (400, false),
+            (403, false),
+            (404, false),
+            (429, true),
+            (503, true),
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let app = axum::Router::new().fallback(move || async move {
+                (
+                    axum::http::StatusCode::from_u16(status).unwrap(),
+                    "secret-canary\u{001b}[31m".repeat(100_000),
+                )
+            });
+            let server = tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            let client = reqwest::Client::new();
+            let alert = Alert::test_alert();
+            let results = [
+                slack::send(&client, &url, None, &alert).await,
+                discord::send(&client, &url, &alert).await,
+                teams::send(&client, &url, &alert).await,
+                telegram::send_to(&client, &url, "chat", &alert).await,
+                pagerduty::send(&client, &url, "key", &alert).await,
+                opsgenie::send_to(&client, "key", &url, &alert).await,
+                generic::send(&client, &url, None, &HashMap::new(), &alert).await,
+            ];
+            for result in results {
+                let Failure {
+                    error,
+                    retry: retried,
+                } = result.unwrap_err();
+                assert!(
+                    error.ends_with(&format!("returned HTTP {status} (response body omitted)")),
+                    "{error}"
+                );
+                assert_eq!(retried, retry, "{error}");
+                assert!(error.len() < 100);
+                assert!(!error.contains("secret-canary"));
+            }
+            server.abort();
         }
-        server.abort();
+    }
+
+    #[tokio::test]
+    async fn unusable_secrets_are_final_for_every_destination() {
+        let service = AlertingService::default();
+        let missing = Some("PREFIXD_TEST_UNSET_ALERT_SECRET".to_string());
+        let destinations = [
+            DestinationConfig::Slack {
+                webhook_url: String::new(),
+                webhook_url_env: missing.clone(),
+                channel: None,
+                events: vec![],
+            },
+            DestinationConfig::Discord {
+                webhook_url: String::new(),
+                webhook_url_env: missing.clone(),
+                events: vec![],
+            },
+            DestinationConfig::Teams {
+                webhook_url: String::new(),
+                webhook_url_env: missing.clone(),
+                events: vec![],
+            },
+            DestinationConfig::Telegram {
+                bot_token: String::new(),
+                bot_token_env: missing.clone(),
+                chat_id: "chat".into(),
+                events: vec![],
+            },
+            DestinationConfig::Pagerduty {
+                routing_key: String::new(),
+                routing_key_env: missing.clone(),
+                events_url: default_pagerduty_url(),
+                events: vec![],
+            },
+            DestinationConfig::Opsgenie {
+                api_key: String::new(),
+                api_key_env: missing.clone(),
+                region: default_opsgenie_region(),
+                events: vec![],
+            },
+            DestinationConfig::Generic {
+                url: "https://hooks.example.com/x".into(),
+                url_env: None,
+                secret: None,
+                secret_env: missing.clone(),
+                headers: HashMap::new(),
+                events: vec![],
+            },
+        ];
+        for dest in &destinations {
+            let failure = service
+                .send_once(dest, &Alert::test_alert())
+                .await
+                .unwrap_err();
+            assert!(
+                !failure.retry,
+                "{}: {}",
+                dest.destination_type(),
+                failure.error
+            );
+        }
     }
 
     #[derive(Debug)]

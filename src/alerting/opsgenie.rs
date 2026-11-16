@@ -28,7 +28,7 @@ pub async fn send(
 /// retried delivery and multiply API calls during a mass expiry. Only the test
 /// sequence confirms each step, because its close must follow a processed
 /// create and its result claims the alert is gone.
-async fn send_to(
+pub(super) async fn send_to(
     client: &reqwest::Client,
     api_key: &str,
     base: &str,
@@ -36,28 +36,29 @@ async fn send_to(
 ) -> Result<(), Failure> {
     let confirm = alert.event_type == AlertEventType::Test;
     for request in requests_at(alert, base) {
-        // One 10-second deadline per complete action. The POST is bounded by
-        // the client's own timeout and reports as a request failure.
+        let action = match request.action {
+            Action::Create => "create",
+            Action::Close => "close",
+        };
+        // One 10-second deadline bounds each complete action, POST included.
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
-        let response = client
+        let post = client
             .post(&request.url)
             .header("Authorization", format!("GenieKey {}", api_key))
             .json(&request.payload)
-            .send()
+            .send();
+        let response = tokio::time::timeout_at(deadline, post)
             .await
-            .map_err(|e| Failure {
-                error: format!("opsgenie request failed: {}", e.without_url()),
+            .map_err(|_| Failure {
+                error: format!("opsgenie {action} request timed out"),
                 retry: true,
-            })?;
+            })?
+            .map_err(|e| super::request_failure("opsgenie", e))?;
         let status = response.status();
         if status != reqwest::StatusCode::ACCEPTED {
             return Err(status_failure(status));
         }
         if confirm {
-            let action = match request.action {
-                Action::Create => "create",
-                Action::Close => "close",
-            };
             tokio::time::timeout_at(deadline, confirm_request(client, api_key, base, response))
                 .await
                 .map_err(|_| Failure {
@@ -69,18 +70,12 @@ async fn send_to(
     Ok(())
 }
 
-/// Only transport errors, 5xx and 429 may succeed on another attempt.
+/// Opsgenie acknowledges an action only with 202, so any other success is final.
 fn status_failure(status: reqwest::StatusCode) -> Failure {
     if status.is_success() {
-        return Failure {
-            error: "opsgenie response did not confirm acceptance".into(),
-            retry: false,
-        };
+        return Failure::permanent("opsgenie response did not confirm acceptance");
     }
-    Failure {
-        error: super::platform_error("opsgenie", status),
-        retry: status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS,
-    }
+    super::platform_failure("opsgenie", status)
 }
 
 /// Poll the accepted request's status until Opsgenie reports its outcome.
@@ -108,10 +103,7 @@ async fn confirm_request(
             .header("Authorization", format!("GenieKey {}", api_key))
             .send()
             .await
-            .map_err(|e| Failure {
-                error: format!("opsgenie status request failed: {}", e.without_url()),
-                retry: true,
-            })?;
+            .map_err(|e| super::request_failure("opsgenie status", e))?;
         // Observed behavior, not a documented contract: Opsgenie answers 404
         // until the request's status is visible. It is never a close success.
         if response.status() != reqwest::StatusCode::NOT_FOUND {

@@ -121,6 +121,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   destination no longer shifts a result onto the wrong card, and in the
   editor a result stays on the saved destination it belongs to after cards are
   removed or added.
+- Alert delivery no longer retries 4xx failures other than 429. A connection
+  failure, a 5xx or a 429 is still retried twice; any other rejection, and a
+  secret whose environment variable is unset or empty, fails on the first
+  attempt for every destination type, so it no longer holds an alert worker
+  for about 6 seconds or delays later destinations.
 - Slack `channel` is legacy-only. An app's incoming webhook always posts to the
   channel it was created for; the editor labels the field accordingly. The
   payload still carries the key for older custom integrations.
@@ -171,8 +176,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Opsgenie withdrawn and expired alerts close the mitigation's alert by alias
   through Opsgenie's close API instead of creating a second alert. Lifecycle
   creates and closes trust Opsgenie's HTTP 202, so closing an alert already
-  closed by hand succeeds, and they retry only connection failures, 5xx and
-  429. Only the test alert polls request status, confirming its create before
+  closed by hand succeeds. Only the test alert polls request status, confirming its create before
   closing and then confirming the close.
 - PagerDuty and Opsgenie test alerts clean up their incidents: prefixd
   resolves the PagerDuty incident and closes the Opsgenie alert

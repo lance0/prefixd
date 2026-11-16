@@ -323,8 +323,8 @@ all. To alert only on new mitigations, send only `mitigation.created` there.
 Opsgenie accepts create and close requests with HTTP 202 and processes them
 later. For withdrawal, expiry and creation, prefixd treats the 202 as delivery
 and does not wait for the outcome, so closing an alert someone already closed
-by hand is not an error. These actions retry only after a connection failure,
-a 5xx or a 429; any other rejection fails at once. Only the
+by hand is not an error. Like every destination, they retry only after a
+connection failure, a 5xx or a 429; any other rejection fails at once. Only the
 [test alert](#send-a-test-alert) polls Opsgenie's
 [request status API](https://docs.opsgenie.com/docs/alert-api): it waits for
 the create to succeed before closing, then waits for the close. Each action
@@ -626,9 +626,10 @@ under `alert delivery failed` in the controller log.
 - Watch `prefixd_alerts_sent_total{destination,status}`, where `status` is
   `success` or `error`. It counts each final outcome, not each attempt.
 - A Slack app webhook ignores `channel`; look in the channel it was created for.
-- prefixd ignores keys it does not know inside a destination, without an
-  error. A misspelled optional key, such as `event:` for `events:`, silently
-  has no effect. Compare the file with `GET /v1/config/alerting`.
+- prefixd names each key it does not know in a startup or reload warning and
+  ignores it, so a misspelled optional key, such as `event:` for `events:`,
+  has no effect. Unknown keys become errors in a later release; see
+  [unknown keys](#unknown-keys).
 - `mitigation.expired` needs the running controller. If prefixd was stopped when
   a TTL passed, the alert is sent when it returns and expires the mitigation.
 
@@ -646,10 +647,12 @@ busy chat channels, or point busy events at a generic webhook that aggregates.
 
 - **One way only.** Chat replies, reactions, and PagerDuty or Opsgenie
   acknowledgements do not change a mitigation.
-- **No durable delivery.** A failed post is retried twice, after 2 and then 4
-  more seconds, each HTTP call with a 10-second timeout. Opsgenie retries only
-  connection failures, 5xx, 429 and test confirmation timeouts, and bounds each
-  test action to 10 seconds, including polling; a test has two actions. After that the alert is
+- **No durable delivery.** A post that fails with a connection error, a 5xx or
+  a 429 is retried twice, after 2 and then 4 more seconds, each HTTP call with
+  a 10-second timeout; an Opsgenie test also retries a confirmation timeout.
+  Any other 4xx, and a secret whose environment variable is unset or empty,
+  fails at once. Opsgenie bounds each action to 10 seconds, including the
+  test's polling; a test has two actions. After that the alert is
   dropped and logged. Alerts waiting in memory are lost when the controller
   restarts, and above 64 alerts in flight new ones are dropped. A durable
   outbox with retry and dead-letter visibility is planned.

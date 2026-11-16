@@ -4,7 +4,7 @@ pub async fn send(
     client: &reqwest::Client,
     webhook_url: &str,
     alert: &Alert,
-) -> Result<(), String> {
+) -> Result<(), super::Failure> {
     let payload = build_payload(alert);
 
     let response = client
@@ -12,11 +12,11 @@ pub async fn send(
         .json(&payload)
         .send()
         .await
-        .map_err(|e| format!("discord request failed: {}", e.without_url()))?;
+        .map_err(|e| super::request_failure("discord", e))?;
 
     if !response.status().is_success() {
         let status = response.status();
-        return Err(super::platform_error("discord", status));
+        return Err(super::platform_failure("discord", status));
     }
 
     Ok(())
