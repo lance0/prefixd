@@ -77,13 +77,6 @@ connections use the anonymous identity. The dashboard hides named preferences an
 sign-out controls. `/v1/auth/logout` still deletes a retained session and clears
 its cookie. Credential sessions and bearer-mode hybrid sessions are unchanged.
 
-In `bearer` mode, startup and `prefixd --check` refuse a token variable that is
-unset, empty or set to an example value the documentation has shipped:
-`your-secret-token-here`, `your-secret-token`, `your-token-here`,
-`your-api-token`, `<your-api-token>`, `<token>` or `changeme`. Only exact
-matches are refused, and the error names the variable, never its value.
-Generate a random token, for example with `openssl rand -hex 32`.
-
 Credentials authentication uses PostgreSQL operator accounts, Argon2 password
 verification and PostgreSQL-backed browser sessions. Session cookie attributes
 are set by [`http.secure_cookies`](#http-server).
@@ -1722,7 +1715,6 @@ Errors name the file and the key they refuse, for example:
 - `failed to load /etc/prefixd/inventory.yaml: configuration error: inventory customer acme: invalid prefix "203.0.113.0/33"`
 - `failed to load /etc/prefixd/prefixd.yaml: mode: unknown variant, expected one of dry-run, enforced at line 2 column 7`
 - `/etc/prefixd/prefixd.yaml: auth.mode=bearer but PREFIXD_API_TOKEN is not set or empty`
-- `/etc/prefixd/prefixd.yaml: auth.mode=bearer but PREFIXD_API_TOKEN is a documented placeholder; generate a random token, for example with openssl rand -hex 32`
 - `/etc/prefixd/playbooks.yaml: configuration error: playbook "bh" has a blackhole step, but blackhole.enabled is false`
 
 ### Unknown keys

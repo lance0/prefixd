@@ -43,10 +43,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   To clear the warnings, delete step 2 of each in the dashboard playbook editor
   or in `/etc/prefixd/playbooks.yaml`; see
   [multi-step playbooks](docs/how-to/upgrading.md#multi-step-playbooks).
-- A bearer deployment whose API token is an example value from the
-  documentation or `.env.example`, such as `your-secret-token-here`, now
-  refuses to start, and `prefixd --check` reports it. Generate a random token,
-  for example with `openssl rand -hex 32`, and give it to every client.
 
 ### Known limitations
 
@@ -86,11 +82,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
-- `auth.mode: bearer` refuses the example API tokens the documentation and
-  `.env.example` have shipped, which are public credentials, at startup and in
-  `prefixd --check`. Only exact matches are refused; the error names the
-  variable, not the value. See
-  [authentication](docs/reference/configuration.md#authentication).
 - `prefixdctl --help` no longer prints the value of `PREFIXD_API_TOKEN`; it
   names the variable only, as it already did for `PREFIXD_SESSION_COOKIE`.
 

@@ -36,7 +36,8 @@ Scripts and container commands continue to use the installed `prefixdctl` binary
 
 ```bash
 export PREFIXD_API=http://localhost         # API endpoint (nginx entrypoint)
-export PREFIXD_API_TOKEN=your-token-here    # Bearer token
+# Bearer token: the controller's PREFIXD_API_TOKEN, read here from the Compose .env
+export PREFIXD_API_TOKEN=$(sed -n 's/^PREFIXD_API_TOKEN=//p' .env)
 ```
 
 ### Command-Line Options

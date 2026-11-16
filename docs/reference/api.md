@@ -1699,7 +1699,8 @@ receivers:
         http_config:
           authorization:
             type: Bearer
-            credentials: '<your-api-token>'
+            # A root-only file holding the controller's PREFIXD_API_TOKEN
+            credentials_file: /etc/alertmanager/prefixd-token
         send_resolved: true
 ```
 
