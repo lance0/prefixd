@@ -1494,19 +1494,22 @@ async fn admit_ban(
     let mut decision = match policy.evaluate(&event, context.as_ref()) {
         Err(
             error @ PrefixdError::GuardrailViolation(
-                GuardrailError::NoAllowedPorts | GuardrailError::InvalidAction(_),
+                GuardrailError::NoAllowedPorts
+                | GuardrailError::DestinationPortsRequired
+                | GuardrailError::InvalidAction(_),
             ),
         ) => {
             crate::observability::metrics::EVENTS_REJECTED
                 .with_label_values(&[event.source.as_str(), "guardrail"])
                 .inc();
-            let reason = if matches!(
-                &error,
-                PrefixdError::GuardrailViolation(GuardrailError::NoAllowedPorts)
-            ) {
-                "NoAllowedPorts"
-            } else {
-                "InvalidAction"
+            let reason = match &error {
+                PrefixdError::GuardrailViolation(GuardrailError::NoAllowedPorts) => {
+                    "NoAllowedPorts"
+                }
+                PrefixdError::GuardrailViolation(GuardrailError::DestinationPortsRequired) => {
+                    "DestinationPortsRequired"
+                }
+                _ => "InvalidAction",
             };
             crate::observability::metrics::GUARDRAIL_REJECTIONS
                 .with_label_values(&[reason])
@@ -2291,6 +2294,7 @@ async fn rule_owner(
     )
     .await?;
     if let Some(owner) = &owner {
+        crate::guardrails::check_detector_discard_scope(owner.action_type, &owner.match_criteria)?;
         // Extending a simulation in enforced mode would leave the attack unmitigated.
         if owner.is_dry_run_origin() && !state.is_dry_run() {
             return Err(PrefixdError::Conflict(format!(
@@ -5957,12 +5961,13 @@ playbooks:
             assert_eq!(outcomes(&response), [RuleOutcome::Created], "{name}");
             let saved = rows(&f).await;
             assert_eq!(saved.len(), 1, "{name}");
-            // Exactly today's udp_flood rule: police, service ports, no source ports.
+            // The portless fallback polices UDP without inventing service ports.
             let rule = &saved[0];
             assert_eq!(rule.vector, AttackVector::UdpFlood, "{name}");
             assert_eq!(rule.action_type, ActionType::Police);
             assert_eq!(rule.action_params.rate_bps, Some(5_000_000));
-            assert_eq!(rule.match_criteria.dst_ports, [53]);
+            assert_eq!(rule.match_criteria.protocol, Some(17));
+            assert!(rule.match_criteria.dst_ports.is_empty());
             assert!(rule.match_criteria.src_ports.is_empty());
             assert!(rule.match_criteria.fragment.is_none());
             assert!(

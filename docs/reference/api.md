@@ -270,6 +270,15 @@ Automatic detector mitigation otherwise uses a canonical host destination:
 both event metadata and mitigation intent. TCP and UDP remain 6 and 17. Normal
 prefix, port, TTL, quota and safelist checks still apply.
 
+For UDP/TCP events without destination ports, a police playbook produces a
+protocol-only match. Service `allowed_ports` never supplies missing attack
+ports. A UDP/TCP detector discard without destination ports is refused with
+`422` and guardrail reason `DestinationPortsRequired`, including a detector
+request that would extend an existing protocol-only discard. Explicit
+multi-rule matches retain their own selectors. See
+[allowed ports](configuration.md#allowed-ports) for collateral effects and
+the explicit-port intersection.
+
 **Response (202 Accepted):**
 
 ```json

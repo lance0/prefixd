@@ -64,3 +64,31 @@ Playbooks are hot-reloadable via `POST /v1/config/reload` or `prefixdctl reload`
 - Customer-specific playbook overrides (via inventory.yaml)
 - Time-based rules (different thresholds during maintenance windows)
 - Playbook editor UX enhancements (current UI supports both form and raw YAML editing via `PUT /v1/config/playbooks`)
+
+## Amendment: detector events without destination ports
+
+Amended 2026-11-16.
+
+Service `allowed_ports` filters destination ports a detector reports. It is
+not evidence of the attack's ports and never supplies missing event ports.
+Two nonempty lists with no intersection refuse admission.
+
+A UDP or TCP `police` event without destination ports produces a victim and
+protocol match without a destination-port component. This covers attacks to
+unknown ports, including the bundled FastNetMon script's UDP events. It also
+rate-limits legitimate traffic of that protocol to the victim: service ports
+are not exceptions to the policer. Set `require_top_ports: true` when that
+collateral effect is unacceptable; a portless event then matches no playbook.
+
+A UDP or TCP detector `discard` without destination ports is refused. Removing
+an inferred service-port list must not silently broaden a discard to all
+traffic of that protocol. ICMP, explicit multi-rule matches, blackholes and
+operator-specified manual rules keep their existing selection rules.
+The same guard applies before a detector extends a saved rule: matching a
+manual protocol-only discard does not authorize prolonging that discard.
+
+[ADR 033](033-detector-prefix-mitigations.md) still requires destination ports
+for prefix discard and TCP prefix police. Its UDP prefix-police exception
+continues to permit protocol-only matches. Both address families and speaker
+backends use the same policy result. Persisted rules keep their saved matches
+until withdrawn or expired; this change affects new admission.
