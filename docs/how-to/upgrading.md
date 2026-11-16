@@ -212,7 +212,7 @@ event, pending operation or audit row.
      Compose file and `.env.example` no longer pass it.
    - Run `prefixd --check` with the new release's binary or image, for
      example `docker run --rm -v /etc/prefixd:/etc/prefixd:ro <new image>
-     prefixd --check --config /etc/prefixd`. The old binary accepts a
+     --check --config /etc/prefixd` (the image's entrypoint is `prefixd`). The old binary accepts a
      configuration the new one refuses, such as `mode: bearer`. With leased
      FlowSpec, rustbgpd withdraws leased rules within one lease while no
      controller runs, so a refused configuration must not be discovered by a

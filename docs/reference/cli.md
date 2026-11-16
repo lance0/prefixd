@@ -14,7 +14,7 @@ cargo build --release
 Or use the Docker image:
 
 ```bash
-docker run --rm ghcr.io/lance0/prefixd:0.27.0 prefixdctl --help
+docker run --rm --entrypoint prefixdctl ghcr.io/lance0/prefixd:0.27.0 --help
 ```
 
 Use the release tag that matches your controller. `latest` and `main` follow
