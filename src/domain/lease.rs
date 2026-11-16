@@ -69,6 +69,15 @@ pub struct LeaseHealth {
     pub lease_seconds: u32,
     pub state: LeaseState,
     pub generation: Option<LeaseGeneration>,
+    /// Local estimate from the last live observation, not remote installation
+    /// evidence. Zero when expired; unknown with no lease, in dry-run or standby.
+    pub remaining_seconds: Option<u64>,
+    /// A held live or failing lease has missed two renewal intervals, or
+    /// renewal stopped at the TTL bound. This does not prove remote expiry.
+    pub renewal_overdue: bool,
+    /// Local desired leased intent, not the remote RIB. Unknown until a
+    /// successful inventory or committed leased write; failed reads preserve it.
+    pub has_leased_intent: Option<bool>,
     /// Controller time of the last renewal attempt.
     pub last_renewal_at: Option<DateTime<Utc>>,
     /// success, not_live or error.
@@ -144,6 +153,7 @@ struct Held {
     /// Leased writes since the last read was observed, so a read whose
     /// snapshot predates a write cannot lower the bound below it.
     written_since_read: Option<RenewUntil>,
+    has_leased_intent: Option<bool>,
     /// Renewal stopped at the TTL bound and logged its one warning.
     ttl_bound: bool,
 }
@@ -187,6 +197,7 @@ impl LeaseKeeper {
                 last_renewal: None,
                 renew_until: None,
                 written_since_read: None,
+                has_leased_intent: None,
                 ttl_bound: false,
             }),
             readd: AtomicBool::new(true),
@@ -268,6 +279,7 @@ impl LeaseKeeper {
         let read = RenewUntil::from_expiry(latest_expiry, self.started);
         let mut held = self.held.lock().unwrap();
         let written = held.written_since_read.take();
+        held.has_leased_intent = Some(latest_expiry.is_some() || written.is_some());
         held.renew_until = Some(read.later(written));
         self.resume(held);
     }
@@ -281,6 +293,7 @@ impl LeaseKeeper {
         }
         let written = RenewUntil::from_expiry(Some(mitigation.expires_at), self.started);
         let mut held = self.held.lock().unwrap();
+        held.has_leased_intent = Some(true);
         held.written_since_read = Some(written.later(held.written_since_read));
         held.renew_until = Some(written.later(held.renew_until));
         self.resume(held);
@@ -505,16 +518,19 @@ impl LeaseKeeper {
     }
 
     fn state(&self) -> LeaseState {
+        self.state_with_held(&self.held.lock().unwrap())
+    }
+
+    fn state_with_held(&self, held: &Held) -> LeaseState {
         if !self.renewing {
             return LeaseState::NotRenewing;
         }
-        let held = self.held.lock().unwrap();
         let lease = self.lease_duration();
         match held.state {
             // A standby stopped at the bound cannot read leased intent; the
             // active controller may still keep the lease live.
             LeaseState::Live | LeaseState::RenewalFailing
-                if self.standby() && self.stopped_at_bound(&held) =>
+                if self.standby() && self.stopped_at_bound(held) =>
             {
                 LeaseState::Standby
             }
@@ -527,7 +543,7 @@ impl LeaseKeeper {
             }
             // Renewal stopped at the TTL bound and even the last possible
             // renewal has lapsed: the speaker holds none of the leased routes.
-            LeaseState::Live | LeaseState::RenewalFailing if self.lapsed_at_bound(&held) => {
+            LeaseState::Live | LeaseState::RenewalFailing if self.lapsed_at_bound(held) => {
                 LeaseState::Expired
             }
             state => state,
@@ -545,8 +561,8 @@ impl LeaseKeeper {
     /// The lease-state gauge is published where state changes and on every
     /// renewal tick, not here.
     pub fn health(&self) -> LeaseHealth {
-        let state = self.state();
         let held = self.held.lock().unwrap();
+        let state = self.state_with_held(&held);
         // Only a held generation has a renewal to stop, as in `renew_once`.
         let stopped = self.renewing && held.generation.is_some() && self.stopped_at_bound(&held);
         LeaseHealth {
@@ -554,6 +570,16 @@ impl LeaseKeeper {
             lease_seconds: self.lease_seconds,
             state,
             generation: held.generation,
+            remaining_seconds: match state {
+                LeaseState::Live | LeaseState::RenewalFailing => held
+                    .live_at
+                    .map(|at| self.lease_duration().saturating_sub(at.elapsed()).as_secs()),
+                LeaseState::Expired => Some(0),
+                LeaseState::None | LeaseState::NotRenewing | LeaseState::Standby => None,
+            },
+            renewal_overdue: matches!(state, LeaseState::Live | LeaseState::RenewalFailing)
+                && self.renewal_overdue_with_held(&held),
+            has_leased_intent: held.has_leased_intent,
             last_renewal_at: held.last_renewal.map(|(at, _)| at),
             last_renewal_result: held.last_renewal.map(|(_, result)| result),
             renew_until: held.renew_until.map(|bound| bound.at),
@@ -767,6 +793,80 @@ mod tests {
         fn lease_confirmed(&self) -> bool {
             true
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn health_intent_observation_preserves_unknown_and_failed_reads() {
+        let _metrics = crate::observability::metrics::METRICS_TEST_LOCK
+            .lock()
+            .await;
+        let repo = std::sync::Arc::new(crate::db::MockRepository::new());
+        let keeper = std::sync::Arc::new(LeaseKeeper::new(OWNER.into(), 60));
+        let reconciler = crate::scheduler::ReconciliationLoop::new(
+            repo.clone(),
+            std::sync::Arc::new(crate::bgp::MockAnnouncer::new()),
+            30,
+            false,
+        )
+        .with_lease(keeper.clone());
+        assert_eq!(keeper.health().has_leased_intent, None);
+        repo.fail_active_reads.store(true, SeqCst);
+        assert!(reconciler.reconcile().await.is_err());
+        assert_eq!(keeper.health().has_leased_intent, None);
+        repo.fail_active_reads.store(false, SeqCst);
+        reconciler.reconcile().await.unwrap();
+        assert_eq!(keeper.health().has_leased_intent, Some(false));
+        repo.fail_active_reads.store(true, SeqCst);
+        assert!(reconciler.reconcile().await.is_err());
+        assert_eq!(keeper.health().has_leased_intent, Some(false));
+        keeper.observe_leased_write(&leased_rule(300));
+        assert_eq!(keeper.health().has_leased_intent, Some(true));
+        assert!(reconciler.reconcile().await.is_err());
+        assert_eq!(keeper.health().has_leased_intent, Some(true));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn health_countdown_uses_last_live_observation_and_recovers() {
+        let speaker = FaultyBlackholes::default();
+        let keeper = LeaseKeeper::new(OWNER.into(), 60);
+        keeper.observe_intent_expiry(Some(Utc::now() + chrono::Duration::minutes(10)));
+        assert_eq!(keeper.health().remaining_seconds, None);
+        keeper.observe_add(
+            speaker
+                .announce_leased_blackhole(&route(), 60)
+                .await
+                .unwrap()
+                .0,
+        );
+        assert_eq!(keeper.health().remaining_seconds, Some(60));
+        tokio::time::advance(Duration::from_secs(20)).await;
+        speaker.fail_renewals.store(true, SeqCst);
+        keeper.renew_once(&speaker).await;
+        assert_eq!(keeper.health().state, LeaseState::RenewalFailing);
+        assert_eq!(keeper.health().remaining_seconds, Some(40));
+        assert!(!keeper.health().renewal_overdue);
+        tokio::time::advance(Duration::from_secs(20)).await;
+        keeper.renew_once(&speaker).await;
+        assert_eq!(keeper.health().last_renewal_result, Some("error"));
+        assert_eq!(keeper.health().remaining_seconds, Some(20));
+        assert!(keeper.health().renewal_overdue);
+        tokio::time::advance(Duration::from_secs(20)).await;
+        assert_eq!(keeper.health().state, LeaseState::Expired);
+        assert_eq!(keeper.health().remaining_seconds, Some(0));
+        speaker.fail_renewals.store(false, SeqCst);
+        keeper.observe_add(
+            speaker
+                .announce_leased_blackhole(&route(), 60)
+                .await
+                .unwrap()
+                .0,
+        );
+        assert_eq!(keeper.health().state, LeaseState::Live);
+        assert_eq!(keeper.health().remaining_seconds, Some(60));
+        tokio::time::advance(Duration::from_secs(20)).await;
+        keeper.renew_once(&speaker).await;
+        assert_eq!(keeper.health().last_renewal_result, Some("success"));
+        assert_eq!(keeper.health().remaining_seconds, Some(60));
     }
 
     #[tokio::test(start_paused = true)]
@@ -1219,10 +1319,13 @@ mod tests {
         );
         keeper.observe_intent_expiry(None);
         let row = leased_rule(300);
+        assert_eq!(keeper.health().has_leased_intent, Some(false));
         keeper.observe_leased_write(&row);
+        assert_eq!(keeper.health().has_leased_intent, Some(true));
         assert_eq!(keeper.health().renew_until, Some(row.expires_at));
         // A read that started before the write committed saw no leased row.
         keeper.observe_intent_expiry(None);
+        assert_eq!(keeper.health().has_leased_intent, Some(true));
         assert_eq!(keeper.health().renew_until, Some(row.expires_at));
         tokio::time::advance(Duration::from_secs(335)).await;
         keeper.renew_once(&speaker).await;
@@ -1237,6 +1340,7 @@ mod tests {
         assert_eq!(keeper.health().renewal_stopped, Some("ttl_bound"));
         // Once that write was observed, a later read may lower the bound again.
         keeper.observe_intent_expiry(None);
+        assert_eq!(keeper.health().has_leased_intent, Some(false));
         assert_ne!(keeper.health().renew_until, Some(row.expires_at));
     }
 
