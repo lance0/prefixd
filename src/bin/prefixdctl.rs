@@ -219,6 +219,15 @@ enum TokenCommands {
         /// Token name
         name: String,
     },
+
+    /// Look up a token secret in this database and print its record, never
+    /// the secret; exits 1 unless the token is active
+    Verify {
+        /// File holding the secret on one line; stdin when omitted. The
+        /// secret is never taken from the command line.
+        #[arg(long)]
+        token_file: Option<std::path::PathBuf>,
+    },
 }
 
 /// `<number><unit>`, unit one of s, m, h or d.
@@ -801,17 +810,35 @@ impl Client {
     }
 }
 
-/// Reads a token file: one line, a trailing newline allowed. Errors name the
-/// file, never its contents.
+/// A token is 51 bytes; anything past this is not a token file.
+const MAX_TOKEN_FILE_BYTES: u64 = 1024;
+
+/// Reads a token file: one line, a trailing newline allowed, at most
+/// [`MAX_TOKEN_FILE_BYTES`]. Errors name the file, never its contents.
 fn read_token_file(path: &std::path::Path) -> Result<String, String> {
-    let raw = std::fs::read_to_string(path)
+    let file = std::fs::File::open(path)
         .map_err(|e| format!("cannot read the token file {}: {e}", path.display()))?;
+    read_token(file, &path.display().to_string())
+}
+
+/// Reads one token line from `reader`, named `label` in errors.
+fn read_token(reader: impl std::io::Read, label: &str) -> Result<String, String> {
+    use std::io::Read as _;
+    let mut raw = String::new();
+    reader
+        .take(MAX_TOKEN_FILE_BYTES + 1)
+        .read_to_string(&mut raw)
+        .map_err(|e| format!("cannot read the token file {label}: {e}"))?;
+    if raw.len() as u64 > MAX_TOKEN_FILE_BYTES {
+        return Err(format!(
+            "the token file {label} is larger than {MAX_TOKEN_FILE_BYTES} bytes"
+        ));
+    }
     let token = raw.strip_suffix('\n').unwrap_or(&raw);
     let token = token.strip_suffix('\r').unwrap_or(token);
     if token.is_empty() || token.chars().any(|c| c.is_whitespace() || c.is_control()) {
         return Err(format!(
-            "the token file {} must hold one token on one line",
-            path.display()
+            "the token file {label} must hold one token on one line"
         ));
     }
     Ok(token.to_owned())
@@ -1087,8 +1114,15 @@ async fn cmd_diversions(client: &Client, command: DiversionCommands) -> Result<(
 
 async fn cmd_status(client: &Client, format: OutputFormat) -> Result<(), String> {
     let mut health: HealthResponse = client.get("/v1/health/detail").await?;
-    let settings: serde_json::Value = client.get("/v1/config/settings").await?;
-    health.mode = settings["settings"]["mode"].as_str().map(str::to_owned);
+    // The mode is extra context: an unreadable one never hides the health
+    // that did load, nor changes the exit code.
+    health.mode = match client.get::<serde_json::Value>("/v1/config/settings").await {
+        Ok(settings) => settings["settings"]["mode"].as_str().map(str::to_owned),
+        Err(error) => {
+            eprintln!("warning: cannot read the operation mode: {error}");
+            None
+        }
+    };
 
     match format {
         OutputFormat::Json => {
@@ -1964,6 +1998,47 @@ async fn cmd_tokens(cmd: TokenCommands, format: OutputFormat) -> Result<(), Stri
                         token.revoked_by.as_deref().unwrap_or("-"),
                     );
                 }
+            }
+        }
+        TokenCommands::Verify { token_file } => {
+            let secret = match &token_file {
+                Some(path) => read_token_file(path)?,
+                None => read_token(std::io::stdin().lock(), "on stdin")?,
+            };
+            // Only the hash reaches the query; no message carries the secret.
+            let hash = prefixd::auth::token::parse(secret.as_bytes())
+                .ok_or("malformed token: not prefixd_ and 43 canonical base64url characters")?;
+            let token = repo
+                .get_api_token_by_hash(&hash)
+                .await
+                .map_err(|e| format!("database error: {}", e))?
+                .ok_or("unknown token: this database has no token with that secret")?;
+            let status = if token.revoked_at.is_some() {
+                "revoked"
+            } else if token.is_expired(now) {
+                "expired"
+            } else {
+                "active"
+            };
+            match format {
+                OutputFormat::Json => {
+                    let mut value = serde_json::to_value(&token).map_err(|e| e.to_string())?;
+                    value["status"] = status.into();
+                    println!("{}", serde_json::to_string_pretty(&value).unwrap());
+                }
+                OutputFormat::Table => {
+                    println!(
+                        "Token '{}': scope {}, source {}, pop {}, {}",
+                        token.name,
+                        token.scope,
+                        token.source.as_deref().unwrap_or("-"),
+                        token.pop.as_deref().unwrap_or("any"),
+                        status,
+                    );
+                }
+            }
+            if status != "active" {
+                return Err(format!("token '{}' is {status}", token.name));
             }
         }
     }

@@ -79,6 +79,10 @@ the environment as well.
 | `--session-cookie` | `PREFIXD_SESSION_COOKIE` | Cookie header from an authenticated Admin session |
 | `-f, --format` | - | Output format: `table` (default) or `json` |
 
+A token file holds one token on one line, at most 1 KiB. `/dev/stdin` on a
+terminal echoes what you type, so redirect a file or pipe into it rather than
+typing the token.
+
 Help output names these variables but never prints their values. prefixdctl
 never sends both credentials: a token and a session cookie together, from flags
 or the environment, is a usage error (exit 2) before any request. So is a token
@@ -159,7 +163,10 @@ prefixdctl status
 
 `Mode` is the running operation mode, `enforced` or `dry-run`, read from
 `GET /v1/config/settings`; `--format json` adds it as `mode`. Status therefore
-makes two requests, both readable by any role.
+makes two requests, both readable by any role. When the mode cannot be read,
+status prints `Mode: unavailable`, leaves `mode` out of the JSON, warns on
+stderr, and still reports the health it read; the exit code follows the
+health request alone.
 
 ### Peers
 
@@ -418,6 +425,22 @@ the API, or `prefixdctl`.
 Deleting or demoting an operator does not revoke the tokens they created. To
 offboard someone, list their tokens with `--created-by` and revoke or rotate
 each one.
+
+### Verify Token
+
+```bash
+prefixdctl tokens verify < .prefixd/cli.token
+prefixdctl --format json tokens verify --token-file /etc/prefixd/fastnetmon.token
+# Token 'fnm-pop1': scope ingest, source fastnetmon, pop iad1, active
+```
+
+Reads a secret from `--token-file` or stdin, never from the command line, looks
+its hash up in this database and prints the token's name, scope, source, POP and
+status (`active`, `revoked` or `expired`); `-f json` prints the record with a
+`status` field. It never prints the secret or its hash. It exits 1 for an
+unknown, revoked or expired token and for malformed input, and writes nothing,
+`last_used_at` included. `scripts/compose-bootstrap.sh` uses it to check the
+token files it keeps.
 
 ### Revoke Token
 

@@ -77,9 +77,10 @@ Compose one-liner and what the check skips.
 `prefixd_secret`. Every Compose command, `up` and `config` included, refuses
 to run until `POSTGRES_PASSWORD` is set, naming the variable.
 
-PostgreSQL keeps the password its data volume was created with. Before
-upgrading an existing Compose deployment, add that password to `.env` in the
-repository root, readable only by you:
+PostgreSQL keeps the password its data volume was created with. If `.env`
+already sets `POSTGRES_PASSWORD`, there is nothing to do; do not add a second
+line. Otherwise, before upgrading an existing Compose deployment, add that
+password to `.env` in the repository root, readable only by you:
 
 ```bash
 touch .env && chmod 0600 .env
@@ -88,8 +89,10 @@ printf 'POSTGRES_PASSWORD=%s\n' prefixd_secret >> .env
 docker compose --profile rustbgpd config --quiet
 ```
 
-Do not run `scripts/compose-bootstrap.sh env` on an existing stack: it refuses
-when a PostgreSQL volume exists, because a new random password would lock the
+A `POSTGRES_PASSWORD` exported in your shell overrides `.env` for every
+Compose command; keep it unset, or set to the same value. Do not run
+`scripts/compose-bootstrap.sh env` on an existing stack: it refuses when a
+PostgreSQL volume exists, or when it cannot list volumes, because a new random password would lock the
 controller out of its database. A controller that cannot authenticate to
 PostgreSQL cannot start, and with leased FlowSpec its rules lapse within one
 lease while it is down.
@@ -223,8 +226,10 @@ What changes:
   stored before it have no record, so a resend of one selects afresh. It adds
   no rollback constraint of its own.
 - **The bundled FastNetMon script** is an ingest client. Reinstall it on every
-  FastNetMon host; see [FastNetMon](detectors/fastnetmon.md). It reads its
-  token from `PREFIXD_TOKEN_FILE` (or `PREFIXD_TOKEN`), passes it to curl on
+  FastNetMon host; see [FastNetMon](detectors/fastnetmon.md). It requires
+  `PREFIXD_API`, which no longer defaults to `http://localhost:8080`: set it in
+  `/etc/default/prefixd` to the controller's ingress, or the script logs an
+  error and posts nothing. It reads its token from `PREFIXD_TOKEN_FILE` (or `PREFIXD_TOKEN`), passes it to curl on
   stdin, and unbans by victim. `PREFIXD_OPERATOR`, `UNBAN_QUERY_RETRIES`,
   `UNBAN_QUERY_DELAY_SECONDS`, `WITHDRAW_ATTEMPTS` and
   `WITHDRAW_DELAY_SECONDS` are no longer read, and `BAN_POST_ATTEMPTS` and

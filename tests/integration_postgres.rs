@@ -8454,6 +8454,140 @@ mod api_tokens {
         .expect("run the CLI")
     }
 
+    /// `prefixdctl tokens verify` reads a secret from stdin or `--token-file`,
+    /// never argv, and prints the matching record with its status. Unknown,
+    /// malformed, noncanonical, revoked and expired secrets exit 1, and no
+    /// output echoes the secret or its hash.
+    #[tokio::test]
+    async fn cli_verifies_a_token_secret_without_echoing_it() {
+        let ctx = TestContext::new().await;
+        let verify = |args: Vec<String>, stdin: String| {
+            let url = ctx.state.settings.storage.connection_string.clone();
+            async move {
+                let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_prefixdctl"))
+                    .args(args)
+                    .env("DATABASE_URL", url)
+                    .env_remove("PREFIXD_TOKEN")
+                    .env_remove("PREFIXD_TOKEN_FILE")
+                    .stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .kill_on_drop(true)
+                    .spawn()
+                    .unwrap();
+                let mut input = child.stdin.take().unwrap();
+                tokio::io::AsyncWriteExt::write_all(&mut input, stdin.as_bytes())
+                    .await
+                    .unwrap();
+                drop(input);
+                let output = tokio::time::timeout(
+                    std::time::Duration::from_secs(15),
+                    child.wait_with_output(),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                (
+                    output.status.code(),
+                    String::from_utf8(output.stdout).unwrap(),
+                    String::from_utf8(output.stderr).unwrap(),
+                )
+            }
+        };
+        let args = |list: &[&str]| list.iter().map(|a| (*a).to_owned()).collect::<Vec<_>>();
+        let mint = |name: &'static str, extra: &'static [&'static str]| {
+            let ctx = &ctx;
+            async move {
+                let mut argv = vec!["tokens", "create", "--name", name];
+                argv.extend_from_slice(extra);
+                let output = cli(ctx, &argv).await;
+                assert!(output.status.success(), "{name}");
+                String::from_utf8(output.stdout)
+                    .unwrap()
+                    .trim_end()
+                    .to_owned()
+            }
+        };
+        let ingest = mint(
+            "fnm-verify",
+            &["--scope", "ingest", "--source", "fastnetmon"],
+        )
+        .await;
+        let operator = mint("cli-verify", &["--scope", "operator"]).await;
+        let leaks = |secret: &str, text: &str| {
+            let hex: String = hash(secret).iter().map(|b| format!("{b:02x}")).collect();
+            text.contains(&secret[8..]) || text.contains(&hex)
+        };
+
+        let (code, stdout, stderr) = verify(
+            args(&["--format", "json", "tokens", "verify"]),
+            format!("{ingest}\n"),
+        )
+        .await;
+        assert_eq!(code, Some(0), "{stderr}");
+        let record: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+        assert_eq!(record["name"], "fnm-verify");
+        assert_eq!(record["scope"], "ingest");
+        assert_eq!(record["source"], "fastnetmon");
+        assert_eq!(record["status"], "active");
+        assert!(!leaks(&ingest, &(stdout.clone() + &stderr)), "{stdout}");
+
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("cli.token");
+        std::fs::write(&file, format!("{operator}\n")).unwrap();
+        let (code, stdout, stderr) = verify(
+            args(&["tokens", "verify", "--token-file", file.to_str().unwrap()]),
+            String::new(),
+        )
+        .await;
+        assert_eq!(code, Some(0), "{stderr}");
+        assert_eq!(
+            stdout.trim(),
+            "Token 'cli-verify': scope operator, source -, pop any, active"
+        );
+        assert!(!leaks(&operator, &(stdout + &stderr)));
+
+        let (unknown, _) = prefixd::auth::token::generate().unwrap();
+        let noncanonical = format!("{}B", &ingest[..ingest.len() - 1]);
+        for (label, input, expected) in [
+            ("unknown", unknown.as_str(), "unknown token"),
+            ("malformed", "prefixd_short-canary", "malformed token"),
+            ("noncanonical", noncanonical.as_str(), "malformed token"),
+            ("empty", "", "one token on one line"),
+        ] {
+            let (code, stdout, stderr) =
+                verify(args(&["tokens", "verify"]), format!("{input}\n")).await;
+            assert_eq!(code, Some(1), "{label}: {stderr}");
+            assert!(stderr.contains(expected), "{label}: {stderr}");
+            assert!(stdout.is_empty(), "{label}: {stdout}");
+            if !input.is_empty() {
+                assert!(!stderr.contains(&input[8..]), "{label}: {stderr}");
+            }
+        }
+
+        let output = cli(&ctx, &["tokens", "revoke", "fnm-verify"]).await;
+        assert!(output.status.success());
+        sqlx::query("UPDATE api_tokens SET expires_at = now() - interval '1 hour' WHERE name = $1")
+            .bind("cli-verify")
+            .execute(&ctx.pool)
+            .await
+            .unwrap();
+        for (secret, name, status) in [
+            (&ingest, "fnm-verify", "revoked"),
+            (&operator, "cli-verify", "expired"),
+        ] {
+            let (code, stdout, stderr) =
+                verify(args(&["tokens", "verify"]), format!("{secret}\n")).await;
+            assert_eq!(code, Some(1), "{name}: {stderr}");
+            assert!(stdout.contains(status), "{name}: {stdout}");
+            assert!(
+                stderr.contains(&format!("token '{name}' is {status}")),
+                "{stderr}"
+            );
+            assert!(!leaks(secret, &(stdout + &stderr)), "{name}");
+        }
+    }
+
     /// `prefixdctl tokens` manages tokens on the local database with actor
     /// `prefixdctl`, prints the secret once, lists and revokes by name, and
     /// filters by creator for offboarding. `operators create` uses the

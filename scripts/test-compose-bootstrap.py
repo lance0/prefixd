@@ -16,13 +16,16 @@ SCRIPT = ROOT / "scripts/compose-bootstrap.sh"
 CANONICAL = re.compile(r"^prefixd_[0-9a-f]{42}A$")
 
 # Records each call's argv, then answers like docker compose + prefixdctl would.
-# Minted names go to $FAKE_LOG.tokens, which `tokens list` reports.
+# Each mint appends "name secret scope source" to $FAKE_LOG.tokens, which
+# `tokens verify` looks the secret up in.
 FAKE_DOCKER = r"""#!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FAKE_LOG"
 args="$*"
 case "$args" in
     *"config --format yaml"*) echo "name: prefixd" ;;
-    "volume ls"*) [[ -z "${FAKE_PG_VOLUME:-}" ]] || echo prefixd_postgres-data ;;
+    "volume ls"*)
+        [[ -z "${FAKE_VOLUME_FAIL:-}" ]] || { echo "permission denied" >&2; exit 1; }
+        [[ -z "${FAKE_PG_VOLUME:-}" ]] || echo prefixd_postgres-data ;;
     *" ps "*) [[ -n "${FAKE_STOPPED:-}" ]] || echo 0123456789ab ;;
     *"operators list"*)
         [[ -z "${FAKE_LIST_FAIL:-}" ]] || { echo "error: database error" >&2; exit 1; }
@@ -32,27 +35,34 @@ case "$args" in
             echo '[]'
         fi ;;
     *"operators create"*) echo "Created operator" ;;
-    *"tokens list"*)
-        [[ -z "${FAKE_DB_EMPTY:-}" ]] || { echo '[]'; exit 0; }
-        printf '['
-        sep=
-        while read -r n; do
-            r=null
-            [[ "$n" != "${FAKE_REVOKED:-}" ]] || r='"2026-11-16T00:00:00Z"'
-            printf '%s\n  {\n    "name": "%s",\n    "revoked_at": %s\n  }' "$sep" "$n" "$r"
-            sep=,
-        done < <(cat "$FAKE_LOG.tokens" 2>/dev/null)
-        echo ']' ;;
+    *"tokens verify"*)
+        IFS= read -r secret || true
+        [[ -n "$secret" ]] || { echo "error: the token file on stdin must hold one token on one line" >&2; exit 1; }
+        [[ "$secret" =~ ^prefixd_[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$ ]] ||
+            { echo "error: malformed token" >&2; exit 1; }
+        record=
+        [[ -n "${FAKE_DB_EMPTY:-}" ]] || record=$(grep -F " $secret " "$FAKE_LOG.tokens" 2>/dev/null)
+        [[ -n "$record" ]] || { echo "error: unknown token" >&2; exit 1; }
+        read -r name _ scope source <<<"$record"
+        status=active
+        [[ "$name" != "${FAKE_REVOKED:-}" ]] || status=revoked
+        if [[ "$source" == - ]]; then source=null; else source="\"$source\""; fi
+        printf '{\n  "name": "%s",\n  "scope": "%s",\n  "source": %s,\n  "status": "%s"\n}\n' \
+            "$name" "$scope" "$source" "$status"
+        [[ "$status" == active ]] || { echo "error: token '$name' is $status" >&2; exit 1; } ;;
     *"tokens create"*)
         name=$(sed -E 's/.*--name ([^ ]+).*/\1/' <<<"$args")
+        scope=$(sed -E 's/.*--scope ([^ ]+).*/\1/' <<<"$args")
+        source=-
+        [[ "$args" != *--source* ]] || source=$(sed -E 's/.*--source ([^ ]+).*/\1/' <<<"$args")
         if [[ -n "${FAKE_BLOCK:-}" ]]; then
             touch "$FAKE_LOG.blocked"
             for _ in $(seq 300); do [[ -e "$FAKE_LOG.release" ]] && break; sleep 0.1; done
         fi
         [[ "$name" != "${FAKE_FAIL_ON:-none}"* ]] || { echo "error: database error" >&2; exit 1; }
-        echo "$name" >> "$FAKE_LOG.tokens"
         echo "Created token '$name'. The token below is shown once." >&2
         body="prefixd_$(printf '%s' "$name" | sha256sum | head -c 42)"
+        echo "$name ${body}A $scope $source" >> "$FAKE_LOG.tokens"
         case "${FAKE_TOKEN:-}" in
             garbage) echo "not a token" ;;
             extra) printf '%sA\nextra line\n' "$body" ;;
@@ -171,7 +181,7 @@ class Bootstrap(Harness):
         for name in self.files():
             self.assert_private(self.tokens / name)
         self.assertFalse(self.calls("create"), self.calls())
-        self.assertEqual(len(self.calls("tokens list")), 1)
+        self.assertEqual(len(self.calls("tokens verify")), 2)
         self.assertIn("already exists", result.stdout)
         self.assertEqual(result.stdout.count("Keeping"), 2)
 
@@ -179,15 +189,55 @@ class Bootstrap(Harness):
         self.assertEqual(self.run_script("rustbgpd").returncode, 0)
         result = self.run_script("rustbgpd", admin="1", db_empty="1")
         self.assertEqual(result.returncode, 1)
-        self.assertIn("which this database does not have", result.stderr)
+        self.assertIn("does not hold a live token of this database", result.stderr)
         self.assertIn("down -v", result.stderr)
-        cli = (self.tokens / "cli.token.name").read_text().strip()
         fnm = (self.tokens / "fastnetmon.token.name").read_text().strip()
         result = self.run_script("rustbgpd", admin="1", revoked=fnm)
         self.assertEqual(result.returncode, 1)
-        self.assertIn(f"token '{fnm}'", result.stderr)
-        self.assertIn("is revoked", result.stderr)
-        self.assertNotIn(cli, result.stderr)
+        self.assertIn(f"token '{fnm}' is revoked", result.stderr)
+        self.assertIn("does not hold a live token", result.stderr)
+        self.assertFalse(self.calls("tokens create")[2:], "a rerun minted")
+
+    def test_swapped_emptied_truncated_or_renamed_files_fail_the_rerun(self):
+        self.assertEqual(self.run_script("rustbgpd").returncode, 0)
+        files = {n: (self.tokens / n).read_text() for n in self.files()}
+
+        def restore():
+            for name, text in files.items():
+                (self.tokens / name).write_text(text)
+
+        cases = {
+            "swapped secrets": {
+                "cli.token": files["fastnetmon.token"],
+                "fastnetmon.token": files["cli.token"],
+            },
+            "swapped secrets and names": {
+                "cli.token": files["fastnetmon.token"],
+                "cli.token.name": files["fastnetmon.token.name"],
+                "fastnetmon.token": files["cli.token"],
+                "fastnetmon.token.name": files["cli.token.name"],
+            },
+            "emptied": {"cli.token": ""},
+            "truncated": {"fastnetmon.token": files["fastnetmon.token"][:30] + "\n"},
+            "renamed": {"cli.token.name": "cli-20000101-000000\n"},
+        }
+        expected = {
+            "swapped secrets": "were the token files swapped",
+            "swapped secrets and names": "were the token files swapped",
+            "emptied": "does not hold a live token",
+            "truncated": "does not hold a live token",
+            "renamed": "records 'cli-20000101-000000'",
+        }
+        for label, changes in cases.items():
+            with self.subTest(label=label):
+                restore()
+                for name, text in changes.items():
+                    (self.tokens / name).write_text(text)
+                result = self.run_script("rustbgpd", admin="1")
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertIn(expected[label], result.stderr)
+                for secret in files["cli.token"], files["fastnetmon.token"]:
+                    self.assertNotIn(secret.strip(), result.stdout + result.stderr)
         self.assertFalse(self.calls("tokens create")[2:], "a rerun minted")
 
     def test_bad_mint_output_is_refused_and_names_the_orphan(self):
@@ -256,6 +306,15 @@ class Bootstrap(Harness):
         self.assertIn("cli.token", self.files(caller / "secrets"))
         self.assertFalse((self.repo / "secrets").exists())
 
+    def test_a_lock_path_that_is_not_a_held_lock_is_its_own_error(self):
+        self.tokens.mkdir(mode=0o700)
+        (self.tokens / ".lock").write_text("not a directory")
+        result = self.run_script("rustbgpd")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("cannot create the lock directory", result.stderr)
+        self.assertNotIn("another bootstrap holds", result.stderr)
+        self.assertFalse(self.calls("create"))
+
     def test_stopped_service_and_bad_profile_fail_loudly(self):
         result = self.run_script("rustbgpd", stopped="1")
         self.assertEqual(result.returncode, 1)
@@ -294,9 +353,37 @@ class EnvFile(Harness):
         self.assertEqual(self.env_file().read_text(), before)
         self.assert_private(self.env_file())
 
+    def test_published_example_values_are_kept_with_a_warning(self):
+        for value in ("your-secure-password", "prefixd_secret"):
+            with self.subTest(value=value):
+                self.env_file().write_text(f"POSTGRES_PASSWORD={value}\n")
+                result = self.run_script("env")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("published example value", result.stderr)
+                self.assertEqual(self.env_file().read_text(), f"POSTGRES_PASSWORD={value}\n")
+
+    def test_an_exported_password_is_refused_on_both_paths(self):
+        exported = {"POSTGRES_PASSWORD": "exported-canary"}
+        result = self.run_script("env", extra=exported)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("unset POSTGRES_PASSWORD", result.stderr)
+        self.assertFalse(self.env_file().exists())
+        self.env_file().write_text("POSTGRES_PASSWORD=kept\n")
+        result = self.run_script("env", extra=exported)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("overrides .env", result.stderr)
+        self.assertEqual(self.env_file().read_text(), "POSTGRES_PASSWORD=kept\n")
+        self.assertNotIn("exported-canary", result.stdout + result.stderr)
+        self.assertFalse(self.calls("volume ls"))
+
+    def test_a_failed_volume_listing_writes_no_password(self):
+        result = self.run_script("env", volume_fail="1")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("cannot list Docker volumes", result.stderr)
+        self.assertFalse(self.env_file().exists())
+
     def test_placeholder_duplicate_symlink_and_existing_database_are_refused(self):
         for content in (
-            "POSTGRES_PASSWORD=your-secure-password\n",
             "POSTGRES_PASSWORD=\n",
             "POSTGRES_PASSWORD=a\nPOSTGRES_PASSWORD=b\n",
         ):

@@ -429,6 +429,14 @@ async fn cli_reads_the_token_file_and_status_shows_the_mode() {
     std::fs::write(&two_lines, format!("{TOKEN}\nsecond-line-canary\n")).unwrap();
     let missing = dir.path().join("missing.token").display().to_string();
     let two = two_lines.display().to_string();
+    // One byte past the 1 KiB cap; a longer read would be an unbounded one.
+    let large_file = dir.path().join("large.token");
+    std::fs::write(
+        &large_file,
+        format!("{TOKEN}{}", "A".repeat(1025 - TOKEN.len())),
+    )
+    .unwrap();
+    let large = large_file.display().to_string();
     for (label, argv, env, expected) in [
         (
             "token and file",
@@ -454,6 +462,12 @@ async fn cli_reads_the_token_file_and_status_shows_the_mode() {
             vec![("PREFIXD_TOKEN_FILE", two.clone())],
             "one token on one line",
         ),
+        (
+            "over 1 KiB",
+            args(&["status"]),
+            vec![("PREFIXD_TOKEN_FILE", large.clone())],
+            "larger than 1024 bytes",
+        ),
     ] {
         let (code, _, stderr) = run(argv, env, None).await;
         assert_eq!(code, Some(2), "{label}: {stderr}");
@@ -463,4 +477,79 @@ async fn cli_reads_the_token_file_and_status_shows_the_mode() {
         assert!(requests.try_recv().is_err(), "{label} sent a request");
     }
     server.abort();
+}
+
+/// An unreadable mode never hides the health that loaded: `status` prints
+/// `Mode: unavailable`, leaves `mode` out of the JSON, warns on stderr and
+/// keeps its exit code. A failed health read still exits 1.
+#[tokio::test]
+async fn cli_status_survives_an_unreadable_mode() {
+    let health = serde_json::json!({
+        "status": "healthy", "bgp_sessions": {}, "active_mitigations": 0,
+        "database": "connected", "gobgp": { "status": "connected" }
+    });
+    for (health_status, settings_status) in [
+        (StatusCode::OK, StatusCode::FORBIDDEN),
+        (StatusCode::OK, StatusCode::INTERNAL_SERVER_ERROR),
+        (StatusCode::INTERNAL_SERVER_ERROR, StatusCode::OK),
+    ] {
+        let health = health.clone();
+        let app = Router::new()
+            .route(
+                "/v1/health/detail",
+                axum::routing::get(move || async move { (health_status, Json(health)) }),
+            )
+            .route(
+                "/v1/config/settings",
+                axum::routing::get(move || async move {
+                    (
+                        settings_status,
+                        Json(serde_json::json!({
+                            "error": "settings refused",
+                            "settings": { "mode": "dry-run" }
+                        })),
+                    )
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let api = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        for format in ["table", "json"] {
+            let output = tokio::time::timeout(
+                std::time::Duration::from_secs(15),
+                tokio::process::Command::new(env!("CARGO_BIN_EXE_prefixdctl"))
+                    .args(["--api", &api, "--format", format, "status"])
+                    .env("PREFIXD_TOKEN", "status-mode-test-token")
+                    .env_remove("PREFIXD_TOKEN_FILE")
+                    .env_remove("PREFIXD_SESSION_COOKIE")
+                    .stdin(std::process::Stdio::null())
+                    .kill_on_drop(true)
+                    .output(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let stdout = String::from_utf8(output.stdout).unwrap();
+            let stderr = String::from_utf8(output.stderr).unwrap();
+            let case = format!("{health_status}/{settings_status} {format}");
+            if !health_status.is_success() {
+                assert_eq!(output.status.code(), Some(1), "{case}: {stderr}");
+                continue;
+            }
+            assert_eq!(output.status.code(), Some(0), "{case}: {stderr}");
+            assert!(
+                stderr.contains("warning: cannot read the operation mode"),
+                "{case}: {stderr}"
+            );
+            if format == "json" {
+                let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+                assert_eq!(json["status"], "healthy", "{case}");
+                assert!(json.get("mode").is_none(), "{case}: {stdout}");
+            } else {
+                assert!(stdout.contains("Status: healthy"), "{case}: {stdout}");
+                assert!(stdout.contains("Mode: unavailable"), "{case}: {stdout}");
+            }
+        }
+        server.abort();
+    }
 }

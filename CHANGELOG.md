@@ -17,7 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   locks the controller out of PostgreSQL, and with leased FlowSpec its rules
   lapse within one lease while it cannot start. `scripts/compose-bootstrap.sh
   env` generates a password for a fresh checkout only, and refuses when a
-  PostgreSQL volume exists. See
+  PostgreSQL volume exists. If `.env` already sets the variable, there is
+  nothing to do. An exported `POSTGRES_PASSWORD` overrides `.env`; keep it
+  unset. See
   [Compose database password](docs/how-to/upgrading.md#compose-database-password).
 - **The FastNetMon script needs `PREFIXD_API`.** It no longer defaults to
   `http://localhost:8080`; without the variable it logs an error and posts
@@ -318,6 +320,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `prefixdctl tokens verify` reads a token secret from `--token-file` or stdin,
+  never the command line, looks it up in the local database and prints the
+  token's name, scope, source, POP and status without the secret or its hash.
+  It exits 1 for an unknown, revoked or expired token and for malformed input.
 - API tokens: `POST /v1/tokens`, `GET /v1/tokens` and
   `POST /v1/tokens/{name}/revoke`, from an Admin session, and
   `prefixdctl tokens create|list|revoke` on the local database. Tokens have an
@@ -362,14 +368,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   FastNetMon Advanced.
 - `scripts/compose-bootstrap.sh` bootstraps a fresh Compose stack with no
   shared secret. `env` writes a random `POSTGRES_PASSWORD` into a 0600 `.env`
-  before the first start. `rustbgpd` or `gobgp` then creates the first Admin at
+  before the first start; it refuses while the variable is exported in the
+  shell, when a PostgreSQL volume exists, and when it cannot list volumes.
+  `rustbgpd` or `gobgp` then creates the first Admin at
   a hidden password prompt, unless one exists, and mints an ingest token bound
   to `fastnetmon` and an operator token for `prefixdctl` into `.prefixd/`
   (directory 0700, files 0600, each token's name beside it). It never prints a
   token or passes one on a command line, allows one run at a time, accepts only
   a single canonical token line, and names any token it minted but could not
   store so it can be revoked. A rerun keeps token files, resets their mode, and
-  stops if a recorded token was deleted or revoked. The quickstart uses it,
+  checks each with `prefixdctl tokens verify`: it stops if a token was deleted,
+  revoked or expired, or does not match its file's recorded name, scope and
+  source, as when the files are swapped or truncated. The quickstart uses it,
   then confirms dry-run and rehearses one detector event and its unban with
   the ingest token through `curl -K -`. The
   [dated receipt](docs/reference/qualification/compose-onboarding-2026-11-16.md)
@@ -381,11 +391,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `PREFIXD_TOKEN_FILE`, `/dev/stdin` included, so `docker compose exec -T -e
   PREFIXD_TOKEN_FILE=/dev/stdin ... < .prefixd/cli.token` keeps the token out
   of the container's environment. A token file with `--token` or
-  `PREFIXD_TOKEN`, an unreadable file and a file of more than one line are usage
-  errors (exit 2) that name the file, never its contents.
+  `PREFIXD_TOKEN`, an unreadable file, a file of more than one line and one
+  over 1 KiB are usage errors (exit 2) that name the file, never its contents.
 - `prefixdctl status` shows the running mode, `Mode: enforced` or
   `Mode: dry-run`, and `--format json` adds `mode`. It reads
-  `GET /v1/config/settings`, so status makes two requests.
+  `GET /v1/config/settings`, so status makes two requests. When that read
+  fails, status prints `Mode: unavailable`, omits `mode`, warns on stderr and
+  keeps the exit code of the health request.
 - The Administration **Users** tab lists accounts read-only, with a note to
   use `prefixdctl operators`, unless the viewer is an Admin with a signed-in
   session; in `none` and `mtls` mode its create, delete and password actions

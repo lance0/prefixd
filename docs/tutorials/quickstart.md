@@ -25,7 +25,9 @@ one.
   `POSTGRES_PASSWORD`. `scripts/compose-bootstrap.sh env` writes a random one
   into `.env`, mode 0600, before the first start. It keeps a password `.env`
   already sets, and refuses when a PostgreSQL volume already exists, because
-  that database keeps the password it was created with.
+  that database keeps the password it was created with. It also refuses while
+  `POSTGRES_PASSWORD` is exported in your shell, which would override `.env`
+  for every Compose command; keep it unset.
 - **The first Admin.** `scripts/compose-bootstrap.sh rustbgpd` runs
   `prefixdctl` inside `prefixd-rustbgpd`, which already has `DATABASE_URL`.
   It runs `prefixdctl operators create --username admin --role admin` at a
@@ -40,8 +42,11 @@ The `.prefixd` directory is mode 0700 and each token file 0600, owned by you;
 Git and Docker builds ignore it and `.env`. Each token's name is recorded next
 to it, in `cli.token.name` and `fastnetmon.token.name`. The script never prints
 a token or puts one on a command line, and one run at a time holds a lock in
-`.prefixd`. Rerunning it keeps existing token files, resets their mode to 0600,
-and stops with an error if a recorded token no longer exists or is revoked.
+`.prefixd`. Rerunning it keeps existing token files and resets their mode to
+0600. It checks each file with `prefixdctl tokens verify`, which reads the
+secret on stdin, and stops with an error if the token no longer exists, is
+revoked or expired, or does not match the file's recorded name, scope and
+source.
 `docker compose down -v` deletes the tokens with the database, so delete
 `.prefixd` too before bootstrapping again. To replace one token, delete its two
 files, rerun, and revoke the old token with `prefixdctl tokens revoke`. To mint
@@ -86,11 +91,12 @@ To rehearse against a stack that already enforces, follow
 [upgrade guide](../how-to/upgrading.md#pending-withdrawals-and-rollback) first.
 
 Set `mode: dry-run` on line 2 of `configs/prefixd.yaml`, then recreate the
-controller so it reads the edited file, and confirm the mode before sending
-anything:
+controller so it reads the edited file, wait up to two minutes for it to answer
+`/v1/health`, and confirm the mode before sending anything:
 
 ```bash
 docker compose --profile rustbgpd up -d --no-build --force-recreate --no-deps prefixd-rustbgpd
+for i in $(seq 60); do curl -fsS http://localhost/v1/health && break; sleep 2; done
 docker compose exec -T -e PREFIXD_TOKEN_FILE=/dev/stdin prefixd-rustbgpd prefixdctl status < .prefixd/cli.token
 ```
 
@@ -136,8 +142,8 @@ shows it as `withdrawn`. An operator withdraws with
 `prefixdctl mitigations withdraw <id> --reason <text>` instead.
 
 Return to enforced operation: restore `mode: enforced` (for example with
-`git checkout configs/prefixd.yaml`), recreate the controller with the same
-command, and check that `status` shows `Mode: enforced`. Enforced startup
+`git checkout configs/prefixd.yaml`), recreate the controller and wait for
+health with the same commands, and check that `status` shows `Mode: enforced`. Enforced startup
 refuses to run while a rehearsal mitigation is still live: the controller
 exits, and Compose restarts it until that mitigation's TTL (120 seconds for the
 sample playbook) has passed. Withdraw it first, or stop the controller and run
