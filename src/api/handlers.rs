@@ -469,6 +469,9 @@ pub struct ErrorResponse {
     /// Retry after seconds (for rate limiting)
     #[serde(skip_serializing_if = "Option::is_none")]
     retry_after_seconds: Option<u32>,
+    /// Stored result of a duplicate ban; IDs prove local intent, not enforcement.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    event_outcome: Option<EventOutcomeRecord>,
 }
 
 // Request types
@@ -1348,6 +1351,8 @@ pub(crate) async fn handle_ban(
     mut input: AttackEventInput,
 ) -> Result<(StatusCode, Json<EventResponse>), AppError> {
     input.source = grant.source().to_string();
+    // Keep dedup, admission and the final outcome in one lifecycle turn.
+    let mitigation_guard = state.mitigation_lock.lock().await;
     let mut trace = BanTrace::default();
     let result = admit_ban(state.clone(), grant, input, &mut trace).await;
     let Some(event) = &trace.event else {
@@ -1364,6 +1369,7 @@ pub(crate) async fn handle_ban(
             record_event_outcome(&state, event.event_id, &record).await;
         }
     }
+    drop(mitigation_guard);
     // A refusal before storage leaves no event row, so the detector may retry
     // the same event ID (ADR 033); the audit entry is its only record.
     if let Some(error) = error {
@@ -1418,9 +1424,21 @@ async fn audit_refusal(
 }
 
 async fn record_event_outcome(state: &AppState, event_id: Uuid, record: &EventOutcomeRecord) {
-    if let Err(error) = state.repo.record_event_outcome(event_id, record).await {
-        tracing::error!(%event_id, outcome = record.outcome.as_str(), %error,
-            "failed to record event outcome");
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        state.repo.record_event_outcome(event_id, record),
+    )
+    .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            tracing::error!(%event_id, outcome = record.outcome.as_str(), %error,
+                "failed to record event outcome");
+        }
+        Err(_) => {
+            tracing::error!(%event_id, outcome = record.outcome.as_str(),
+                "event outcome recording deadline elapsed; admission evidence is retained");
+        }
     }
 }
 
@@ -1434,28 +1452,42 @@ async fn admit_ban(
     reject_corroborating_source(&state, &input.source, &input.action).await?;
     validate_confidence(input.confidence).map_err(AppError)?;
     validate_top_src_ports(input.top_src_ports.as_deref()).map_err(AppError)?;
-    // shortcut: one controller per speaker; use a leader fence before supporting active-active controllers.
-    let _mitigation_guard = state.mitigation_lock.lock().await;
     state.verified_speaker_binding().map_err(AppError)?;
-    // Check for duplicate ban event (only bans are checked, not unbans)
-    if let Some(ref ext_id) = input.event_id {
-        if let Ok(Some(_)) = state
+    let previous = if let Some(ref ext_id) = input.event_id {
+        state
             .repo
             .find_ban_event_by_external_id(&input.source, ext_id)
             .await
+            .map_err(AppError)?
+    } else {
+        None
+    };
+    let event = if let Some(event) = previous {
+        if !matches!(
+            event.outcome.outcome,
+            EventOutcome::NotRecorded | EventOutcome::Failed
+        ) || !event.outcome.outcome_mitigation_ids.is_empty()
         {
             crate::observability::metrics::EVENTS_REJECTED
                 .with_label_values(&[input.source.as_str(), "duplicate"])
                 .inc();
             return Err(AppError(PrefixdError::DuplicateEvent {
                 detector_source: input.source.clone(),
-                external_id: ext_id.clone(),
+                external_id: event.external_event_id.clone().unwrap_or_default(),
+                outcome: event.outcome,
             }));
         }
-    }
-
-    // Create internal event
-    let event = AttackEvent::from_input(input);
+        if !event.ban_retryable {
+            return Err(AppError(PrefixdError::Conflict(
+                "historical ban admission outcome is unknown; inspect the event and mitigations before authorizing a new event ID".into(),
+            )));
+        }
+        // A retry cannot replace the original request's destination or policy inputs.
+        trace.stored = true;
+        event
+    } else {
+        AttackEvent::from_input(input)
+    };
     trace.event = Some(event.clone());
 
     let destination = validate_event_destination(&event.victim_ip).map_err(AppError)?;
@@ -1503,19 +1535,22 @@ async fn admit_ban(
     let mut decision = match policy.evaluate(&event, context.as_ref()) {
         Err(
             error @ PrefixdError::GuardrailViolation(
-                GuardrailError::NoAllowedPorts | GuardrailError::InvalidAction(_),
+                GuardrailError::NoAllowedPorts
+                | GuardrailError::DestinationPortsRequired
+                | GuardrailError::InvalidAction(_),
             ),
         ) => {
             crate::observability::metrics::EVENTS_REJECTED
                 .with_label_values(&[event.source.as_str(), "guardrail"])
                 .inc();
-            let reason = if matches!(
-                &error,
-                PrefixdError::GuardrailViolation(GuardrailError::NoAllowedPorts)
-            ) {
-                "NoAllowedPorts"
-            } else {
-                "InvalidAction"
+            let reason = match &error {
+                PrefixdError::GuardrailViolation(GuardrailError::NoAllowedPorts) => {
+                    "NoAllowedPorts"
+                }
+                PrefixdError::GuardrailViolation(GuardrailError::DestinationPortsRequired) => {
+                    "DestinationPortsRequired"
+                }
+                _ => "InvalidAction",
             };
             crate::observability::metrics::GUARDRAIL_REJECTIONS
                 .with_label_values(&[reason])
@@ -1644,13 +1679,13 @@ async fn admit_ban(
         prefix_safelisted = Some(safelisted);
     }
 
-    // Store event
-    state.repo.insert_event(&event).await.map_err(AppError)?;
-    trace.stored = true;
-
-    crate::observability::metrics::EVENTS_INGESTED
-        .with_label_values(&[&event.source, &event.attack_vector().to_string()])
-        .inc();
+    if !trace.stored {
+        state.repo.insert_event(&event).await.map_err(AppError)?;
+        trace.stored = true;
+        crate::observability::metrics::EVENTS_INGESTED
+            .with_label_values(&[&event.source, &event.attack_vector().to_string()])
+            .inc();
+    }
 
     // Check if shutting down
     if state.is_shutting_down() {
@@ -2016,6 +2051,7 @@ async fn admit_ban(
         let action_type = intent.action_type;
         let admitted = async {
             if let Some(mut existing) = owner? {
+                let expected = existing.clone();
                 if is_prefix {
                     if existing.customer_id != intent.customer_id {
                         return Err(PrefixdError::Conflict(
@@ -2042,7 +2078,10 @@ async fn admit_ban(
                         )?;
                     }
                 }
-                state.repo.update_mitigation(&existing).await?;
+                state
+                    .repo
+                    .extend_mitigation_for_event(&expected, &existing)
+                    .await?;
                 if let Some(lease) = state.lease.as_deref() {
                     lease.observe_leased_write(&existing);
                 }
@@ -2300,6 +2339,7 @@ async fn rule_owner(
     )
     .await?;
     if let Some(owner) = &owner {
+        crate::guardrails::check_detector_discard_scope(owner.action_type, &owner.match_criteria)?;
         // Extending a simulation in enforced mode would leave the attack unmitigated.
         if owner.is_dry_run_origin() && !state.is_dry_run() {
             return Err(PrefixdError::Conflict(format!(
@@ -3551,6 +3591,10 @@ impl IntoResponse for AppError {
         let status = self.0.status_code();
         let body = Json(ErrorResponse {
             error: self.0.to_string(),
+            event_outcome: match &self.0 {
+                PrefixdError::DuplicateEvent { outcome, .. } => Some(outcome.clone()),
+                _ => None,
+            },
             retry_after_seconds: match &self.0 {
                 PrefixdError::RateLimited {
                     retry_after_seconds,
@@ -4461,6 +4505,13 @@ mod tests {
             })
         }
 
+        /// The discard-based FlowSpec lease fixtures observe UDP destination port 53.
+        fn flowspec_ban(victim: &str) -> Value {
+            let mut ban = fastnetmon_ban("fastnetmon", victim);
+            ban["top_dst_ports"] = json!([53]);
+            ban
+        }
+
         #[tokio::test]
         async fn flowspec_export_evidence_in_detail_health_and_unsupported_backend() {
             use crate::bgp::{ExportDisposition, MockAnnouncer, PeerExport};
@@ -4965,31 +5016,20 @@ mod tests {
             let lease = Arc::new(crate::domain::LeaseKeeper::new(owner.into(), 60));
             let state = state.with_lease(lease.clone()).unwrap();
             let app = crate::api::create_test_router(state);
-            let (status, body) = send(
-                &app,
-                "/v1/events",
-                None,
-                fastnetmon_ban("fastnetmon", "203.0.113.10"),
-            )
-            .await;
+            let (status, body) = send(&app, "/v1/events", None, flowspec_ban("203.0.113.10")).await;
             assert_eq!(status, StatusCode::ACCEPTED, "{body}");
             assert_eq!(speaker.leased_flowspec_adds.load(SeqCst), 1);
             assert_eq!(speaker.flowspec_adds.load(SeqCst), 0);
             let id: uuid::Uuid = body["mitigation_id"].as_str().unwrap().parse().unwrap();
             let stored = repo.get_mitigation(id).await.unwrap().unwrap();
+            assert_eq!(stored.match_criteria.dst_ports, [53]);
             assert_eq!(stored.action_params.injection_owner, owner);
             assert_eq!(speaker.inner.list_active().await.unwrap()[0].owner, owner);
             assert!(lease.generation().is_some());
             // The committed row bounds renewal at once, and so does a
             // detector re-send that extends it.
             assert_eq!(lease.health().renew_until, Some(stored.expires_at));
-            let (status, body) = send(
-                &app,
-                "/v1/events",
-                None,
-                fastnetmon_ban("fastnetmon", "203.0.113.10"),
-            )
-            .await;
+            let (status, body) = send(&app, "/v1/events", None, flowspec_ban("203.0.113.10")).await;
             assert!(status.is_success(), "{body}");
             let extended = repo.get_mitigation(id).await.unwrap().unwrap();
             assert!(extended.expires_at > stored.expires_at);
@@ -4997,13 +5037,7 @@ mod tests {
             assert_eq!(speaker.leased_flowspec_adds.load(SeqCst), 1);
 
             speaker.fail_adds.store(true, SeqCst);
-            let (status, body) = send(
-                &app,
-                "/v1/events",
-                None,
-                fastnetmon_ban("fastnetmon", "203.0.113.11"),
-            )
-            .await;
+            let (status, body) = send(&app, "/v1/events", None, flowspec_ban("203.0.113.11")).await;
             assert_eq!(status, StatusCode::ACCEPTED, "{body}");
             assert_eq!(body["announcement_outcome"], "unconfirmed", "{body}");
             assert_eq!(speaker.leased_flowspec_adds.load(SeqCst), 2);
@@ -5051,11 +5085,12 @@ mod tests {
             let app = crate::api::create_test_router(
                 flowspec_state(repo.clone(), speaker.clone(), None).await,
             );
-            let ban = fastnetmon_ban("fastnetmon", "203.0.113.10");
+            let ban = flowspec_ban("203.0.113.10");
             let (status, body) = send(&app, "/v1/events", None, ban.clone()).await;
             assert_eq!(status, StatusCode::ACCEPTED, "{body}");
             let id: uuid::Uuid = body["mitigation_id"].as_str().unwrap().parse().unwrap();
             let before = repo.get_mitigation(id).await.unwrap().unwrap();
+            assert_eq!(before.match_criteria.dst_ports, [53]);
             assert_eq!(speaker.flowspec_adds.load(SeqCst), 1);
 
             let lease = Arc::new(crate::domain::LeaseKeeper::new(
@@ -5133,10 +5168,11 @@ mod tests {
             let app = crate::api::create_test_router(
                 flowspec_state(elsewhere, speaker.clone(), None).await,
             );
-            let ban = fastnetmon_ban("fastnetmon", "203.0.113.10");
+            let ban = flowspec_ban("203.0.113.10");
             let (status, _) = send(&app, "/v1/events", None, ban.clone()).await;
             assert_eq!(status, StatusCode::ACCEPTED);
             let unowned = speaker.inner.list_active().await.unwrap();
+            assert_eq!(unowned[0].nlri.dst_ports, [53]);
 
             let repo = Arc::new(MockRepository::new());
             let lease = Arc::new(crate::domain::LeaseKeeper::new(
@@ -5372,6 +5408,261 @@ playbooks:
 
     async fn get(f: &Fixture, id: Uuid) -> Mitigation {
         f.repo.get_mitigation(id).await.unwrap().unwrap()
+    }
+
+    mod ban_retries {
+        use super::*;
+        use crate::db::{ListParams, MockPause};
+        use crate::domain::{EventOutcome, EventOutcomeRecord};
+        use std::sync::atomic::Ordering::SeqCst;
+        use std::time::Duration;
+
+        fn spawn_ban(
+            f: &Fixture,
+            input: AttackEventInput,
+        ) -> tokio::task::JoinHandle<Result<EventResponse, PrefixdError>> {
+            let state = f.state.clone();
+            tokio::spawn(async move {
+                let grant = crate::api::auth::SourceGrant::for_test(&input.source);
+                handle_ban(state, &grant, input)
+                    .await
+                    .map(|(_, axum::Json(response))| response)
+                    .map_err(|AppError(error)| error)
+            })
+        }
+
+        async fn entered(pause: &MockPause) {
+            tokio::time::timeout(Duration::from_secs(5), pause.entered.notified())
+                .await
+                .expect("request reached the controlled cancellation point");
+        }
+
+        async fn stored(f: &Fixture, id: &str) -> crate::domain::AttackEvent {
+            f.repo
+                .find_ban_event_by_external_id("amp-test", id)
+                .await
+                .unwrap()
+                .unwrap()
+        }
+
+        fn duplicate(error: PrefixdError) -> EventOutcomeRecord {
+            match error {
+                PrefixdError::DuplicateEvent { outcome, .. } => outcome,
+                other => panic!("expected completed duplicate, got {other}"),
+            }
+        }
+
+        async fn unban(f: &Fixture, id: &str) {
+            let mut input = event(id, "udp_flood", None);
+            input.action = "unban".into();
+            let grant = crate::api::auth::SourceGrant::for_test(&input.source);
+            let _ = handle_unban(f.state.clone(), &grant, input)
+                .await
+                .unwrap_or_else(|AppError(error)| panic!("{error}"));
+        }
+
+        #[tokio::test]
+        async fn cancelled_after_insert_resumes_original_event_once() {
+            let f = fixture(OperationMode::Enforced, |_, _| {});
+            let pause = Arc::new(MockPause::default());
+            *f.repo.after_event_insert.lock().unwrap() = Some(pause.clone());
+            let first = spawn_ban(&f, event("interrupted", "udp_flood", None));
+            entered(&pause).await;
+            let original = stored(&f, "interrupted").await;
+            assert!(rows(&f).await.is_empty());
+            first.abort();
+            assert!(first.await.unwrap_err().is_cancelled());
+
+            let mut retry = event("interrupted", "syn_flood", None);
+            retry.victim_ip = "203.0.113.11".into();
+            let recovered = ban(&f, retry.clone()).await.unwrap();
+            assert_eq!(recovered.event_id, original.event_id);
+            let rows = rows(&f).await;
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].victim_ip, original.victim_ip);
+            assert_eq!(rows[0].triggering_event_id, original.event_id);
+            assert_eq!(f.speaker.announced_count().await, 1);
+            let completed = stored(&f, "interrupted").await;
+            assert_eq!(completed.ingested_at, original.ingested_at);
+            assert_eq!(completed.outcome.outcome, EventOutcome::Mitigated);
+            assert_eq!(
+                duplicate(ban(&f, retry).await.unwrap_err()),
+                completed.outcome
+            );
+            assert_eq!(
+                f.repo
+                    .list_events(&ListParams {
+                        limit: 100,
+                        ..Default::default()
+                    })
+                    .await
+                    .unwrap()
+                    .len(),
+                1
+            );
+            assert_eq!(f.repo.count_active_global().await.unwrap(), 1);
+        }
+
+        #[tokio::test]
+        async fn failed_admission_retries_but_final_refusal_does_not() {
+            let f = fixture(OperationMode::Enforced, |_, _| {});
+            let input = event("failure", "udp_flood", None);
+            f.repo.fail_safelist.store(true, SeqCst);
+            assert!(ban(&f, input.clone()).await.is_err());
+            let failed = stored(&f, "failure").await;
+            assert_eq!(failed.outcome.outcome, EventOutcome::Failed);
+            assert!(failed.outcome.outcome_mitigation_ids.is_empty());
+            f.repo.fail_safelist.store(false, SeqCst);
+            let recovered = ban(&f, input).await.unwrap();
+            assert_eq!(recovered.event_id, failed.event_id);
+            assert_eq!(
+                stored(&f, "failure").await.outcome.outcome,
+                EventOutcome::Mitigated
+            );
+
+            let mut refused = event("refused", "udp_flood", None);
+            refused.victim_ip = "198.51.100.10".into();
+            assert_eq!(ban(&f, refused.clone()).await.unwrap().mitigation_id, None);
+            assert_eq!(
+                duplicate(ban(&f, refused).await.unwrap_err()).outcome,
+                EventOutcome::NotOwned
+            );
+        }
+
+        #[tokio::test]
+        async fn outcome_write_and_concurrent_retry_share_the_lifecycle_lock() {
+            let f = fixture(OperationMode::Enforced, |_, _| {});
+            let pause = Arc::new(MockPause::default());
+            *f.repo.before_event_outcome.lock().unwrap() = Some(pause.clone());
+            let input = event("concurrent", "udp_flood", None);
+            let first = spawn_ban(&f, input.clone());
+            entered(&pause).await;
+            assert!(f.state.mitigation_lock.try_lock().is_err());
+            let retry = ban(&f, input);
+            tokio::pin!(retry);
+            assert!(futures_util::poll!(&mut retry).is_pending());
+            pause.release.notify_one();
+            let completed = first.await.unwrap().unwrap();
+            let outcome = duplicate(retry.await.unwrap_err());
+            assert_eq!(outcome.outcome, EventOutcome::Mitigated);
+            assert_eq!(outcome.outcome_mitigation_ids, completed.mitigation_ids);
+            assert_eq!(rows(&f).await.len(), 1);
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn outcome_deadline_releases_lifecycle_without_erasing_admitted_ids() {
+            let f = fixture(OperationMode::Enforced, |_, _| {});
+            let pause = Arc::new(MockPause::default());
+            *f.repo.before_event_outcome.lock().unwrap() = Some(pause.clone());
+            let input = event("slow-outcome", "udp_flood", None);
+            let first = spawn_ban(&f, input.clone());
+            entered(&pause).await;
+            let original = stored(&f, "slow-outcome").await;
+            assert_eq!(original.outcome.outcome_mitigation_ids.len(), 1);
+            tokio::time::advance(Duration::from_millis(4999)).await;
+            assert!(!first.is_finished());
+            assert!(f.state.mitigation_lock.try_lock().is_err());
+            tokio::time::advance(Duration::from_millis(1)).await;
+            let accepted = tokio::time::timeout(Duration::from_secs(1), first)
+                .await
+                .expect("outcome deadline released the lifecycle turn")
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                accepted.mitigation_ids,
+                original.outcome.outcome_mitigation_ids
+            );
+            assert!(f.state.mitigation_lock.try_lock().is_ok());
+            let replay = tokio::time::timeout(Duration::from_secs(1), ban(&f, input))
+                .await
+                .expect("same-ID request progresses after the deadline");
+            assert_eq!(duplicate(replay.unwrap_err()), original.outcome);
+            assert_eq!(rows(&f).await.len(), 1);
+        }
+
+        #[tokio::test]
+        async fn interrupted_partial_admission_and_withdrawal_never_reannounce() {
+            let f = fixture(OperationMode::Enforced, |_, _| {});
+            let hold_publication = f.state.alerting.write().await;
+            let mut feed = f.state.ws_broadcast.subscribe();
+            let input = event("partial", "udp_amplification", Some(&[53, 123]));
+            let first = spawn_ban(&f, input.clone());
+            tokio::time::timeout(Duration::from_secs(5), feed.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            // The first rule committed and announced; the second has not started.
+            let before = rows(&f).await;
+            assert_eq!(before.len(), 1);
+            first.abort();
+            assert!(first.await.unwrap_err().is_cancelled());
+            drop(hold_publication);
+            let record = stored(&f, "partial").await.outcome;
+            assert_eq!(record.outcome, EventOutcome::NotRecorded);
+            assert_eq!(record.outcome_mitigation_ids, [before[0].mitigation_id]);
+            assert_eq!(duplicate(ban(&f, input.clone()).await.unwrap_err()), record);
+            assert_eq!(
+                get(&f, before[0].mitigation_id).await.expires_at,
+                before[0].expires_at
+            );
+            assert_eq!(rows(&f).await.len(), 1);
+            unban(&f, "resolve-partial").await;
+            assert_eq!(f.speaker.announced_count().await, 0);
+            assert_eq!(duplicate(ban(&f, input).await.unwrap_err()), record);
+            assert_eq!(rows(&f).await.len(), 1);
+            assert_eq!(f.repo.count_active_global().await.unwrap(), 0);
+        }
+
+        #[tokio::test]
+        async fn interrupted_extension_survives_later_extensions_and_withdrawal() {
+            let f = fixture(OperationMode::Enforced, |_, _| {});
+            ban(&f, event("created", "udp_flood", None)).await.unwrap();
+            let pause = Arc::new(MockPause::default());
+            *f.repo.before_event_outcome.lock().unwrap() = Some(pause.clone());
+            let input = event("extend-interrupted", "udp_flood", None);
+            let extension = spawn_ban(&f, input.clone());
+            entered(&pause).await;
+            extension.abort();
+            assert!(extension.await.unwrap_err().is_cancelled());
+            let record = stored(&f, "extend-interrupted").await.outcome;
+            assert_eq!(record.outcome_mitigation_ids.len(), 1);
+            ban(&f, event("later-extension", "udp_flood", None))
+                .await
+                .unwrap();
+            let before = rows(&f).await;
+            assert_eq!(duplicate(ban(&f, input.clone()).await.unwrap_err()), record);
+            assert_eq!(
+                get(&f, before[0].mitigation_id).await.last_event_id,
+                before[0].last_event_id
+            );
+            assert_eq!(
+                get(&f, before[0].mitigation_id).await.expires_at,
+                before[0].expires_at
+            );
+            unban(&f, "resolve-extension").await;
+            assert_eq!(duplicate(ban(&f, input).await.unwrap_err()), record);
+            assert_eq!(rows(&f).await.len(), 1);
+            assert_eq!(f.repo.count_active_global().await.unwrap(), 0);
+        }
+
+        #[tokio::test]
+        async fn failed_final_outcome_preserves_admitted_ids_and_lookup_failure_is_closed() {
+            let f = fixture(OperationMode::Enforced, |_, _| {});
+            f.repo.fail_event_outcomes.store(true, SeqCst);
+            let input = event("lost-outcome", "udp_flood", None);
+            let accepted = ban(&f, input.clone()).await.unwrap();
+            let record = stored(&f, "lost-outcome").await.outcome;
+            assert_eq!(record.outcome, EventOutcome::NotRecorded);
+            assert_eq!(record.outcome_mitigation_ids, accepted.mitigation_ids);
+            f.repo.fail_event_outcomes.store(false, SeqCst);
+            assert_eq!(duplicate(ban(&f, input.clone()).await.unwrap_err()), record);
+            f.repo.fail_ban_reads.store(true, SeqCst);
+            assert!(matches!(
+                ban(&f, input).await.unwrap_err(),
+                PrefixdError::Internal(_)
+            ));
+            assert_eq!(rows(&f).await.len(), 1);
+        }
     }
 
     #[tokio::test]
@@ -5966,12 +6257,13 @@ playbooks:
             assert_eq!(outcomes(&response), [RuleOutcome::Created], "{name}");
             let saved = rows(&f).await;
             assert_eq!(saved.len(), 1, "{name}");
-            // Exactly today's udp_flood rule: police, service ports, no source ports.
+            // The portless fallback polices UDP without inventing service ports.
             let rule = &saved[0];
             assert_eq!(rule.vector, AttackVector::UdpFlood, "{name}");
             assert_eq!(rule.action_type, ActionType::Police);
             assert_eq!(rule.action_params.rate_bps, Some(5_000_000));
-            assert_eq!(rule.match_criteria.dst_ports, [53]);
+            assert_eq!(rule.match_criteria.protocol, Some(17));
+            assert!(rule.match_criteria.dst_ports.is_empty());
             assert!(rule.match_criteria.src_ports.is_empty());
             assert!(rule.match_criteria.fragment.is_none());
             assert!(

@@ -11,7 +11,7 @@ import termios
 import time
 
 
-def interactive(username, password, expected, ending=b"\n"):
+def interactive(username, steps, expected):
     pid, terminal = pty.fork()
     if pid == 0:
         settings = termios.tcgetattr(0)
@@ -22,7 +22,8 @@ def interactive(username, password, expected, ending=b"\n"):
     output = bytearray()
     finished = 0
     eof = False
-    sent = False
+    sent = 0
+    consumed = 0
     deadline = time.monotonic() + 15
     try:
         while time.monotonic() < deadline:
@@ -35,7 +36,7 @@ def interactive(username, password, expected, ending=b"\n"):
                     if error.errno != errno.EIO:
                         raise
                     eof = True
-            if not sent and b"Password:" in output:
+            if sent < len(steps) and steps[sent][0] in output[consumed:]:
                 # The prompt can precede the terminal-mode change by a few instructions.
                 echo_deadline = time.monotonic() + 2
                 while termios.tcgetattr(terminal)[3] & termios.ECHO:
@@ -43,14 +44,16 @@ def interactive(username, password, expected, ending=b"\n"):
                         "password input leaves terminal echo enabled"
                     )
                     time.sleep(0.01)
-                os.write(terminal, password + ending)
-                sent = True
-                # Exercise child exit before its final PTY output is consumed.
-                while not os.waitid(os.P_PID, pid, os.WEXITED | os.WNOWAIT | os.WNOHANG):
-                    assert time.monotonic() < deadline, (
-                        "child did not exit before the capture deadline"
-                    )
-                    time.sleep(0.001)
+                os.write(terminal, steps[sent][1])
+                consumed = len(output)
+                sent += 1
+                if sent == len(steps):
+                    # Exercise child exit before its final PTY output is consumed.
+                    while not os.waitid(os.P_PID, pid, os.WEXITED | os.WNOWAIT | os.WNOHANG):
+                        assert time.monotonic() < deadline, (
+                            "child did not exit before the capture deadline"
+                        )
+                        time.sleep(0.001)
             if not finished:
                 finished, status = os.waitpid(pid, os.WNOHANG)
             if finished and eof:
@@ -58,16 +61,18 @@ def interactive(username, password, expected, ending=b"\n"):
         else:
             raise AssertionError("password command timed out")
 
-        assert sent, "password prompt was not reached"
+        assert sent == len(steps), f"{username}: password flow ended before all prompts"
         exit_code = os.waitstatus_to_exitcode(status)
         assert exit_code == expected, "unexpected command exit status"
         terminal_flags = termios.ECHO | termios.ICANON | termios.ISIG
         assert termios.tcgetattr(terminal)[3] & terminal_flags == terminal_flags, (
             "terminal mode was not restored"
         )
-        if password:
-            assert password.strip() not in output, "password appeared in terminal output"
-        elif ending == b"\n":
+        for _, answer in steps:
+            secret = answer.strip()
+            if secret and secret not in (b"\x03", b"\x04"):
+                assert secret not in output, "password appeared in terminal output"
+        if username == "pty-empty":
             assert b"password cannot be empty" in output, "blank password was not rejected"
     finally:
         if not finished:
@@ -76,10 +81,48 @@ def interactive(username, password, expected, ending=b"\n"):
         os.close(terminal)
 
 
-interactive("pty-admin", b"  pty-test-password  ", 0)
-interactive("pty-empty", b"", 1)
-interactive("pty-interrupt", b"", 1, b"\x03")
-interactive("pty-eof", b"", 1, b"\x04")
+interactive(
+    "pty-admin",
+    [(b"Password:", b"  pty-test-password  \n"), (b"Confirmation:", b"  pty-test-password  \n")],
+    0,
+)
+interactive(
+    "pty-corrected",
+    [
+        (b"Password:", b"mistyped-first-secret\n"),
+        (b"Confirmation:", b"different-confirmation-secret\n"),
+        (b"The answers don't match.", b"pty-test-password\n"),
+        (b"Confirmation:", b"pty-test-password\n"),
+    ],
+    0,
+)
+interactive("pty-empty", [(b"Password:", b"\n"), (b"Confirmation:", b"\n")], 1)
+interactive("pty-interrupt", [(b"Password:", b"\x03")], 1)
+interactive("pty-eof", [(b"Password:", b"\x04")], 1)
+interactive(
+    "pty-confirm-interrupt",
+    [(b"Password:", b"cancelled-password\n"), (b"Confirmation:", b"\x03")],
+    1,
+)
+interactive(
+    "pty-confirm-eof",
+    [
+        (b"Password:", b"eof-password\n"),
+        (b"Confirmation:", b"\x04"),
+        # Ctrl-D clears the confirmation line; the first prompt stays rendered.
+        (b"\x1b[2K", b"\x03"),
+    ],
+    1,
+)
+interactive(
+    "pty-mismatch-cancel",
+    [
+        (b"Password:", b"unconfirmed-first-secret\n"),
+        (b"Confirmation:", b"unconfirmed-other-secret\n"),
+        (b"The answers don't match.", b"\x03"),
+    ],
+    1,
+)
 result = subprocess.run(
     [sys.argv[1], "operators", "create", "--username", "pty-no-terminal"],
     stdin=subprocess.DEVNULL,
@@ -105,3 +148,5 @@ result = subprocess.run(
     timeout=15,
 )
 assert result.returncode == 0, "explicit password failed without a terminal"
+
+assert b"pty-test-password" not in result.stdout + result.stderr, "explicit password leaked"

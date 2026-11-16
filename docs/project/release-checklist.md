@@ -8,10 +8,11 @@ Follow this page for every prefixd release. A release publishes:
 - a CycloneDX SBOM;
 - `SHA256SUMS` and the image digests.
 
-The release is automatic once the release PR merges. When `ci.yml` passes on
-the `main` commit that sets a new Cargo.toml version, the
-[release workflow](../../.github/workflows/release.yml) tags that commit
-`vX.Y.Z` and publishes the GitHub Release as `github-actions[bot]`. Merging the
+The release starts automatically once the release PR merges and `ci.yml` passes
+on the `main` commit that sets a new Cargo.toml version. The
+[release workflow](../../.github/workflows/release.yml) requires the latest CI
+and Interop push runs on that exact commit to pass before it tags `vX.Y.Z` and
+publishes the GitHub Release as `github-actions[bot]`. Merging the
 release PR is the approval; there is no tag push or draft to publish by hand.
 
 Never force-push `main`, move, delete or re-create a pushed tag, or overwrite a
@@ -42,7 +43,7 @@ release. If a tag can't release, fix forward with the next patch version.
 
    Changes to `release.yml`, `release-install-contract.yml` or the
    `scripts/release-*` files land in their own PR first, never in the release
-   PR. After that PR merges and its `main` CI passes,
+   PR. After that PR merges and its `main` CI and Interop pass,
    [dry-run](#dry-run) the release workflow on `main`.
 
 3. **Merge.** Merging is the release decision. When `ci.yml`'s push run on the
@@ -55,7 +56,9 @@ release. If a tag can't release, fix forward with the next patch version.
      stops quietly if that commit didn't change the version, the tag already
      exists or the CHANGELOG has no dated section. Otherwise it runs
      `scripts/release-check.sh`: the tag equals the Cargo version, the commit
-     is on `main` and its `ci.yml` push run succeeded. It also refuses a
+     is on `main` and its latest `ci.yml` and `interop.yml` push runs succeeded.
+     Missing, pending, failed, canceled and skipped runs refuse publication;
+     a successful run from another commit does not count. It also refuses a
      version that already has a release, then extracts the notes.
    - `binaries` builds on Debian 12 (glibc 2.36) and produces the tarball,
      SBOM and `SHA256SUMS`.
@@ -97,6 +100,10 @@ release. If a tag can't release, fix forward with the next patch version.
 ## Stop or recover
 
 - **Before merge**, nothing has happened; close or fix the PR.
+- **Interop is still running when CI starts the release:** verification fails
+  before tagging. Once the latest CI and Interop push runs pass on that exact
+  commit, rerun the failed release jobs with `gh run rerun <run-id> --failed`.
+  A failed Interop run, including its FastNetMon lane, blocks publication.
 - **To stop a release in flight**, cancel the release run before its `tag` job
   (`gh run cancel <run-id>`). Nothing is tagged or pushed until then. Don't
   cancel after `tag`: the tag exists and the version is spent.
@@ -121,7 +128,7 @@ release. If a tag can't release, fix forward with the next patch version.
   ```
 
   A pushed tag runs the same workflow and checks: that commit must carry the
-  version, be on `main` and have passed `ci.yml`.
+  version, be on `main` and have passed the latest CI and Interop push runs.
 
 ## Dry run
 
@@ -135,8 +142,8 @@ It takes the tag name from that ref's Cargo.toml, runs `release-check.sh`
 without checking where an existing tag points, and runs every build, smoke
 test and body assembly. It creates no tag, pushes no image and creates no
 release. The run summary shows the release body it would publish. The ref's
-commit must be on `main` with a passing `ci.yml` push run, so a PR branch
-can't be dry-run.
+commit must be on `main` with passing latest CI and Interop push runs, so a PR
+branch can't be dry-run.
 
 ## Preconditions
 
@@ -154,6 +161,9 @@ Check these on the release candidate before opening the release PR:
       ```
 
       Use the pins in ci.yml's `rustbgpd` matrix if they have moved.
+- [ ] Interop, including the FastNetMon lane, passes on the release candidate.
+      Record its run URL and commit. After merge, the release gate also requires
+      a successful Interop push run on the exact release commit.
 - [ ] The upgrade proof passes. Upgrade from the previous release tag to the
       candidate with a real previous-release database. Build that database
       from the tag; it should hold active manual and detector mitigations and a

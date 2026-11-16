@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use crate::config::AuthMode;
 use crate::db::RepositoryTrait;
-use crate::domain::Operator;
+use crate::domain::{Operator, SecretString};
 
 static DUMMY_HASH: LazyLock<String> = LazyLock::new(|| {
     Argon2::default()
@@ -19,7 +19,7 @@ static DUMMY_HASH: LazyLock<String> = LazyLock::new(|| {
 #[derive(Clone, Deserialize)]
 pub struct Credentials {
     pub username: String,
-    pub password: String,
+    pub password: SecretString,
 }
 
 /// Auth backend for axum-login
@@ -49,7 +49,7 @@ impl AuthUser for Operator {
     }
 
     fn session_auth_hash(&self) -> &[u8] {
-        self.password_hash.as_bytes()
+        self.password_hash.expose_secret().as_bytes()
     }
 }
 
@@ -72,8 +72,8 @@ impl AuthnBackend for AuthBackend {
             Ok(None) => {
                 // Run dummy Argon2 verify to prevent timing-based username enumeration
                 if let Ok(dummy_hash) = PasswordHash::new(&DUMMY_HASH) {
-                    let _ =
-                        Argon2::default().verify_password(creds.password.as_bytes(), &dummy_hash);
+                    let _ = Argon2::default()
+                        .verify_password(creds.password.expose_secret().as_bytes(), &dummy_hash);
                 }
                 tracing::debug!(username = %creds.username, "operator not found");
                 return Ok(None);
@@ -85,7 +85,7 @@ impl AuthnBackend for AuthBackend {
         };
 
         // Verify password with argon2
-        let parsed_hash = match PasswordHash::new(&operator.password_hash) {
+        let parsed_hash = match PasswordHash::new(operator.password_hash.expose_secret()) {
             Ok(h) => h,
             Err(e) => {
                 tracing::error!(error = %e, "invalid password hash format");
@@ -94,7 +94,7 @@ impl AuthnBackend for AuthBackend {
         };
 
         if Argon2::default()
-            .verify_password(creds.password.as_bytes(), &parsed_hash)
+            .verify_password(creds.password.expose_secret().as_bytes(), &parsed_hash)
             .is_ok()
         {
             // Update last login time

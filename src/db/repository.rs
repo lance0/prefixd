@@ -196,8 +196,8 @@ impl Repository {
             INSERT INTO events (
                 event_id, external_event_id, source, event_timestamp, ingested_at,
                 victim_ip, vector, protocol, bps, pps, top_dst_ports_json, top_src_ports_json, confidence,
-                action, raw_details, unban_pop, unban_target_ids
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+                action, raw_details, unban_pop, unban_target_ids, ban_retryable
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
             "#,
         )
         .bind(event.event_id)
@@ -217,6 +217,7 @@ impl Repository {
         .bind(&event.raw_details)
         .bind(unban.map(|(pop, _)| pop))
         .bind(unban.map(|(_, targets)| targets))
+        .bind(event.ban_retryable)
         .execute(connection)
         .await?;
         Ok(())
@@ -268,6 +269,49 @@ impl Repository {
                 "mitigation changed before withdrawal was persisted".into(),
             )
         })
+    }
+
+    async fn update_mitigation_on(connection: &mut PgConnection, m: &Mitigation) -> Result<()> {
+        let match_json = serde_json::to_string(&m.match_criteria)?;
+        let action_params_json = serde_json::to_string(&m.action_params)?;
+
+        sqlx::query(
+            r#"
+            UPDATE mitigations SET
+                scope_hash = $2, status = $3, updated_at = $4, expires_at = $5,
+                withdrawn_at = $6, last_event_id = $7, match_json = $8,
+                action_type = $9, action_params_json = $10, reason = $11, rejection_reason = $12
+            WHERE mitigation_id = $1
+            "#,
+        )
+        .bind(m.mitigation_id)
+        .bind(&m.scope_hash)
+        .bind(m.status.as_str())
+        .bind(m.updated_at)
+        .bind(m.expires_at)
+        .bind(m.withdrawn_at)
+        .bind(m.last_event_id)
+        .bind(&match_json)
+        .bind(m.action_type.as_str())
+        .bind(&action_params_json)
+        .bind(&m.reason)
+        .bind(&m.rejection_reason)
+        .execute(connection)
+        .await?;
+        Ok(())
+    }
+
+    async fn record_ban_mitigation_on(connection: &mut PgConnection, m: &Mitigation) -> Result<()> {
+        sqlx::query(
+            "UPDATE events SET outcome_mitigation_ids = array_append(outcome_mitigation_ids, $2)
+             WHERE event_id = $1 AND action = 'ban' AND (outcome IS NULL OR outcome = 'failed')
+               AND NOT ($2 = ANY(outcome_mitigation_ids))",
+        )
+        .bind(m.last_event_id)
+        .bind(m.mitigation_id)
+        .execute(connection)
+        .await?;
+        Ok(())
     }
 
     pub fn new(pool: PgPool) -> Self {
@@ -772,22 +816,43 @@ impl RepositoryTrait for Repository {
         source: &str,
         external_id: &str,
     ) -> Result<Option<AttackEvent>> {
-        let event = sqlx::query_as::<_, AttackEvent>(
+        // Row locking linearizes a retry with an earlier admission's COMMIT.
+        // Bound this new wait, including pool acquisition, and let a dropped
+        // BEGIN finish so its detached result rolls back normally.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let pool = self.pool.clone();
+            let mut tx = tokio::spawn(async move {
+                pool.begin_with("BEGIN ISOLATION LEVEL READ COMMITTED").await
+            })
+            .await
+            .map_err(|_| sqlx::Error::PoolTimedOut)??;
+            sqlx::query("SET LOCAL lock_timeout = '3s'")
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query("SET LOCAL statement_timeout = '4s'")
+                .execute(&mut *tx)
+                .await?;
+            let event = sqlx::query_as::<_, AttackEvent>(
             r#"
             SELECT event_id, external_event_id, source, event_timestamp, ingested_at,
                    victim_ip, vector, protocol, bps, pps, top_dst_ports_json, top_src_ports_json, confidence,
-                   action, raw_details, outcome, outcome_reason, outcome_mitigation_ids
+                   action, raw_details, outcome, outcome_reason, outcome_mitigation_ids, ban_retryable
             FROM events
             WHERE source = $1 AND external_event_id = $2 AND action = 'ban'
-            ORDER BY ingested_at DESC
+            ORDER BY ingested_at DESC, event_id DESC
             LIMIT 1
+            FOR UPDATE
             "#,
         )
         .bind(source)
         .bind(external_id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await?;
-        Ok(event)
+            tx.commit().await?;
+            Ok::<_, PrefixdError>(event)
+        })
+        .await
+        .map_err(|_| sqlx::Error::PoolTimedOut)?
     }
 
     async fn list_events_filtered(
@@ -799,7 +864,7 @@ impl RepositoryTrait for Repository {
             r#"
             SELECT event_id, external_event_id, source, event_timestamp, ingested_at,
                    victim_ip, vector, protocol, bps, pps, top_dst_ports_json, top_src_ports_json, confidence,
-                   action, raw_details, outcome, outcome_reason, outcome_mitigation_ids
+                   action, raw_details, outcome, outcome_reason, outcome_mitigation_ids, ban_retryable
             FROM events
             WHERE ($2::timestamptz IS NULL OR (ingested_at, event_id) < ($2, $5))
               AND ($3::timestamptz IS NULL OR ingested_at >= $3)
@@ -839,17 +904,33 @@ impl RepositoryTrait for Repository {
         event_id: Uuid,
         record: &crate::domain::EventOutcomeRecord,
     ) -> Result<()> {
-        // Written once: a later call never replaces a recorded outcome.
+        // As for bounded reads, finish BEGIN even if the caller's deadline
+        // drops this future; the detached result then rolls back normally.
+        let pool = self.pool.clone();
+        let mut tx = tokio::spawn(async move { pool.begin().await })
+            .await
+            .map_err(|_| sqlx::Error::PoolTimedOut)??;
+        sqlx::query("SET LOCAL lock_timeout = '3s'")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("SET LOCAL statement_timeout = '4s'")
+            .execute(&mut *tx)
+            .await?;
+        // A failed ban may recover; no final outcome or committed ID is erased.
         sqlx::query(
-            "UPDATE events SET outcome = $2, outcome_reason = $3, outcome_mitigation_ids = $4
-             WHERE event_id = $1 AND outcome IS NULL",
+            "UPDATE events SET outcome = $2, outcome_reason = $3,
+                 outcome_mitigation_ids = outcome_mitigation_ids || ARRAY(
+                     SELECT id FROM unnest($4::uuid[]) AS id
+                     WHERE NOT (id = ANY(outcome_mitigation_ids)))
+             WHERE event_id = $1 AND (outcome IS NULL OR (action = 'ban' AND outcome = 'failed'))",
         )
         .bind(event_id)
         .bind(record.outcome.as_str())
         .bind(&record.outcome_reason)
         .bind(&record.outcome_mitigation_ids)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -1084,6 +1165,7 @@ impl RepositoryTrait for Repository {
             // Same transaction as the row: never an entry without a row, or a row without one.
             Self::insert_audit_on(&mut tx, &AuditEntry::mitigation_created(m, actor)).await?;
             Self::insert_mitigation_on(&mut tx, m).await?;
+            Self::record_ban_mitigation_on(&mut tx, m).await?;
             Ok::<_, PrefixdError>(tx)
         }).await.map_err(|_| PrefixdError::Internal("mitigation admission timed out".into()))??;
         tx.commit().await?;
@@ -1091,32 +1173,53 @@ impl RepositoryTrait for Repository {
     }
 
     async fn update_mitigation(&self, m: &Mitigation) -> Result<()> {
-        let match_json = serde_json::to_string(&m.match_criteria)?;
-        let action_params_json = serde_json::to_string(&m.action_params)?;
+        Self::update_mitigation_on(&mut *self.pool.acquire().await?, m).await
+    }
 
-        sqlx::query(
-            r#"
-            UPDATE mitigations SET
-                scope_hash = $2, status = $3, updated_at = $4, expires_at = $5,
-                withdrawn_at = $6, last_event_id = $7, match_json = $8,
-                action_type = $9, action_params_json = $10, reason = $11, rejection_reason = $12
-            WHERE mitigation_id = $1
-            "#,
+    async fn extend_mitigation_for_event(
+        &self,
+        expected: &Mitigation,
+        m: &Mitigation,
+    ) -> Result<()> {
+        let pool = self.pool.clone();
+        let mut tx = tokio::spawn(async move {
+            pool.begin_with("BEGIN ISOLATION LEVEL READ COMMITTED")
+                .await
+        })
+        .await
+        .map_err(|_| sqlx::Error::PoolTimedOut)??;
+        sqlx::query("SET LOCAL lock_timeout = '5s'")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("SET LOCAL statement_timeout = '5s'")
+            .execute(&mut *tx)
+            .await?;
+        let row = sqlx::query_as::<_, MitigationRow>(
+            "SELECT * FROM mitigations WHERE mitigation_id = $1 FOR UPDATE",
         )
-        .bind(m.mitigation_id)
-        .bind(&m.scope_hash)
-        .bind(m.status.as_str())
-        .bind(m.updated_at)
-        .bind(m.expires_at)
-        .bind(m.withdrawn_at)
-        .bind(m.last_event_id)
-        .bind(&match_json)
-        .bind(m.action_type.as_str())
-        .bind(&action_params_json)
-        .bind(&m.reason)
-        .bind(&m.rejection_reason)
-        .execute(&self.pool)
+        .bind(expected.mitigation_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or(PrefixdError::MitigationNotFound(expected.mitigation_id))?;
+        let current = Mitigation::from_row(row)?;
+        if &current != expected || !current.is_active() {
+            return Err(PrefixdError::BanAdmissionChanged);
+        }
+        // A dropped unban future can leave COMMIT running after the process
+        // mutex releases. Its transaction locks this row before inserting its
+        // intent; a new statement sees that intent after our lock wait ends.
+        let withdrawing: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM withdrawal_requests WHERE mitigation_id = $1 AND completed_at IS NULL)",
+        )
+        .bind(current.mitigation_id)
+        .fetch_one(&mut *tx)
         .await?;
+        if withdrawing {
+            return Err(PrefixdError::BanAdmissionChanged);
+        }
+        Self::update_mitigation_on(&mut tx, m).await?;
+        Self::record_ban_mitigation_on(&mut tx, m).await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -1679,7 +1782,7 @@ impl RepositoryTrait for Repository {
             r#"
             SELECT event_id, external_event_id, source, event_timestamp, ingested_at,
                    victim_ip, vector, protocol, bps, pps, top_dst_ports_json, top_src_ports_json, confidence,
-                   action, raw_details, outcome, outcome_reason, outcome_mitigation_ids
+                   action, raw_details, outcome, outcome_reason, outcome_mitigation_ids, ban_retryable
             FROM events WHERE prefixd_victim_inet(victim_ip) = ANY($1::inet[])
             ORDER BY ingested_at DESC LIMIT $2
             "#,
@@ -2745,7 +2848,8 @@ pub struct TimeseriesBucket {
 struct OperatorRow {
     operator_id: Uuid,
     username: String,
-    password_hash: String,
+    #[sqlx(try_from = "String")]
+    password_hash: crate::domain::SecretString,
     role: String,
     #[sqlx(try_from = "crate::db::CheckedTimestamp")]
     created_at: DateTime<Utc>,
@@ -2889,7 +2993,7 @@ mod checked_timestamp_rows {
         }
         check_row!(
             AttackEvent,
-            "gen_random_uuid() AS event_id, NULL::text AS external_event_id, 'test'::text AS source, '203.0.113.1'::text AS victim_ip, 'udp_flood'::text AS vector, 17::integer AS protocol, NULL::bigint AS bps, NULL::bigint AS pps, '[]'::text AS top_dst_ports_json, NULL::text AS top_src_ports_json, NULL::real AS confidence, 'ban'::text AS action, NULL::jsonb AS raw_details, NULL::text AS outcome, NULL::text AS outcome_reason, '{}'::uuid[] AS outcome_mitigation_ids",
+            "gen_random_uuid() AS event_id, NULL::text AS external_event_id, 'test'::text AS source, '203.0.113.1'::text AS victim_ip, 'udp_flood'::text AS vector, 17::integer AS protocol, NULL::bigint AS bps, NULL::bigint AS pps, '[]'::text AS top_dst_ports_json, NULL::text AS top_src_ports_json, NULL::real AS confidence, 'ban'::text AS action, NULL::jsonb AS raw_details, NULL::text AS outcome, NULL::text AS outcome_reason, '{}'::uuid[] AS outcome_mitigation_ids, false AS ban_retryable",
             [event_timestamp, ingested_at],
             []
         );

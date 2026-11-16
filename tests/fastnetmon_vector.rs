@@ -818,26 +818,56 @@ fn the_token_file_wins_and_a_bad_token_sends_nothing() {
     assert_eq!(run.calls[0].config, "");
 }
 
-/// A retried ban whose earlier attempt reached prefixd meets its own event ID
-/// as a 409: it was delivered, so the script exits 0. A 409 on the first
-/// attempt, or for another event ID, stays an error.
+/// A retried duplicate only confirms local intent when its recorded result
+/// includes admitted mitigation IDs. Refused and incomplete outcomes fail.
 #[test]
-fn a_retried_ban_that_meets_its_own_event_id_was_delivered() {
-    let own = r#"409|{"error":"duplicate event from fastnetmon: EVENTID"}"#;
-    let run = run_script("ban", "203.0.113.10", "", &["refused", own], &[]);
-    assert!(run.ok, "{}", run.log);
-    assert_eq!(run.calls.len(), 2);
-    assert!(
-        run.log
-            .contains("NO_MITIGATION (409, status=delivered_by_earlier_attempt)"),
-        "{}",
-        run.log
-    );
-    let run = run_script("ban", "203.0.113.10", "", &[own], &[]);
-    assert!(!run.ok, "a first-attempt 409 is not a retry");
-    let other = r#"409|{"error":"duplicate event from fastnetmon: someone-else"}"#;
-    let run = run_script("ban", "203.0.113.10", "", &["503", other], &[]);
-    assert!(!run.ok, "another event's 409 is not this ban");
+fn a_retried_ban_requires_a_recorded_admission_outcome() {
+    for outcome in ["mitigated", "extended", "dry_run"] {
+        let own = format!(
+            r#"409|{{"error":"duplicate event from fastnetmon: EVENTID","event_outcome":{{"outcome":"{outcome}","outcome_mitigation_ids":["{MITIGATION_ID}"]}}}}"#
+        );
+        let run = run_script("ban", "203.0.113.10", "", &["refused", &own], &[]);
+        assert!(run.ok, "{}", run.log);
+        assert_eq!(run.calls.len(), 2);
+        assert!(
+            run.log.contains("INTENT_RECORDED (409, outcome="),
+            "{}",
+            run.log
+        );
+        assert!(!run.log.contains("SUCCESS"));
+        let run = run_script("ban", "203.0.113.10", "", &[&own], &[]);
+        assert!(!run.ok, "a first-attempt 409 is not a retry");
+        let other = own.replace("EVENTID", "someone-else");
+        let run = run_script("ban", "203.0.113.10", "", &["503", &other], &[]);
+        assert!(!run.ok, "another event's 409 is not this ban");
+    }
+    for outcome in [
+        "not_recorded",
+        "failed",
+        "safelisted",
+        "conflict",
+        "no_playbook",
+        "not_owned",
+        "awaiting_corroboration",
+    ] {
+        let own = format!(
+            r#"409|{{"error":"duplicate event from fastnetmon: EVENTID","event_outcome":{{"outcome":"{outcome}","outcome_mitigation_ids":["{MITIGATION_ID}"]}}}}"#
+        );
+        let run = run_script("ban", "203.0.113.10", "", &["refused", &own], &[]);
+        assert!(!run.ok, "{outcome}: {}", run.log);
+        assert!(run.log.contains("ERROR (409"), "{}", run.log);
+        assert!(!run.log.contains("INTENT_RECORDED"));
+    }
+    for body in [
+        r#"409|{"error":"duplicate event from fastnetmon: EVENTID"}"#,
+        r#"409|{"error":"duplicate event from fastnetmon: EVENTID","event_outcome":{"outcome":"mitigated","outcome_mitigation_ids":[]}}"#,
+    ] {
+        let run = run_script("ban", "203.0.113.10", "", &["refused", body], &[]);
+        assert!(
+            !run.ok,
+            "an absent outcome or missing IDs do not prove intent"
+        );
+    }
 }
 
 /// The script's ban and unban payloads pair on a controller: the unban, sent

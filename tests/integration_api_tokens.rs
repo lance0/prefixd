@@ -778,9 +778,8 @@ async fn bearer_replaces_the_session_and_other_schemes_fall_through() {
     assert_eq!(status, StatusCode::OK);
 }
 
-/// A browser keeps a stale session cookie while PostgreSQL is down. A token
-/// request strips it before the session layer, so the token authenticates and
-/// the cookie is left alone; without the Bearer header the same cookie fails.
+/// A token authenticates while only the session store is unavailable. This
+/// mock token store remains readable; a total database outage is tested below.
 #[tokio::test]
 async fn bearer_with_a_stale_cookie_authenticates_during_a_session_store_outage() {
     let repo = Arc::new(MockRepository::new());
@@ -823,7 +822,43 @@ async fn bearer_with_a_stale_cookie_authenticates_during_a_session_store_outage(
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
 }
 
-/// A storage error during the token lookup is 503, not 401.
+/// Unknown paths never need a session, even when its store is unavailable.
+#[tokio::test]
+async fn unknown_paths_ignore_cookies_during_a_session_store_outage() {
+    for mode in [AuthMode::Credentials, AuthMode::None, AuthMode::Mtls] {
+        let repo = Arc::new(MockRepository::new());
+        let state = state(mode, "test-pop", repo.clone());
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
+            .unwrap();
+        pool.close().await;
+        let auth_layer = prefixd::auth::create_auth_layer(pool, repo, mode, false).await;
+        let apps = [
+            prefixd::api::create_router(state.clone(), auth_layer),
+            prefixd::api::create_test_router(state),
+        ];
+        let cookie = format!("id={}", tower_sessions::session::Id::default());
+        for app in apps {
+            for (method, path) in [("GET", "/missing"), ("POST", "/v1/missing")] {
+                for headers in [vec![], vec![("cookie", cookie.as_str())]] {
+                    let (status, response_headers, body) =
+                        send(&app, method, path, &headers, None).await;
+                    assert_eq!(
+                        status,
+                        StatusCode::NOT_FOUND,
+                        "{mode:?} {method} {path}: {body}"
+                    );
+                    assert!(body.is_empty(), "{body}");
+                    assert!(!response_headers.contains_key("set-cookie"));
+                    assert_eq!(response_headers["cache-control"], "no-store");
+                }
+            }
+        }
+    }
+}
+
+/// A token lookup failure denies health detail as well as other protected
+/// routes. Cookie stripping must not turn that 503 into a session-store 500.
 #[tokio::test]
 async fn a_token_store_outage_is_503_not_401() {
     let pool = sqlx::postgres::PgPoolOptions::new()
@@ -832,38 +867,54 @@ async fn a_token_store_outage_is_503_not_401() {
     pool.close().await;
     let mut settings = common::test_settings();
     settings.http.auth.mode = AuthMode::Credentials;
+    let repo: Arc<dyn RepositoryTrait> = Arc::new(prefixd::db::Repository::new(pool.clone()));
     let state = AppState::new(
         settings,
         common::test_inventory(),
         common::test_playbooks(),
-        Arc::new(prefixd::db::Repository::new(pool)),
+        repo.clone(),
         Arc::new(MockAnnouncer::new()),
         ".".into(),
     )
     .unwrap();
-    let app = prefixd::api::create_test_router(state);
+    let auth_layer =
+        prefixd::auth::create_auth_layer(pool, repo, AuthMode::Credentials, false).await;
+    let app = prefixd::api::create_router(state, auth_layer);
     let (token, _) = prefixd::auth::token::generate().unwrap();
-    let (status, _, body) = send(
-        &app,
-        "GET",
-        "/v1/mitigations",
-        &[("authorization", &bearer(&token))],
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
-    assert!(body.contains("credential store unavailable"), "{body}");
-    assert!(!body.contains(&token[8..]));
-    // A malformed value never reaches storage, so it is 401 even now.
-    let (status, _, _) = send(
-        &app,
-        "GET",
-        "/v1/mitigations",
-        &[("authorization", "Bearer not-a-token")],
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let authorization = bearer(&token);
+    let cookie = format!("id={}", tower_sessions::session::Id::default());
+    for path in ["/v1/health/detail", "/v1/mitigations"] {
+        for with_cookie in [false, true] {
+            let mut headers = vec![("authorization", authorization.as_str())];
+            if with_cookie {
+                headers.push(("cookie", cookie.as_str()));
+            }
+            let (status, response_headers, body) = send(&app, "GET", path, &headers, None).await;
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{path}: {body}");
+            assert_eq!(
+                serde_json::from_str::<Value>(&body).unwrap(),
+                json!({"error": "credential store unavailable; retry"}),
+                "{path} must not expose operational detail"
+            );
+            assert!(!body.contains(&token[8..]));
+            assert!(!response_headers.contains_key("set-cookie"));
+
+            // A malformed value never reaches storage, even beside a cookie.
+            headers[0] = ("authorization", "Bearer not-a-token");
+            let (status, _, _) = send(&app, "GET", path, &headers, None).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{path}");
+        }
+        let (status, _, body) = send(&app, "GET", path, &[("cookie", &cookie)], None).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{path}");
+        assert!(body.is_empty(), "{path} leaked {body}");
+        let (status, _, _) = send(&app, "GET", path, &[], None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{path}");
+    }
+    let (status, _, body) = send(&app, "GET", "/v1/health", &[("cookie", &cookie)], None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let health: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(health["status"], "ok");
+    assert!(health.get("database").is_none());
 }
 
 /// `none` mode is anonymous Admin and `mtls` mode is Admin for a verified
@@ -1502,4 +1553,237 @@ async fn preferences_need_a_session() {
         .await;
         assert_eq!(status, expected, "{method}: {response}");
     }
+}
+
+/// Exercise the actual axum-login Debug return trace and restored sessions,
+/// alongside every account mutation and their public outputs.
+#[tokio::test]
+async fn operator_credentials_stay_out_of_debug_logs_and_responses() {
+    const CHILD: &str = "PREFIXD_OPERATOR_CREDENTIAL_CHILD";
+    const DONE: &str = "operator-credential-capture-completed";
+    if std::env::var_os(CHILD).is_none() {
+        let output = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            tokio::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "operator_credentials_stay_out_of_debug_logs_and_responses",
+                    "--test-threads=1",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env("RUST_LOG", "debug")
+                .stdin(std::process::Stdio::null())
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await
+        .expect("credential capture finishes within thirty seconds")
+        .expect("credential capture child output");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{stdout}\n{stderr}");
+        assert!(stdout.lines().any(|line| line == DONE));
+        return;
+    }
+    let logs = Logs::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(logs.clone())
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_ansi(false)
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+    let fixture = fixture(AuthMode::Credentials);
+    let mut feed = fixture.state.ws_broadcast.subscribe();
+    let cookie = login(
+        &fixture.app,
+        &fixture.repo,
+        "credential-admin",
+        OperatorRole::Admin,
+    )
+    .await;
+    let admin = fixture
+        .repo
+        .get_operator_by_username("credential-admin")
+        .await
+        .unwrap()
+        .unwrap();
+    let mut secrets = vec![
+        PASSWORD.to_owned(),
+        admin.password_hash.expose_secret().to_owned(),
+    ];
+    let mut responses = Vec::new();
+    for path in ["/v1/auth/me", "/v1/operators"] {
+        let (status, _, body) = send(&fixture.app, "GET", path, &[("cookie", &cookie)], None).await;
+        assert_eq!(status, StatusCode::OK);
+        responses.push(body);
+    }
+    const CREATED_PASSWORD: &str = "created-password-secret-marker";
+    const RESET_PASSWORD: &str = "reset-password-secret-marker";
+    secrets.extend([CREATED_PASSWORD.into(), RESET_PASSWORD.into()]);
+    let (status, _, body) = send(
+        &fixture.app, "POST", "/v1/operators", &[("cookie", &cookie)],
+        Some(&json!({"username":"credential-created", "password":CREATED_PASSWORD, "role":"operator"})),
+    ).await;
+    assert_eq!(status, StatusCode::CREATED);
+    responses.push(body);
+    let created = fixture
+        .repo
+        .get_operator_by_username("credential-created")
+        .await
+        .unwrap()
+        .unwrap();
+    secrets.push(created.password_hash.expose_secret().to_owned());
+    let (status, _, body) = send(
+        &fixture.app,
+        "PUT",
+        &format!("/v1/operators/{}/password", created.operator_id),
+        &[("cookie", &cookie)],
+        Some(&json!({"new_password":RESET_PASSWORD})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    responses.push(body);
+    let changed = fixture
+        .repo
+        .get_operator_by_id(created.operator_id)
+        .await
+        .unwrap()
+        .unwrap();
+    secrets.push(changed.password_hash.expose_secret().to_owned());
+    let (status, _, body) = send(
+        &fixture.app,
+        "DELETE",
+        &format!("/v1/operators/{}", created.operator_id),
+        &[("cookie", &cookie)],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    responses.push(body);
+    assert!(
+        fixture
+            .repo
+            .get_operator_by_id(created.operator_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    responses.push(serde_json::to_string(&admin).unwrap());
+    while let Ok(message) = feed.try_recv() {
+        responses.push(serde_json::to_string(&message).unwrap());
+    }
+    let captured = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+    for expected in [
+        "authenticate",
+        "login successful",
+        "operator created",
+        "password changed",
+        "operator deleted",
+    ] {
+        assert!(captured.contains(expected), "missing trace for {expected}");
+    }
+    for secret in secrets.iter().map(String::as_str).chain(["$argon2"]) {
+        assert!(
+            !captured.contains(secret),
+            "debug logs exposed a credential"
+        );
+        assert!(
+            responses.iter().all(|body| !body.contains(secret)),
+            "response exposed a credential"
+        );
+    }
+    assert!(responses.iter().all(|body| !body.contains("password_hash")));
+    println!("\n{DONE}");
+}
+
+#[test]
+fn credential_password_requests_redact_debug() {
+    use prefixd::api::handlers::{ChangePasswordRequest, CreateOperatorRequest, LoginRequest};
+    use prefixd::auth::Credentials;
+
+    const SECRET: &str = "credential-format-secret-marker";
+    let login: LoginRequest =
+        serde_json::from_value(json!({"username":"admin", "password":SECRET})).unwrap();
+    let create: CreateOperatorRequest =
+        serde_json::from_value(json!({"username":"admin", "password":SECRET, "role":"admin"}))
+            .unwrap();
+    let change: ChangePasswordRequest =
+        serde_json::from_value(json!({"current_password":SECRET, "new_password":SECRET})).unwrap();
+    for debug in [
+        format!("{login:?}"),
+        format!("{create:?}"),
+        format!("{change:?}"),
+    ] {
+        assert!(!debug.contains(SECRET));
+        assert!(debug.contains("[redacted]"));
+    }
+    let credentials = Credentials {
+        username: login.username,
+        password: login.password,
+    };
+    assert_eq!(credentials.password.expose_secret(), SECRET);
+}
+
+#[test]
+fn credential_storage_config_redacts_debug_without_changing_storage() {
+    use prefixd::config::StorageConfig;
+    const SECRET: &str = "storage-format-secret-marker";
+    let storage = StorageConfig {
+        connection_string: format!("postgres://user:{SECRET}@localhost/prefixd"),
+    };
+    assert!(!format!("{storage:?}").contains(SECRET));
+    assert_eq!(
+        serde_json::to_value(&storage).unwrap()["connection_string"],
+        storage.connection_string
+    );
+}
+
+#[test]
+fn credential_alert_configs_redact_debug_without_changing_storage() {
+    const SECRET: &str = "alert-format-secret-marker";
+    for config in [
+        json!({"type":"slack", "webhook_url":SECRET}),
+        json!({"type":"discord", "webhook_url":SECRET}),
+        json!({"type":"teams", "webhook_url":SECRET}),
+        json!({"type":"telegram", "bot_token":SECRET, "chat_id":"test"}),
+        json!({"type":"pagerduty", "routing_key":SECRET}),
+        json!({"type":"opsgenie", "api_key":SECRET}),
+        json!({"type":"generic", "url":SECRET, "secret":SECRET, "headers":{"Authorization":SECRET}}),
+    ] {
+        let destination: prefixd::alerting::DestinationConfig =
+            serde_json::from_value(config).unwrap();
+        assert!(!format!("{destination:?}").contains(SECRET));
+        // Private configuration writes must preserve their credentials.
+        assert!(
+            serde_json::to_string(&destination)
+                .unwrap()
+                .contains(SECRET)
+        );
+    }
+}
+
+#[test]
+fn credential_created_token_redacts_debug_without_changing_issuance() {
+    use prefixd::api::handlers::CreatedToken;
+    const SECRET: &str = "token-format-secret-marker";
+    let record = prefixd::domain::ApiToken {
+        token_id: uuid::Uuid::nil(),
+        name: "format-test".into(),
+        scope: TokenScope::Admin,
+        source: None,
+        pop: None,
+        created_at: chrono::Utc::now(),
+        created_by: "admin".into(),
+        expires_at: None,
+        last_used_at: None,
+        revoked_at: None,
+        revoked_by: None,
+    };
+    let created = CreatedToken {
+        record,
+        token: SECRET.into(),
+    };
+    assert!(!format!("{created:?}").contains(SECRET));
+    assert_eq!(serde_json::to_value(created).unwrap()["token"], SECRET);
 }

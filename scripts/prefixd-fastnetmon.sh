@@ -278,12 +278,16 @@ while true; do
         log "SUCCESS ($HTTP_CODE, status=${STATUS:-unknown}): $BODY"
         exit 0
     fi
-    # A retried ban whose earlier attempt reached prefixd before timing out
-    # or getting 503 meets its own event ID: the ban was delivered.
+    # A duplicate proves intent only when its recorded outcome says so. A
+    # refusal or interrupted outcome must not silently become delivery success.
     if [[ "$API_ACTION" == "ban" && "$ATTEMPT" -gt 1 && "$HTTP_CODE" == "409" \
         && "$BODY" == *"duplicate event from fastnetmon: $EVENT_ID"* ]]; then
-        log "NO_MITIGATION ($HTTP_CODE, status=delivered_by_earlier_attempt): $BODY"
-        exit 0
+        OUTCOME=$(printf '%s' "$BODY" | grep -oE '"outcome"[[:space:]]*:[[:space:]]*"[^"]+"' | head -n 1 | cut -d'"' -f4 || true)
+        if [[ "$OUTCOME" =~ ^(mitigated|extended|dry_run)$ ]] \
+            && [[ "$BODY" =~ \"outcome_mitigation_ids\"[[:space:]]*:[[:space:]]*\[[[:space:]]*\" ]]; then
+            log "INTENT_RECORDED ($HTTP_CODE, outcome=$OUTCOME): $BODY"
+            exit 0
+        fi
     fi
     if [[ ( "$CURL_STATUS" -ne 0 || "$HTTP_CODE" == "503" ) && "$ATTEMPT" -lt "$EVENT_POST_ATTEMPTS" ]]; then
         log "${API_ACTION^} for $IP not accepted (curl=$CURL_STATUS, http=$HTTP_CODE), attempt $ATTEMPT/$EVENT_POST_ATTEMPTS; retrying in ${EVENT_POST_DELAY_SECONDS}s"

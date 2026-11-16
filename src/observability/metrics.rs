@@ -65,6 +65,15 @@ pub static MITIGATIONS_ACTIVE: Lazy<GaugeVec> = Lazy::new(|| {
     .unwrap()
 });
 
+/// Last complete leased-intent inventory; absent until a successful read.
+pub static LEASED_MITIGATIONS_ACTIVE: Lazy<GaugeVec> = Lazy::new(|| {
+    register_gauge_vec!(
+        "prefixd_leased_mitigations_active",
+        "Active enforced mitigations under this controller's injection owner from the last successful inventory, not installed routes",
+        &["pop"]
+    ).unwrap()
+});
+
 /// Desired ordinary FlowSpec intent by bounded routing family, not installed routes.
 pub static FLOWSPEC_ACTIVE_BY_FAMILY: Lazy<GaugeVec> = Lazy::new(|| {
     register_gauge_vec!(
@@ -253,6 +262,19 @@ pub static INJECTION_LEASE_STATE: Lazy<GaugeVec> = Lazy::new(|| {
     )
     .unwrap()
 });
+
+pub static INJECTION_LEASE_RENEWAL_OVERDUE: Lazy<Gauge> = Lazy::new(|| {
+    register_gauge!(
+        "prefixd_injection_lease_renewal_overdue",
+        "1 when renewal is stopped, no generation is held, or two renewal intervals passed since the last live lease observation; refreshed at scrape time"
+    ).unwrap()
+});
+
+pub fn update_lease_metrics(lease: Option<&crate::domain::LeaseKeeper>) {
+    INJECTION_LEASE_RENEWAL_OVERDUE.set(f64::from(u8::from(
+        lease.is_some_and(|lease| lease.renewal_overdue()),
+    )));
+}
 
 /// Established-peer export dispositions summed over active enforced blackholes,
 /// from the last reconciliation pass. Committed is Adj-RIB-Out, not enforcement.
@@ -595,6 +617,7 @@ pub fn init_metrics(pop: &str) {
     Lazy::force(&EVENTS_INGESTED);
     Lazy::force(&EVENTS_REJECTED);
     Lazy::force(&MITIGATIONS_ACTIVE);
+    Lazy::force(&LEASED_MITIGATIONS_ACTIVE);
     Lazy::force(&FLOWSPEC_ACTIVE_BY_FAMILY);
     Lazy::force(&MITIGATIONS_CREATED);
     Lazy::force(&MITIGATIONS_EXPIRED);
@@ -614,6 +637,7 @@ pub fn init_metrics(pop: &str) {
     for state in crate::domain::LeaseState::ALL {
         INJECTION_LEASE_STATE.with_label_values(&[state.as_str()]);
     }
+    Lazy::force(&INJECTION_LEASE_RENEWAL_OVERDUE);
     for disposition in crate::bgp::ExportDisposition::ALL {
         BLACKHOLE_EXPORT_PEERS.with_label_values(&[disposition.as_str()]);
         FLOWSPEC_EXPORT_PEERS.with_label_values(&[disposition.as_str()]);

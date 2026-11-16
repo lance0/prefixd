@@ -252,8 +252,8 @@ pub trait RepositoryTrait: Send + Sync {
         .await
     }
     async fn list_events_filtered(&self, params: &EventListParams) -> Result<Vec<AttackEvent>>;
-    /// Record what ingestion did with a stored event. An outcome is written
-    /// once; a later call for the same event changes nothing.
+    /// Record what ingestion did with a stored event, preserving committed
+    /// mitigation IDs. Final outcomes are write-once; a failed ban may recover.
     async fn record_event_outcome(
         &self,
         event_id: Uuid,
@@ -286,6 +286,14 @@ pub trait RepositoryTrait: Send + Sync {
         actor: &crate::observability::CreationActor,
     ) -> Result<()>;
     async fn update_mitigation(&self, m: &Mitigation) -> Result<()>;
+    /// Extend unchanged detector intent and associate it with `last_event_id`
+    /// atomically. Recheck the expected row and pending withdrawal after taking
+    /// the mutation lock, including an earlier request's in-flight commit.
+    async fn extend_mitigation_for_event(
+        &self,
+        expected: &Mitigation,
+        updated: &Mitigation,
+    ) -> Result<()>;
     /// Atomically extend an unchanged live FlowSpec row and its authenticated
     /// audit. Implementations must recheck time, binding and pending withdrawal
     /// after waiting for their mutation lock. An unchanged horizon writes nothing.

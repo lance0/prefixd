@@ -50,6 +50,27 @@ pub fn check_prefix_l4(action_type: ActionType, criteria: &MatchCriteria) -> Res
     Ok(())
 }
 
+/// Detectors cannot create or prolong a discard of an entire TCP/UDP protocol.
+pub(crate) fn check_detector_discard_scope(
+    action_type: ActionType,
+    criteria: &MatchCriteria,
+) -> Result<()> {
+    if action_type == ActionType::Discard
+        && matches!(criteria.protocol, Some(6 | 17))
+        && criteria.dst_ports.is_empty()
+        && criteria.src_ports.is_empty()
+        && criteria.src_prefix.is_none()
+        && criteria.fragment.is_none()
+        && criteria.packet_length.is_none()
+        && criteria.tcp_flags.is_none()
+    {
+        return Err(PrefixdError::GuardrailViolation(
+            GuardrailError::DestinationPortsRequired,
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_total_lifetime(
     lifetime: chrono::Duration,
     max_seconds: Option<u32>,
@@ -741,6 +762,7 @@ mod tests {
             action: "ban".into(),
             raw_details: None,
             outcome: Default::default(),
+            ban_retryable: true,
         })
         .await
         .unwrap();

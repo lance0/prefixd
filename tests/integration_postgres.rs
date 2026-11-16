@@ -187,18 +187,31 @@ async fn test_cli_operator_password_terminal() {
     );
 
     let backend = AuthBackend::new(ctx.repo.clone(), prefixd::config::AuthMode::Credentials);
-    for username in ["pty-admin", "pty-explicit"] {
+    for username in ["pty-admin", "pty-corrected", "pty-explicit"] {
         let operator = backend
             .authenticate(Credentials {
                 username: username.to_string(),
-                password: "pty-test-password".to_string(),
+                password: "pty-test-password".into(),
             })
             .await
             .unwrap()
             .expect("CLI-created operator authenticates through the real backend");
-        assert!(operator.password_hash.starts_with("$argon2id$"));
+        assert!(
+            operator
+                .password_hash
+                .expose_secret()
+                .starts_with("$argon2id$")
+        );
     }
-    for username in ["pty-empty", "pty-interrupt", "pty-eof", "pty-no-terminal"] {
+    for username in [
+        "pty-empty",
+        "pty-interrupt",
+        "pty-eof",
+        "pty-confirm-interrupt",
+        "pty-confirm-eof",
+        "pty-mismatch-cancel",
+        "pty-no-terminal",
+    ] {
         assert!(
             ctx.repo
                 .get_operator_by_username(username)
@@ -437,6 +450,7 @@ async fn test_mitigation_withdrawal() {
         "source": "integration_test",
         "victim_ip": "203.0.113.10",
         "vector": "syn_flood",
+        "top_dst_ports": [443],
         "bps": 100000000,
         "pps": 50000,
         "confidence": 0.9
@@ -1343,6 +1357,7 @@ async fn test_timeseries_non_hour_bucket_alignment() {
         action: "ban".to_string(),
         raw_details: None,
         outcome: Default::default(),
+        ban_retryable: true,
     };
 
     let event_two = AttackEvent {
@@ -1362,6 +1377,7 @@ async fn test_timeseries_non_hour_bucket_alignment() {
         action: "ban".to_string(),
         raw_details: None,
         outcome: Default::default(),
+        ban_retryable: true,
     };
 
     ctx.repo
@@ -1843,6 +1859,7 @@ async fn test_signal_group_add_events_and_list() {
         action: "ban".to_string(),
         raw_details: None,
         outcome: Default::default(),
+        ban_retryable: true,
     };
     let event2 = AttackEvent {
         event_id: uuid::Uuid::new_v4(),
@@ -1861,6 +1878,7 @@ async fn test_signal_group_add_events_and_list() {
         action: "ban".to_string(),
         raw_details: None,
         outcome: Default::default(),
+        ban_retryable: true,
     };
 
     ctx.repo.insert_event(&event1).await.unwrap();

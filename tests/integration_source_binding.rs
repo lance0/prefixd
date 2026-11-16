@@ -12,13 +12,15 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use prefixd::AppState;
 use prefixd::bgp::MockAnnouncer;
-use prefixd::config::{AuthMode, Customer, Inventory, PolicyProfile, Settings};
+use prefixd::config::{
+    AuthMode, Customer, Inventory, PlaybookAction, Playbooks, PolicyProfile, Settings,
+};
 use prefixd::correlation::{
     CorrelationConfig, MatchDimension, SourceConfig, SourceMode, WebhookAdapter, WebhookAuth,
     WebhookFieldMap,
 };
 use prefixd::db::{ListParams, MockRepository, RepositoryTrait};
-use prefixd::domain::{MitigationStatus, OperatorRole, TokenScope};
+use prefixd::domain::{AttackVector, MitigationStatus, OperatorRole, TokenScope};
 use serde_json::{Value, json};
 use std::process::Command;
 use std::sync::Arc;
@@ -107,6 +109,19 @@ fn settings(mode: AuthMode, pop: &str, min_sources: u32) -> Settings {
     settings
 }
 
+// Native adapters report no destination ports; these lifecycle fixtures police TCP floods.
+fn detector_fixture_playbooks() -> Playbooks {
+    let mut playbooks = common::test_playbooks();
+    let syn = playbooks
+        .playbooks
+        .iter_mut()
+        .find(|playbook| playbook.match_criteria.vector == AttackVector::SynFlood)
+        .unwrap();
+    syn.steps[0].action = Some(PlaybookAction::Police);
+    syn.steps[0].rate_bps = Some(10_000_000);
+    playbooks
+}
+
 async fn fixture_with(settings: Settings, repo: Arc<MockRepository>) -> Fixture {
     let inventory = Inventory::new(vec![Customer {
         customer_id: "bound".into(),
@@ -118,7 +133,7 @@ async fn fixture_with(settings: Settings, repo: Arc<MockRepository>) -> Fixture 
     let state = AppState::new(
         settings,
         inventory,
-        common::test_playbooks(),
+        detector_fixture_playbooks(),
         repo.clone(),
         Arc::new(MockAnnouncer::new()),
         ".".into(),
@@ -1695,7 +1710,7 @@ async fn failing_fixture(pop: &str) -> (Fixture, Arc<FailingTcpWithdrawals>) {
     let state = AppState::new(
         settings,
         inventory,
-        common::test_playbooks(),
+        detector_fixture_playbooks(),
         repo.clone(),
         speaker.clone(),
         ".".into(),
@@ -2283,7 +2298,7 @@ playbooks:
   - name: syn_flood
     match: { vector: syn_flood }
     steps:
-      - { action: discard, ttl_seconds: 120 }
+      - { action: police, rate_bps: 10000000, ttl_seconds: 120 }
   - name: ack_flood
     match: { vector: ack_flood }
     steps:
@@ -2512,7 +2527,7 @@ async fn hanging_fixture() -> (Fixture, Arc<HangingTcpWithdrawals>) {
             policy_profile: PolicyProfile::Normal,
             services: vec![],
         }]),
-        common::test_playbooks(),
+        detector_fixture_playbooks(),
         repo.clone(),
         speaker.clone(),
         ".".into(),

@@ -128,6 +128,7 @@ async fn test_e2e_withdrawal_removes_from_rib() {
         "source": "e2e_test",
         "victim_ip": "203.0.113.11",
         "vector": "syn_flood",
+        "top_dst_ports": [443],
         "bps": 100000000,
         "confidence": 0.9
     }"#;
@@ -175,6 +176,11 @@ async fn test_e2e_withdrawal_removes_from_rib() {
             .any(|r| r.nlri.dst_prefix == "203.0.113.11/32"),
         "Rule should be in RIB before withdrawal"
     );
+    let rule = active_before
+        .iter()
+        .find(|r| r.nlri.dst_prefix == "203.0.113.11/32")
+        .unwrap();
+    assert_eq!(rule.nlri.dst_ports, [443]);
 
     // Step 3: Withdraw via API
     let withdraw_json = r#"{"operator_id": "e2e_test", "reason": "E2E test withdrawal"}"#;
@@ -236,18 +242,20 @@ async fn test_e2e_multiple_mitigations() {
     let app = ctx.router().await;
 
     // Create two mitigations for different IPs
-    for (ip, vector) in [("203.0.113.10", "udp_flood"), ("203.0.113.11", "syn_flood")] {
-        let event_json = format!(
-            r#"{{
-                "timestamp": "2026-01-18T10:00:00Z",
-                "source": "e2e_test",
-                "victim_ip": "{}",
-                "vector": "{}",
-                "bps": 100000000,
-                "confidence": 0.9
-            }}"#,
-            ip, vector
-        );
+    for (ip, vector, ports) in [
+        ("203.0.113.10", "udp_flood", vec![]),
+        ("203.0.113.11", "syn_flood", vec![443]),
+    ] {
+        let event_json = serde_json::json!({
+            "timestamp": "2026-01-18T10:00:00Z",
+            "source": "e2e_test",
+            "victim_ip": ip,
+            "vector": vector,
+            "top_dst_ports": ports,
+            "bps": 100000000,
+            "confidence": 0.9
+        })
+        .to_string();
 
         let response = app
             .clone()
@@ -282,6 +290,11 @@ async fn test_e2e_multiple_mitigations() {
             .any(|r| r.nlri.dst_prefix == "203.0.113.11/32"),
         "Second rule should be in RIB"
     );
+    let tcp_rule = active_rules
+        .iter()
+        .find(|r| r.nlri.dst_prefix == "203.0.113.11/32")
+        .unwrap();
+    assert_eq!(tcp_rule.nlri.dst_ports, [443]);
 
     // Verify database
     let mitigations = ctx

@@ -155,6 +155,7 @@ impl PolicyEngine {
         if scope == EventScope::Prefix {
             crate::guardrails::check_prefix_l4(action.action_type, &match_criteria)?;
         }
+        crate::guardrails::check_detector_discard_scope(action.action_type, &match_criteria)?;
         Ok(Some(vec![self.intent(
             event,
             context,
@@ -318,11 +319,6 @@ impl PolicyEngine {
             return event_ports.to_vec();
         }
 
-        if event_ports.is_empty() {
-            // No event ports, use allowed ports
-            return allowed_for_proto.clone();
-        }
-
         // Intersection
         event_ports
             .iter()
@@ -357,6 +353,7 @@ mod tests {
             action: "ban".to_string(),
             raw_details: None,
             outcome: Default::default(),
+            ban_retryable: true,
         }
     }
 
@@ -717,13 +714,65 @@ mod tests {
     fn test_port_intersection_no_event_ports() {
         let engine = PolicyEngine::new(test_playbooks(), "iad1".to_string(), 120);
 
-        // Event has no ports - use service allowed ports
+        // A service list is not evidence of the attack's destination ports.
         let event_ports: Vec<u16> = vec![];
         let context = make_context("cust", vec![53, 123], vec![]);
 
         let result =
             engine.compute_port_intersection(&event_ports, Some(&context), AttackVector::UdpFlood);
-        assert_eq!(result, vec![53, 123]);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn portless_police_covers_the_attack_without_inventing_service_ports() {
+        for vector in [
+            AttackVector::UdpFlood,
+            AttackVector::SynFlood,
+            AttackVector::AckFlood,
+        ] {
+            let mut playbooks = test_playbooks();
+            playbooks.playbooks[0].match_criteria.vector = vector;
+            let engine = PolicyEngine::new(playbooks, "test".into(), 120);
+            let context = make_context("customer", vec![53, 123], vec![53, 123]);
+            for ip in ["203.0.113.10", "2001:db8::10"] {
+                let event = make_event(ip, vector.as_str(), &[]);
+                let intent = engine
+                    .evaluate(&event, Some(&context))
+                    .unwrap()
+                    .intents
+                    .remove(0);
+                assert_eq!(intent.match_criteria.protocol, vector.to_protocol());
+                assert!(intent.match_criteria.dst_ports.is_empty(), "{intent:?}");
+                assert_eq!(intent.action_type, ActionType::Police);
+            }
+        }
+    }
+
+    #[test]
+    fn portless_detector_discard_is_refused_without_inferred_service_ports() {
+        for vector in [
+            AttackVector::UdpFlood,
+            AttackVector::SynFlood,
+            AttackVector::AckFlood,
+        ] {
+            let mut playbooks = test_playbooks();
+            playbooks.playbooks[0].match_criteria.vector = vector;
+            playbooks.playbooks[0].steps[0].action = Some(PlaybookAction::Discard);
+            playbooks.playbooks[0].steps[0].rate_bps = None;
+            let engine = PolicyEngine::new(playbooks, "test".into(), 120);
+            for service_ports in [vec![53, 123], vec![]] {
+                let context = make_context("customer", service_ports.clone(), service_ports);
+                for ip in ["203.0.113.10", "2001:db8::10"] {
+                    let event = make_event(ip, vector.as_str(), &[]);
+                    assert!(matches!(
+                        engine.evaluate(&event, Some(&context)),
+                        Err(PrefixdError::GuardrailViolation(
+                            GuardrailError::DestinationPortsRequired
+                        ))
+                    ));
+                }
+            }
+        }
     }
 
     #[test]
@@ -765,7 +814,7 @@ mod tests {
                     (vec![80, 443], vec![53, 123], None),
                     (vec![53, 80], vec![53, 123], Some(vec![53])),
                     (vec![53, 123], vec![], Some(vec![53, 123])),
-                    (vec![], vec![53, 123], Some(vec![53, 123])),
+                    (vec![], vec![53, 123], Some(vec![])),
                     (vec![], vec![], Some(vec![])),
                 ] {
                     let context = make_context("customer", service_ports.clone(), service_ports);

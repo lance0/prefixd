@@ -41,6 +41,25 @@ pub fn contract_rules() -> Vec<FlowSpecRule> {
         )
     })
     .collect();
+    rules.extend(
+        [
+            ("192.0.2.243/32", 17),
+            ("2001:db8::243/128", 17),
+            ("192.0.2.244/32", 6),
+            ("2001:db8::244/128", 6),
+        ]
+        .into_iter()
+        .map(|(prefix, protocol)| {
+            FlowSpecRule::new(
+                FlowSpecNlri {
+                    dst_prefix: prefix.into(),
+                    protocol: Some(protocol),
+                    ..Default::default()
+                },
+                FlowSpecAction::police(8_000_000),
+            )
+        }),
+    );
     rules.extend(source_prefix_rules());
     rules.extend(destination_prefix_rules());
     rules

@@ -1336,3 +1336,49 @@ the same transaction advisory lock as the unban write, keyed by POP, source
 and external event ID, before deciding that the record is absent. Lock and
 statement waits use the existing five-second storage bounds. This preserves
 immutable intent across a dropped HTTP future as well as an explicit error.
+
+## Amendment: interrupted ban retries (2026-11-16)
+
+A stored event is not proof that its admission completed. All ban entry points
+hold the lifecycle mutex through the final outcome write's five-second
+attempt, then release it before refusal auditing. A failed or timed-out outcome
+write keeps the original HTTP result and cannot erase committed admission IDs.
+PostgreSQL lock and statement deadlines bound residual work after cancellation.
+A retry of an
+incomplete or failed attempt reuses its event UUID and original payload and
+rechecks current policy, ownership and guardrails. A failed duplicate lookup
+refuses the request; it never authorizes a fresh admission.
+
+PostgreSQL can finish a commit after its request future is dropped. Duplicate
+lookup locks the event row to observe a committed admission before deciding
+whether it can resume. Detector extension locks its mitigation row, compares
+the complete stored snapshot, then reads pending withdrawal intent in a fresh
+statement. Unban admission takes the same row lock before recording immutable
+intent. An extension whose snapshot changed or began withdrawal returns a
+retryable `503` without writing an extension or admitted ID; an ordinary final
+conflict would incorrectly consume this unapplied event.
+
+Creating or extending a mitigation atomically appends its ID to the ban's
+`outcome_mitigation_ids`. The final outcome write preserves those IDs, and only
+a failed ban outcome can be replaced by recovery. A final outcome or any
+committed mitigation ID ends admission for that event ID, even after the
+mitigation is withdrawn or a later event extends it. If a multi-rule request
+is interrupted after the first commit, it remains a partial admission under
+[ADR 028](028-amplification-matches.md); a resend does not extend the committed
+rules or create the remainder. Reconciliation completes any unconfirmed
+speaker work. Recorded intent is not evidence of current router enforcement.
+
+Completed ban retries still return `409`, with `event_outcome` containing the
+stored result. The FastNetMon script recognizes its own retried duplicate as
+recorded intent only when that result says `mitigated`, `extended` or `dry_run`
+and lists mitigation IDs. An absent, refused or interrupted outcome remains an
+error, rather than being reported as successful delivery.
+
+Older controllers could commit a detector extension without its outcome, then
+overwrite its only event association (`last_event_id`) with another extension.
+Migration 026 adds an internal `ban_retryable` marker, false on existing rows
+and explicitly true on new inserts. It rewrites no old event or outcome. An
+old incomplete or failed ban without committed IDs therefore returns a
+conflict saying its historical admission outcome is unknown. Inspect its event,
+mitigations and audit before authorizing a new admission with a new ID. No
+historical success or failure is inferred by the migration.

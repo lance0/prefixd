@@ -31,8 +31,8 @@ one.
 - **The first Admin.** `scripts/compose-bootstrap.sh rustbgpd` runs
   `prefixdctl` inside `prefixd-rustbgpd`, which already has `DATABASE_URL`.
   It runs `prefixdctl operators create --username admin --role admin` at a
-  hidden password prompt, unless an Admin already exists. Sign in to the
-  dashboard with that account.
+  hidden password prompt, unless an Admin already exists. Enter the password
+  twice to confirm it, then sign in to the dashboard with that account.
 - **A detector token.** An ingest token bound to the `fastnetmon` source, in
   `.prefixd/fastnetmon.token`. It can post events as `fastnetmon` and nothing
   else.

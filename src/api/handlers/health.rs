@@ -21,6 +21,8 @@ pub struct PublicHealthResponse {
 pub struct HealthResponse {
     /// Health status (healthy, degraded, standby)
     status: String,
+    /// Configured controller operation mode (dry-run or enforced).
+    mode: &'static str,
     /// Controller (prefixd) version
     version: String,
     /// POP identifier
@@ -328,7 +330,16 @@ pub async fn health_detail(
                 || exports.no_local_route > 0
                 || !exports.unexported.is_empty()
         });
-    if daemon.status == "error" || daemon.ready == Some(false) || export_degraded {
+    let lease = state.lease.as_ref().map(|lease| lease.health());
+    let lease_degraded = lease.as_ref().is_some_and(|lease| {
+        lease.has_leased_intent != Some(false)
+            && (matches!(
+                lease.state,
+                crate::domain::LeaseState::RenewalFailing | crate::domain::LeaseState::Expired
+            ) || lease.renewal_overdue)
+    });
+    if daemon.status == "error" || daemon.ready == Some(false) || export_degraded || lease_degraded
+    {
         status = "degraded".into();
     }
     // Another controller holds this POP's fence; this one mutates nothing.
@@ -338,6 +349,7 @@ pub async fn health_detail(
 
     Ok(Json(HealthResponse {
         status,
+        mode: state.settings.mode.as_str(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         pop: state.settings.pop.clone(),
         uptime_seconds: state.start_time.elapsed().as_secs(),
@@ -353,7 +365,7 @@ pub async fn health_detail(
                 &state.settings,
                 state.announcer.capabilities().blackhole_lease,
             ),
-            lease: state.lease.as_ref().map(|lease| lease.health()),
+            lease,
             blackhole_exports,
             flowspec_exports,
             daemon,

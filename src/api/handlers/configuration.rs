@@ -70,6 +70,7 @@ pub async fn reload_config(
                 Json(ErrorResponse {
                     error: e.public_message(),
                     retry_after_seconds: None,
+                    event_outcome: None,
                 }),
             )
                 .into_response())

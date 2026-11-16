@@ -14,7 +14,7 @@ use uuid::Uuid;
 use crate::AppState;
 use crate::api::auth::AuthPrincipal;
 use crate::db::NotificationPreferences;
-use crate::domain::is_valid_username;
+use crate::domain::{SecretString, is_valid_username};
 
 const LOGIN_MAX_ATTEMPTS: u32 = 5;
 
@@ -74,7 +74,8 @@ const MAX_PASSWORD_LEN: usize = 256;
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct LoginRequest {
     pub username: String,
-    pub password: String,
+    #[schema(value_type = String)]
+    pub password: SecretString,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -109,8 +110,8 @@ pub async fn login(
 
     // Validate input lengths and username format
     if !is_valid_username(&req.username)
-        || req.password.is_empty()
-        || req.password.len() > MAX_PASSWORD_LEN
+        || req.password.expose_secret().is_empty()
+        || req.password.expose_secret().len() > MAX_PASSWORD_LEN
     {
         return Err(StatusCode::BAD_REQUEST);
     }
@@ -203,7 +204,8 @@ pub struct OperatorInfo {
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct CreateOperatorRequest {
     pub username: String,
-    pub password: String,
+    #[schema(value_type = String)]
+    pub password: SecretString,
     pub role: String,
 }
 
@@ -211,8 +213,10 @@ pub struct CreateOperatorRequest {
 pub struct ChangePasswordRequest {
     /// Current password — required for self-change, optional for admin reset
     #[serde(default)]
-    pub current_password: String,
-    pub new_password: String,
+    #[schema(value_type = String)]
+    pub current_password: SecretString,
+    #[schema(value_type = String)]
+    pub new_password: SecretString,
 }
 
 /// List all operators (admin only)
@@ -294,7 +298,9 @@ pub async fn create_operator(
     }
 
     // Validate password length
-    if req.password.len() < 8 || req.password.len() > MAX_PASSWORD_LEN {
+    if req.password.expose_secret().len() < 8
+        || req.password.expose_secret().len() > MAX_PASSWORD_LEN
+    {
         return Err(StatusCode::BAD_REQUEST);
     }
 
@@ -311,7 +317,7 @@ pub async fn create_operator(
 
     // Hash password
     let password_hash = Argon2::default()
-        .hash_password(req.password.as_bytes())
+        .hash_password(req.password.expose_secret().as_bytes())
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .to_string();
 
@@ -426,7 +432,9 @@ pub async fn change_password(
     }
 
     // Validate password length
-    if req.new_password.len() < 8 || req.new_password.len() > MAX_PASSWORD_LEN {
+    if req.new_password.expose_secret().len() < 8
+        || req.new_password.expose_secret().len() > MAX_PASSWORD_LEN
+    {
         return Err(StatusCode::BAD_REQUEST);
     }
 
@@ -444,12 +452,15 @@ pub async fn change_password(
 
     // Verify current password (required for self-change, skipped for admin reset of other users)
     if is_self {
-        let parsed_hash = match PasswordHash::new(&target.password_hash) {
+        let parsed_hash = match PasswordHash::new(target.password_hash.expose_secret()) {
             Ok(h) => h,
             Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
         };
         if Argon2::default()
-            .verify_password(req.current_password.as_bytes(), &parsed_hash)
+            .verify_password(
+                req.current_password.expose_secret().as_bytes(),
+                &parsed_hash,
+            )
             .is_err()
         {
             return Err(StatusCode::BAD_REQUEST);
@@ -458,7 +469,7 @@ pub async fn change_password(
 
     // Hash new password
     let password_hash = Argon2::default()
-        .hash_password(req.new_password.as_bytes())
+        .hash_password(req.new_password.expose_secret().as_bytes())
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .to_string();
 
