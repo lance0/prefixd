@@ -442,6 +442,7 @@ async fn test_mitigation_withdrawal() {
         "source": "integration_test",
         "victim_ip": "203.0.113.10",
         "vector": "syn_flood",
+        "top_dst_ports": [443],
         "bps": 100000000,
         "pps": 50000,
         "confidence": 0.9
