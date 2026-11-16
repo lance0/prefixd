@@ -533,6 +533,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The API and upgrade guides distinguish an isolated session-store failure
+  from a database outage. Scoped-token requests need a current database read
+  and return `503` when it fails, including on `/v1/health/detail`; a stale
+  cookie does not change that response.
 - Detector floods without destination ports no longer target unrelated
   service ports, missing attacks outside that list. The FastNetMon interop
   lane now checks that the generated rule covers its synthetic flood's port.

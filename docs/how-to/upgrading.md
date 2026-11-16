@@ -159,6 +159,13 @@ What changes:
   cannot read; `operator` and `admin` tokens reach what those roles reach,
   except identity management. See
   [API tokens](../reference/api.md#api-tokens).
+- **Token checks need the database.** Every token request reads its current
+  record so revocation takes effect on the next request. If the database is
+  unavailable, `/v1/health/detail` and other protected routes return `503`
+  (`credential store unavailable; retry`), with or without a session cookie.
+  Treat this as an availability failure, not an invalid credential. In
+  credentials mode, detailed health requires authentication; `/v1/health`
+  remains public liveness and does not report database health.
 - **Identity management needs a session.** Token management, operator create
   and delete, and password set or reset need a signed-in session; tokens,
   mTLS clients and `none` mode get 403. Automation that managed operators with
