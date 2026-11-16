@@ -159,14 +159,23 @@ impl AuthPrincipal {
                     ));
                 }
                 Some(Some(presented)) => {
+                    let now = chrono::Utc::now();
                     let token = crate::auth::token::verify(
                         state.repo.as_ref(),
                         presented,
                         &state.settings.pop,
-                        state.fence.is_active(),
-                        chrono::Utc::now(),
+                        now,
                     )
                     .await?;
+                    // Fire and forget, so a slow pool never delays the request.
+                    // A standby mutates nothing.
+                    if state.fence.is_active() && crate::auth::token::use_due(&token, now) {
+                        let (repo, id, name) =
+                            (state.repo.clone(), token.token_id, token.name.clone());
+                        tokio::spawn(async move {
+                            crate::auth::token::record_use(repo.as_ref(), id, &name, now).await;
+                        });
+                    }
                     Some(token_principal(token)?)
                 }
             },

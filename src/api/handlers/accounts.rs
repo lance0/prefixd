@@ -13,7 +13,6 @@ use uuid::Uuid;
 
 use crate::AppState;
 use crate::api::auth::AuthPrincipal;
-use crate::api::auth::require_role;
 use crate::db::NotificationPreferences;
 use crate::domain::is_valid_username;
 
@@ -492,6 +491,7 @@ pub async fn change_password(
     responses(
         (status = 200, description = "Notification preferences", body = NotificationPreferences),
         (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Not a signed-in session: tokens, mTLS clients and auth mode none have no preferences"),
     ),
     tag = "preferences"
 )]
@@ -499,7 +499,11 @@ pub async fn get_notification_preferences(
     State(state): State<Arc<AppState>>,
     principal: AuthPrincipal,
 ) -> Result<Json<NotificationPreferences>, StatusCode> {
-    let operator = require_role(&principal, crate::domain::OperatorRole::Viewer)?;
+    // Preferences belong to an operator account, so only a signed-in session
+    // has them: a token, mTLS client or `none` mode gets 403.
+    let operator =
+        crate::api::auth::require_session(&principal, crate::domain::OperatorRole::Viewer)
+            .map_err(|error| error.status_code())?;
 
     let prefs = state
         .repo
@@ -519,6 +523,7 @@ pub async fn get_notification_preferences(
         (status = 200, description = "Preferences updated"),
         (status = 400, description = "Invalid preferences"),
         (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Not a signed-in session: tokens, mTLS clients and auth mode none have no preferences"),
     ),
     tag = "preferences"
 )]
@@ -527,7 +532,11 @@ pub async fn update_notification_preferences(
     principal: AuthPrincipal,
     Json(prefs): Json<NotificationPreferences>,
 ) -> Result<StatusCode, StatusCode> {
-    let operator = require_role(&principal, crate::domain::OperatorRole::Viewer)?;
+    // Preferences belong to an operator account, so only a signed-in session
+    // has them: a token, mTLS client or `none` mode gets 403.
+    let operator =
+        crate::api::auth::require_session(&principal, crate::domain::OperatorRole::Viewer)
+            .map_err(|error| error.status_code())?;
 
     match (prefs.quiet_hours_start, prefs.quiet_hours_end) {
         (Some(_), None) | (None, Some(_)) => return Err(StatusCode::BAD_REQUEST),

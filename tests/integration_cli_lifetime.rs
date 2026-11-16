@@ -215,6 +215,56 @@ fn cli_refuses_two_credentials_and_warns_about_the_old_variable() {
             "{stderr}"
         );
     }
+    // A token with URL userinfo would send two Authorization headers.
+    for (args, env) in [
+        (
+            vec!["--api", "http://operator:secret@127.0.0.1:1", "status"],
+            vec![("PREFIXD_TOKEN", TOKEN)],
+        ),
+        (
+            vec!["--token", TOKEN, "status"],
+            vec![("PREFIXD_API", "http://operator@127.0.0.1:1")],
+        ),
+    ] {
+        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_prefixdctl"));
+        command
+            .args(&args)
+            .env_remove("PREFIXD_TOKEN")
+            .env_remove("PREFIXD_API_TOKEN")
+            .env_remove("PREFIXD_SESSION_COOKIE")
+            .env_remove("PREFIXD_API");
+        for (name, value) in &env {
+            command.env(name, value);
+        }
+        let output = command.output().unwrap();
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert_eq!(output.status.code(), Some(2), "{args:?}: {stderr}");
+        assert!(
+            stderr.contains("cannot be combined with user:password"),
+            "{stderr}"
+        );
+        assert!(!stderr.contains("request failed"), "{stderr}");
+        assert!(
+            !stderr.contains(TOKEN) && !stderr.contains("secret"),
+            "{stderr}"
+        );
+    }
+    // A malformed duration is a usage error, never a panic.
+    let (code, stderr) = run(
+        &[
+            "tokens",
+            "create",
+            "--name",
+            "x",
+            "--scope",
+            "admin",
+            "--expires-in",
+            "5µ",
+        ],
+        &[],
+    );
+    assert_eq!(code, Some(2), "{stderr}");
+    assert!(stderr.contains("invalid duration"), "{stderr}");
     // Control: one credential reaches the request.
     let (code, stderr) = run(&["status"], &[("PREFIXD_TOKEN", TOKEN)]);
     assert_eq!(code, Some(1), "{stderr}");

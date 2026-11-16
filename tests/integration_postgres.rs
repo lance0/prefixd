@@ -8154,6 +8154,15 @@ mod api_tokens {
     }
 
     fn controller(ctx: &TestContext, pop: &str, active: bool) -> axum::Router {
+        controller_on(ctx, ctx.pool.clone(), pop, active)
+    }
+
+    fn controller_on(
+        ctx: &TestContext,
+        pool: sqlx::PgPool,
+        pop: &str,
+        active: bool,
+    ) -> axum::Router {
         let mut settings = ctx.state.settings.clone();
         settings.pop = pop.into();
         settings.http.auth.mode = prefixd::config::AuthMode::Credentials;
@@ -8161,7 +8170,7 @@ mod api_tokens {
             settings,
             common::test_inventory(),
             common::test_playbooks(),
-            Arc::new(prefixd::db::Repository::new(ctx.pool.clone())),
+            Arc::new(prefixd::db::Repository::new(pool)),
             Arc::new(prefixd::bgp::MockAnnouncer::new()),
             ".".into(),
         )
@@ -8213,7 +8222,16 @@ mod api_tokens {
         .await
         .unwrap();
         let a = controller(&ctx, "pop-a", true);
-        let b = controller(&ctx, "pop-b", false);
+        // POP B's repository has one connection. A stamp spawned by a request
+        // queues for it before any later query on the same pool, and the pool
+        // hands connections out in order, so a query that returns after the
+        // request proves no stamp is still in flight.
+        let b_pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&ctx.state.settings.storage.connection_string)
+            .await
+            .unwrap();
+        let b = controller_on(&ctx, b_pool.clone(), "pop-b", false);
         assert_eq!(get(&a, &pop_a).await.0, StatusCode::OK);
         let (status, body) = get(&b, &pop_a).await;
         assert_eq!(status, StatusCode::FORBIDDEN);
@@ -8236,10 +8254,31 @@ mod api_tokens {
                 .unwrap()
             }
         };
+        // Handshake: let any spawned stamp start, then wait behind it.
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        sqlx::query("SELECT 1").execute(&b_pool).await.unwrap();
         assert_eq!(stamped("any-pop").await, None, "a standby mutates nothing");
+        // The active controller stamps in a background task.
         assert_eq!(get(&a, &any).await.0, StatusCode::OK);
-        assert!(stamped("any-pop").await.is_some());
-        assert!(stamped("pop-a-only").await.is_some());
+        let wait = |name: &'static str| {
+            let stamped = &stamped;
+            async move {
+                tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                    loop {
+                        if let Some(at) = stamped(name).await {
+                            return at;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("the active controller stamps last_used_at")
+            }
+        };
+        wait("any-pop").await;
+        wait("pop-a-only").await;
         // Revocation takes effect on the next request on every controller.
         revoke(ctx.repo.as_ref(), "any-pop", "admin", Utc::now())
             .await

@@ -180,15 +180,15 @@ pub async fn revoke(
 ///   is logged at warn with its name, as a rotation signal.
 /// - A token bound to another POP gets 403 naming the bound POP.
 /// - A storage error gets 503, never 401.
-/// - `record_use` (the active controller) stamps `last_used_at` at most once
-///   per [`last_used_interval`]; the stamp is best-effort.
+///
+/// Verification writes nothing: the caller stamps `last_used_at` with
+/// [`record_use`] when [`use_due`] says so.
 ///
 /// No message or log line carries the presented value or its hash.
 pub async fn verify(
     repo: &dyn RepositoryTrait,
     presented: &[u8],
     local_pop: &str,
-    record_use: bool,
     now: DateTime<Utc>,
 ) -> Result<ApiToken> {
     let hash =
@@ -217,16 +217,33 @@ pub async fn verify(
             "API token is bound to POP {bound:?}"
         )));
     }
-    let stale_before = now - last_used_interval();
-    if record_use && token.last_used_at.is_none_or(|used| used <= stale_before) {
-        if let Err(error) = repo
-            .touch_api_token(token.token_id, now, stale_before)
-            .await
-        {
-            tracing::warn!(token = %token.name, error = %error, "failed to record API token use");
-        }
-    }
     Ok(token)
+}
+
+/// Whether `last_used_at` is due for a stamp at `now`: at most once per
+/// [`last_used_interval`] per token.
+pub fn use_due(token: &ApiToken, now: DateTime<Utc>) -> bool {
+    token
+        .last_used_at
+        .is_none_or(|used| used <= now - last_used_interval())
+}
+
+/// Stamp `last_used_at`, best-effort: a failure is logged and never fails a
+/// request. The repository repeats the throttle, so concurrent requests write
+/// at most once per interval. Only the active controller calls this; a standby
+/// mutates nothing.
+pub async fn record_use(
+    repo: &dyn RepositoryTrait,
+    token_id: Uuid,
+    name: &str,
+    now: DateTime<Utc>,
+) {
+    if let Err(error) = repo
+        .touch_api_token(token_id, now, now - last_used_interval())
+        .await
+    {
+        tracing::warn!(token = %name, error = %error, "failed to record API token use");
+    }
 }
 
 #[cfg(test)]
@@ -424,51 +441,51 @@ mod tests {
         // A null-POP token works on both POPs; a POP-A token only on POP A.
         for pop in ["pop-a", "pop-b"] {
             assert_eq!(
-                status(verify(&repo, any_pop.as_bytes(), pop, false, at(1)).await),
+                status(verify(&repo, any_pop.as_bytes(), pop, at(1)).await),
                 Ok("any-pop".into())
             );
         }
         assert_eq!(
-            status(verify(&repo, pop_a.as_bytes(), "pop-a", false, at(1)).await),
+            status(verify(&repo, pop_a.as_bytes(), "pop-a", at(1)).await),
             Ok("pop-a".into())
         );
-        let refused = verify(&repo, pop_a.as_bytes(), "pop-b", false, at(1))
+        let refused = verify(&repo, pop_a.as_bytes(), "pop-b", at(1))
             .await
             .unwrap_err();
         assert_eq!(refused.status_code(), StatusCode::FORBIDDEN);
         assert!(refused.to_string().contains("\"pop-a\""), "{refused}");
         // Expiry under controlled time: valid before, refused at and after.
         assert!(
-            verify(&repo, expiring.as_bytes(), "pop-a", false, at(99))
+            verify(&repo, expiring.as_bytes(), "pop-a", at(99))
                 .await
                 .is_ok()
         );
         for now in [100, 101] {
-            let error = verify(&repo, expiring.as_bytes(), "pop-a", false, at(now))
+            let error = verify(&repo, expiring.as_bytes(), "pop-a", at(now))
                 .await
                 .unwrap_err();
             assert_eq!(error.status_code(), StatusCode::UNAUTHORIZED);
             assert!(error.to_string().contains("expired"), "{error}");
         }
-        let error = verify(&repo, revoked.as_bytes(), "pop-a", false, at(2))
+        let error = verify(&repo, revoked.as_bytes(), "pop-a", at(2))
             .await
             .unwrap_err();
         assert_eq!(error.status_code(), StatusCode::UNAUTHORIZED);
         assert!(error.to_string().contains("revoked"), "{error}");
         let (unknown, _) = generate().unwrap();
         assert_eq!(
-            status(verify(&repo, unknown.as_bytes(), "pop-a", false, at(2)).await),
+            status(verify(&repo, unknown.as_bytes(), "pop-a", at(2)).await),
             Err(StatusCode::UNAUTHORIZED)
         );
         // A storage error is 503, but a malformed value never reaches storage.
         repo.fail_token_reads.store(true, SeqCst);
         assert_eq!(
-            status(verify(&repo, any_pop.as_bytes(), "pop-a", false, at(2)).await),
+            status(verify(&repo, any_pop.as_bytes(), "pop-a", at(2)).await),
             Err(StatusCode::SERVICE_UNAVAILABLE)
         );
         for malformed in [&b"not-a-token"[..], b"", b"prefixd_short"] {
             assert_eq!(
-                status(verify(&repo, malformed, "pop-a", false, at(2)).await),
+                status(verify(&repo, malformed, "pop-a", at(2)).await),
                 Err(StatusCode::UNAUTHORIZED)
             );
         }
@@ -476,7 +493,7 @@ mod tests {
         repo.fail_token_reads.store(false, SeqCst);
         for (secret, now) in [(&pop_a, 1), (&expiring, 100), (&revoked, 2)] {
             let pop = if secret == &pop_a { "pop-b" } else { "pop-a" };
-            let error = verify(&repo, secret.as_bytes(), pop, false, at(now))
+            let error = verify(&repo, secret.as_bytes(), pop, at(now))
                 .await
                 .unwrap_err()
                 .to_string();
@@ -497,29 +514,29 @@ mod tests {
         .await
         .unwrap();
         let last_used = || async { repo.list_api_tokens(None).await.unwrap()[0].last_used_at };
-        // A standby never writes.
-        verify(&repo, token.as_bytes(), "p", false, at(10))
-            .await
-            .unwrap();
+        // What the active controller does per request: verify, then stamp
+        // when due. A standby only verifies, and verification writes nothing.
+        let active = |now: DateTime<Utc>| {
+            let (repo, token) = (&repo, &token);
+            async move {
+                let verified = verify(repo, token.as_bytes(), "p", now).await.unwrap();
+                if use_due(&verified, now) {
+                    record_use(repo, verified.token_id, &verified.name, now).await;
+                }
+            }
+        };
+        verify(&repo, token.as_bytes(), "p", at(10)).await.unwrap();
         assert_eq!(last_used().await, None);
-        // The active controller writes once, then not again within the interval.
-        verify(&repo, token.as_bytes(), "p", true, at(10))
-            .await
-            .unwrap();
+        // Written once, then not again within the interval.
+        active(at(10)).await;
         assert_eq!(last_used().await, Some(at(10)));
-        verify(&repo, token.as_bytes(), "p", true, at(69))
-            .await
-            .unwrap();
+        active(at(69)).await;
         assert_eq!(last_used().await, Some(at(10)));
-        verify(&repo, token.as_bytes(), "p", true, at(70))
-            .await
-            .unwrap();
+        active(at(70)).await;
         assert_eq!(last_used().await, Some(at(70)));
         // A failed stamp never fails the request.
         repo.fail_token_touches.store(true, SeqCst);
-        verify(&repo, token.as_bytes(), "p", true, at(200))
-            .await
-            .unwrap();
+        active(at(200)).await;
         assert_eq!(last_used().await, Some(at(70)));
     }
 }

@@ -220,7 +220,12 @@ enum TokenCommands {
 fn parse_expires_in(value: &str) -> Result<chrono::TimeDelta, String> {
     let invalid =
         || format!("invalid duration {value:?}: use a number and s, m, h or d, such as 90d");
-    let split = value.len().checked_sub(1).ok_or_else(invalid)?;
+    // The unit is the last character, which may be multibyte in a typo.
+    let split = value
+        .char_indices()
+        .last()
+        .map(|(index, _)| index)
+        .ok_or_else(invalid)?;
     let (amount, unit) = value.split_at(split);
     let amount: i64 = amount.parse().map_err(|_| invalid())?;
     let seconds = match unit {
@@ -797,6 +802,18 @@ async fn main() -> ExitCode {
         eprintln!(
             "error: pass an API token (--token or PREFIXD_TOKEN) or --session-cookie \
              (PREFIXD_SESSION_COOKIE), not both"
+        );
+        return ExitCode::from(2);
+    }
+    // reqwest sends URL userinfo as `Authorization: Basic`, and the controller
+    // refuses a request with two Authorization headers.
+    if cli.token.is_some()
+        && reqwest::Url::parse(&cli.api)
+            .is_ok_and(|url| !url.username().is_empty() || url.password().is_some())
+    {
+        eprintln!(
+            "error: an API token cannot be combined with user:password in --api (PREFIXD_API); \
+             the userinfo becomes a second Authorization header, which the controller refuses"
         );
         return ExitCode::from(2);
     }
@@ -1959,6 +1976,29 @@ async fn cmd_migrations(format: OutputFormat) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expires_in_parses_units_and_refuses_everything_else() {
+        assert_eq!(parse_expires_in("90d"), Ok(chrono::TimeDelta::days(90)));
+        assert_eq!(parse_expires_in("12h"), Ok(chrono::TimeDelta::hours(12)));
+        assert_eq!(parse_expires_in("30m"), Ok(chrono::TimeDelta::minutes(30)));
+        assert_eq!(parse_expires_in("45s"), Ok(chrono::TimeDelta::seconds(45)));
+        // A multibyte last character is an error, not a panic.
+        for invalid in [
+            "",
+            "d",
+            "5",
+            "0d",
+            "-1d",
+            "5µ",
+            "5日",
+            "µ",
+            "1.5h",
+            "99999999999999999d",
+        ] {
+            assert!(parse_expires_in(invalid).is_err(), "{invalid:?}");
+        }
+    }
 
     fn diversion_cli_fixture(family: &str) -> (serde_json::Value, serde_json::Value) {
         let (prefix, target) = if family == "ipv4" {

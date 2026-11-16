@@ -715,20 +715,40 @@ async fn bearer_replaces_the_session_and_other_schemes_fall_through() {
         let (status, _, _) = send(&fixture.app, "GET", "/v1/auth/me", &headers, None).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
-    // Two Authorization headers are ambiguous, never a fallback.
+    // Two Authorization headers are ambiguous, never a fallback, in either
+    // order and even when every header holds a valid token.
+    let other = fixture
+        .repo
+        .mint_token_for_test("other", TokenScope::Operator, None);
+    let (valid, other) = (bearer(&token), bearer(&other));
+    for pair in [
+        ["Basic dXNlcjpwYXNz", valid.as_str()],
+        [valid.as_str(), "Basic dXNlcjpwYXNz"],
+        [valid.as_str(), other.as_str()],
+    ] {
+        for cookie in [None, Some(cookie.as_str())] {
+            let mut headers = vec![("authorization", pair[0]), ("authorization", pair[1])];
+            headers.extend(cookie.map(|cookie| ("cookie", cookie)));
+            let (status, _, body) =
+                send(&fixture.app, "GET", "/v1/mitigations", &headers, None).await;
+            assert_eq!(
+                status,
+                StatusCode::UNAUTHORIZED,
+                "{pair:?} cookie={}: {body}",
+                cookie.is_some()
+            );
+        }
+    }
+    // Control: the valid token alone is accepted.
     let (status, _, _) = send(
         &fixture.app,
         "GET",
         "/v1/mitigations",
-        &[
-            ("authorization", "Basic dXNlcjpwYXNz"),
-            ("authorization", &bearer(&token)),
-            ("cookie", &cookie),
-        ],
+        &[("authorization", &valid)],
         None,
     )
     .await;
-    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(status, StatusCode::OK);
 }
 
 /// A browser keeps a stale session cookie while PostgreSQL is down. A token
@@ -937,6 +957,11 @@ async fn standby_skips_the_last_used_stamp() {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
+        // The stamp runs in a spawned task. This runtime is single-threaded and
+        // the mock never waits, so a few yields let any spawned stamp finish.
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
         let stamped = repo.list_api_tokens(None).await.unwrap()[0].last_used_at;
         assert_eq!(stamped.is_some(), active, "active={active}");
     }
@@ -1385,4 +1410,69 @@ async fn a_stolen_admin_token_cannot_outlive_its_revocation() {
     let tokens = fixture.repo.list_api_tokens(None).await.unwrap();
     assert_eq!(tokens.len(), 1);
     assert!(tokens[0].revoked_at.is_some());
+}
+
+/// Notification preferences belong to an operator account. A token, an mTLS
+/// client and `none` mode have none, so both routes refuse them with 403
+/// rather than writing under an identity that is not an operator.
+#[tokio::test]
+async fn preferences_need_a_session() {
+    let prefs = json!({"muted_events": [], "quiet_hours_start": null, "quiet_hours_end": null});
+    for mode in [AuthMode::Credentials, AuthMode::Mtls, AuthMode::None] {
+        let fixture = fixture(mode);
+        let tokens: Vec<String> = if mode == AuthMode::Credentials {
+            [TokenScope::Operator, TokenScope::Admin]
+                .into_iter()
+                .enumerate()
+                .map(|(index, scope)| {
+                    bearer(&fixture.repo.mint_token_for_test(
+                        &format!("prefs-{index}"),
+                        scope,
+                        None,
+                    ))
+                })
+                .collect()
+        } else {
+            vec![String::new()]
+        };
+        for token in &tokens {
+            let headers: Vec<(&str, &str)> = if token.is_empty() {
+                vec![]
+            } else {
+                vec![("authorization", token.as_str())]
+            };
+            for (method, body) in [("GET", None), ("PUT", Some(&prefs))] {
+                let (status, _, response) =
+                    send(&fixture.app, method, "/v1/preferences", &headers, body).await;
+                assert_eq!(
+                    status,
+                    StatusCode::FORBIDDEN,
+                    "{mode:?} {method} {token}: {response}"
+                );
+            }
+        }
+    }
+    // Control: a session reads and writes its own preferences.
+    let fixture = fixture(AuthMode::Credentials);
+    let cookie = login(
+        &fixture.app,
+        &fixture.repo,
+        "prefs-viewer",
+        OperatorRole::Viewer,
+    )
+    .await;
+    for (method, body, expected) in [
+        ("PUT", Some(&prefs), StatusCode::OK),
+        ("GET", None, StatusCode::OK),
+    ] {
+        let (status, _, response) = send(
+            &fixture.app,
+            method,
+            "/v1/preferences",
+            &[("cookie", &cookie)],
+            body,
+        )
+        .await;
+        assert_eq!(status, expected, "{method}: {response}");
+    }
 }

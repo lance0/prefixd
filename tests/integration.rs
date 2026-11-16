@@ -3921,11 +3921,12 @@ events:
 
 #[tokio::test]
 async fn test_notification_preferences_get_default() {
-    let app = setup_app().await;
+    let (app, cookie) = admin_session_app().await;
 
     let response = app
         .oneshot(
             Request::builder()
+                .header("cookie", &cookie)
                 .method("GET")
                 .uri("/v1/preferences")
                 .body(Body::empty())
@@ -3945,7 +3946,7 @@ async fn test_notification_preferences_get_default() {
 
 #[tokio::test]
 async fn test_notification_preferences_put_invalid_hour() {
-    let app = setup_app().await;
+    let (app, cookie) = admin_session_app().await;
 
     let body = serde_json::json!({
         "muted_events": [],
@@ -3956,6 +3957,7 @@ async fn test_notification_preferences_put_invalid_hour() {
     let response = app
         .oneshot(
             Request::builder()
+                .header("cookie", &cookie)
                 .method("PUT")
                 .uri("/v1/preferences")
                 .header("content-type", "application/json")
@@ -3969,7 +3971,7 @@ async fn test_notification_preferences_put_invalid_hour() {
 
 #[tokio::test]
 async fn test_notification_preferences_put_invalid_event() {
-    let app = setup_app().await;
+    let (app, cookie) = admin_session_app().await;
 
     let body = serde_json::json!({
         "muted_events": ["not.a.real.event"],
@@ -3980,6 +3982,7 @@ async fn test_notification_preferences_put_invalid_event() {
     let response = app
         .oneshot(
             Request::builder()
+                .header("cookie", &cookie)
                 .method("PUT")
                 .uri("/v1/preferences")
                 .header("content-type", "application/json")
@@ -3993,7 +3996,7 @@ async fn test_notification_preferences_put_invalid_event() {
 
 #[tokio::test]
 async fn test_notification_preferences_put_accepts_legacy_escalated_event() {
-    let app = setup_app().await;
+    let (app, cookie) = admin_session_app().await;
 
     let body = serde_json::json!({
         "muted_events": ["mitigation.escalated"],
@@ -4004,6 +4007,7 @@ async fn test_notification_preferences_put_accepts_legacy_escalated_event() {
     let response = app
         .oneshot(
             Request::builder()
+                .header("cookie", &cookie)
                 .method("PUT")
                 .uri("/v1/preferences")
                 .header("content-type", "application/json")
@@ -4017,7 +4021,7 @@ async fn test_notification_preferences_put_accepts_legacy_escalated_event() {
 
 #[tokio::test]
 async fn test_notification_preferences_put_half_configured_quiet_hours() {
-    let app = setup_app().await;
+    let (app, cookie) = admin_session_app().await;
 
     let body = serde_json::json!({
         "muted_events": [],
@@ -4028,6 +4032,7 @@ async fn test_notification_preferences_put_half_configured_quiet_hours() {
     let response = app
         .oneshot(
             Request::builder()
+                .header("cookie", &cookie)
                 .method("PUT")
                 .uri("/v1/preferences")
                 .header("content-type", "application/json")
@@ -4041,11 +4046,12 @@ async fn test_notification_preferences_put_half_configured_quiet_hours() {
 
 #[tokio::test]
 async fn test_notification_preferences_response_includes_null_quiet_hours() {
-    let app = setup_app().await;
+    let (app, cookie) = admin_session_app().await;
 
     let response = app
         .oneshot(
             Request::builder()
+                .header("cookie", &cookie)
                 .method("GET")
                 .uri("/v1/preferences")
                 .body(Body::empty())
@@ -7277,6 +7283,47 @@ async fn reload_warns_about_unknown_keys() {
     assert!(warnings(&capture).is_empty());
 }
 
+/// Reload refuses the removed `bearer` mode with 422, and the refused reload
+/// applies nothing: a valid playbook change in the same reload is not loaded.
+#[tokio::test]
+async fn reload_refuses_bearer_mode_and_changes_nothing() {
+    let directory = tempfile::tempdir().unwrap();
+    let app = setup_app_with_config_dir(directory.path().to_path_buf()).await;
+    let (status, before) =
+        correlation_config_request(&app, "GET", "/v1/config/playbooks", "").await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, settings_before) =
+        correlation_config_request(&app, "GET", "/v1/config/settings", "").await;
+    assert_eq!(settings_before["settings"]["http"]["auth"]["mode"], "none");
+
+    std::fs::write(
+        directory.path().join("playbooks.yaml"),
+        "playbooks: [{name: reload-canary, match: {vector: udp_flood}, steps: \
+         [{action: discard, ttl_seconds: 60}]}]\n",
+    )
+    .unwrap();
+    let bearer =
+        include_str!("../configs/prefixd.yaml").replacen("mode: credentials", "mode: bearer", 1);
+    assert!(bearer.contains("mode: bearer"));
+    std::fs::write(directory.path().join("prefixd.yaml"), bearer).unwrap();
+    let (status, body) = correlation_config_request(&app, "POST", "/v1/config/reload", "").await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+
+    let (_, after) = correlation_config_request(&app, "GET", "/v1/config/playbooks", "").await;
+    assert_eq!(after["playbooks"], before["playbooks"]);
+    assert!(!after.to_string().contains("reload-canary"));
+    let (_, settings_after) =
+        correlation_config_request(&app, "GET", "/v1/config/settings", "").await;
+    assert_eq!(settings_after["settings"], settings_before["settings"]);
+
+    // Control: without the prefixd.yaml change the same playbook reloads.
+    std::fs::remove_file(directory.path().join("prefixd.yaml")).unwrap();
+    let (status, body) = correlation_config_request(&app, "POST", "/v1/config/reload", "").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (_, reloaded) = correlation_config_request(&app, "GET", "/v1/config/playbooks", "").await;
+    assert!(reloaded.to_string().contains("reload-canary"), "{reloaded}");
+}
+
 /// VAL-ADAPT-016: POST /v1/config/reload refreshes correlation config from YAML
 #[tokio::test]
 async fn test_reload_picks_up_correlation_config() {
@@ -9797,7 +9844,10 @@ async fn admin_session_app() -> (axum::Router, String) {
         .hash_password_with_salt(b"operator-admin-password", b"operator-admin-salt")
         .unwrap()
         .to_string();
-    repo.create_operator("session-admin", &hash, OperatorRole::Admin, None)
+    // The login throttle counts per username across tests, so each fixture
+    // signs in as its own operator.
+    let username = format!("session-admin-{}", uuid::Uuid::new_v4().simple());
+    repo.create_operator(&username, &hash, OperatorRole::Admin, None)
         .await
         .unwrap();
     let mut settings = test_settings();
@@ -9818,7 +9868,7 @@ async fn admin_session_app() -> (axum::Router, String) {
             Request::post("/v1/auth/login")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    serde_json::json!({"username": "session-admin", "password": "operator-admin-password"})
+                    serde_json::json!({"username": username, "password": "operator-admin-password"})
                         .to_string(),
                 ))
                 .unwrap(),
@@ -14695,7 +14745,7 @@ mod query_router_validator_boundaries {
 
     #[tokio::test]
     async fn preferences_quiet_hour_boundaries_preserve_state_and_extractor_auth_order() {
-        let app = setup_app_with_bearer().await;
+        let (app, cookie) = admin_session_app().await;
         for (start, end) in [
             (None, None),
             (Some(0), Some(23)),
@@ -14708,7 +14758,7 @@ mod query_router_validator_boundaries {
                 .clone()
                 .oneshot(
                     Request::put("/v1/preferences")
-                        .header("authorization", format!("Bearer {TEST_TOKEN}"))
+                        .header("cookie", &cookie)
                         .header("content-type", "application/json")
                         .body(Body::from(prefs.to_string()))
                         .unwrap(),
@@ -14720,7 +14770,7 @@ mod query_router_validator_boundaries {
                 .clone()
                 .oneshot(
                     Request::get("/v1/preferences")
-                        .header("authorization", format!("Bearer {TEST_TOKEN}"))
+                        .header("cookie", &cookie)
                         .body(Body::empty())
                         .unwrap(),
                 )
@@ -14781,7 +14831,7 @@ mod query_router_validator_boundaries {
                 let mut request =
                     Request::put("/v1/preferences").header("content-type", "application/json");
                 if authenticated {
-                    request = request.header("authorization", format!("Bearer {TEST_TOKEN}"));
+                    request = request.header("cookie", &cookie);
                 }
                 let response = app
                     .clone()
@@ -14803,7 +14853,7 @@ mod query_router_validator_boundaries {
                 .clone()
                 .oneshot(
                     Request::get("/v1/preferences")
-                        .header("authorization", format!("Bearer {TEST_TOKEN}"))
+                        .header("cookie", &cookie)
                         .body(Body::empty())
                         .unwrap(),
                 )
@@ -14819,7 +14869,7 @@ mod query_router_validator_boundaries {
             let mut request =
                 Request::put("/v1/preferences").header("content-type", "application/json");
             if authenticated {
-                request = request.header("authorization", format!("Bearer {TEST_TOKEN}"));
+                request = request.header("cookie", &cookie);
             }
             let response = app
                 .clone()
