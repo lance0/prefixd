@@ -15,6 +15,7 @@ gate:
     just python
     just alerts
     just proto
+    just fuzz-lock
     just clippy
     just test
     just msrv
@@ -42,6 +43,10 @@ alerts:
 [working-directory: "proto"]
 proto:
     sha256sum --check --strict rustbgpd.proto.sha256
+
+# Fail when the separate fuzz lockfile no longer matches the controller's dependencies.
+fuzz-lock:
+    cargo metadata --locked --format-version 1 --manifest-path fuzz/Cargo.toml > /dev/null
 
 clippy-gobgp:
     cargo clippy --locked --no-default-features --all-targets -- -D warnings
