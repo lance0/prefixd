@@ -114,6 +114,28 @@ pub enum PrefixdError {
     #[error("migration error: {0}")]
     Migration(#[from] sqlx::migrate::MigrateError),
 
+    /// The database was migrated by a newer release. This binary would write
+    /// against a schema it does not understand, so startup refuses instead.
+    #[error(
+        "database schema is newer than this binary: it records migration {found}, this binary knows up to {known}; start a release that includes that migration, or restore the pre-upgrade database backup"
+    )]
+    SchemaNewerThanBinary { found: i32, known: i32 },
+
+    #[error(
+        "another prefixd instance is applying database migrations; start this one after it finishes"
+    )]
+    MigrationInProgress,
+
+    /// A migration failed and rolled back; the next start retries it.
+    #[error("database migration {version} ({name}) failed and rolled back{hint}")]
+    MigrationFailed {
+        version: i32,
+        name: &'static str,
+        hint: &'static str,
+        #[source]
+        source: sqlx::Error,
+    },
+
     // Config errors
     #[error("configuration error: {0}")]
     Config(String),

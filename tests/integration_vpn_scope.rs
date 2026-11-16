@@ -11,11 +11,16 @@ use prefixd::{
     AppState,
     api::create_test_router,
     bgp::{FlowSpecReader, MockAnnouncer},
-    config::{OperationMode, Settings},
+    config::{
+        EventScope, OperationMode, Playbook, PlaybookAction, PlaybookMatch, PlaybookStep, Settings,
+    },
     db::{MockRepository, RepositoryTrait},
+    domain::{ActionType, AttackVector, VpnFlowSpecFamily, mitigation_rule},
+    scheduler::ReconciliationLoop,
 };
 use serde_json::{Value, json};
 use tower::ServiceExt;
+use uuid::Uuid;
 
 async fn post(app: &axum::Router, path: &str, value: Value, expected: StatusCode) -> Value {
     let response = app
@@ -43,10 +48,10 @@ fn settings() -> Settings {
     let mut settings = common::test_settings();
     settings.mode = OperationMode::Enforced;
     settings.bgp.vpn_scopes = serde_json::from_value(json!({
-        "V4": {"family":"ipv4","rd":"44407:40","route_targets":["44407:777"]},
-        "V6": {"family":"ipv6","rd":"44407:40","route_targets":["44407:777"]},
-        "NEXT4": {"family":"ipv4","rd":"44407:50","route_targets":["44407:778"]},
-        "NEXT6": {"family":"ipv6","rd":"44407:50","route_targets":["44407:778"]}
+        "V4": {"family":"ipv4","rd":"64500:40","route_targets":["64500:777"]},
+        "V6": {"family":"ipv6","rd":"64500:40","route_targets":["64500:777"]},
+        "NEXT4": {"family":"ipv4","rd":"64500:50","route_targets":["64500:778"]},
+        "NEXT6": {"family":"ipv6","rd":"64500:50","route_targets":["64500:778"]}
     }))
     .unwrap();
     settings.bgp.default_scope = serde_json::from_value(json!({"ipv4":"V4","ipv6":"V6"})).unwrap();
@@ -118,7 +123,7 @@ async fn automatic_family_defaults_snapshot_and_unban_original_scope_after_resta
                 .nlri
                 .scope
                 .as_ref()
-                .is_some_and(|scope| scope.rd() == "44407:40"))
+                .is_some_and(|scope| scope.rd() == "64500:40"))
             .count(),
         2
     );
@@ -164,7 +169,7 @@ async fn automatic_family_defaults_snapshot_and_unban_original_scope_after_resta
         rules
             .iter()
             .filter_map(|rule| rule.nlri.scope.as_ref())
-            .all(|scope| scope.rd() == "44407:50")
+            .all(|scope| scope.rd() == "64500:50")
     );
 }
 
@@ -439,4 +444,274 @@ async fn health_detail_probes_each_vpn_family_once_per_window() {
     tokio::time::advance(std::time::Duration::from_secs(6)).await;
     health().await;
     assert_eq!(speaker.0.load(SeqCst), 4, "an expired window probes again");
+}
+
+/// ADR 033: a detector prefix event inherits the automatic VPN default scope
+/// exactly as a host event does, and the resolved scope is the saved snapshot.
+fn prefix_settings() -> Settings {
+    let mut settings = common::test_settings();
+    settings.mode = OperationMode::Enforced;
+    settings.guardrails.allow_detector_prefix = true;
+    settings.guardrails.detector_prefix_sources = vec!["vpn-detector".into()];
+    settings.guardrails.dst_prefix_minlen = 24;
+    settings.guardrails.dst_prefix_maxlen = 32;
+    settings.guardrails.dst_prefix_minlen_v6 = Some(48);
+    settings.guardrails.dst_prefix_maxlen_v6 = Some(128);
+    settings.bgp.vpn_scopes = serde_json::from_value(json!({
+        "TRANSIT": {"family":"ipv4","rd":"64500:40","route_targets":["64500:777"]},
+        "NEXT4": {"family":"ipv4","rd":"64500:41","route_targets":["64500:778"]}
+    }))
+    .unwrap();
+    settings.bgp.default_scope = "TRANSIT".into();
+    settings
+}
+
+fn prefix_state(
+    settings: Settings,
+    repo: Arc<MockRepository>,
+    speaker: Arc<MockAnnouncer>,
+) -> Arc<AppState> {
+    let mut inventory = common::test_inventory();
+    inventory.customers[0]
+        .prefixes
+        .push("2001:db8:100::/48".into());
+    let mut playbooks = common::test_playbooks();
+    playbooks.playbooks.push(Playbook {
+        name: "carpet_udp".into(),
+        match_criteria: PlaybookMatch {
+            vector: AttackVector::UdpFlood,
+            require_top_ports: true,
+            scope: EventScope::Prefix,
+        },
+        correlation: None,
+        steps: vec![PlaybookStep {
+            action: Some(PlaybookAction::Discard),
+            rate_bps: None,
+            ttl_seconds: 120,
+            require_confidence_at_least: None,
+            require_persistence_seconds: None,
+            rules: Vec::new(),
+        }],
+    });
+    AppState::new(settings, inventory, playbooks, repo, speaker, ".".into()).unwrap()
+}
+
+fn prefix_event(id: &str, victim: &str, ports: &[u16]) -> Value {
+    json!({"event_id":id,"timestamp":chrono::Utc::now(),"source":"vpn-detector",
+        "victim_ip":victim,"vector":"udp_flood","action":"ban",
+        "confidence":0.99,"top_dst_ports":ports})
+}
+
+#[tokio::test]
+async fn detector_prefix_event_inherits_vpn_default_scope_and_snapshots_it() {
+    let repo = Arc::new(MockRepository::new());
+    let speaker = Arc::new(MockAnnouncer::new());
+    let app = create_test_router(prefix_state(
+        prefix_settings(),
+        repo.clone(),
+        speaker.clone(),
+    ));
+    let body = post(
+        &app,
+        "/v1/events",
+        prefix_event("carpet", "203.0.113.0/24", &[53]),
+        StatusCode::ACCEPTED,
+    )
+    .await;
+    let id: Uuid = body["mitigation_id"].as_str().unwrap().parse().unwrap();
+    let saved = repo.get_mitigation(id).await.unwrap().unwrap();
+    assert_eq!(saved.match_criteria.dst_prefix, "203.0.113.0/24");
+    assert_eq!(saved.match_criteria.protocol, Some(17));
+    assert_eq!(saved.match_criteria.dst_ports, vec![53]);
+    let snapshot = saved
+        .match_criteria
+        .scope
+        .as_ref()
+        .expect("the automatic default scope is part of the saved prefix mitigation");
+    assert_eq!(snapshot.name, "TRANSIT");
+    assert_eq!(snapshot.identity.family, VpnFlowSpecFamily::Ipv4);
+    assert_eq!(snapshot.identity.rd(), "64500:40");
+    assert_eq!(snapshot.route_targets, vec!["64500:777"]);
+    assert_eq!(
+        saved.scope_hash,
+        saved.match_criteria.scope_hash_for(saved.action_type),
+        "the stored identity is the scoped one, not a global hash"
+    );
+
+    let rules = speaker.list_active().await.unwrap();
+    assert_eq!(rules.len(), 1);
+    let rule = &rules[0];
+    assert_eq!(rule.nlri.dst_prefix, "203.0.113.0/24");
+    assert_eq!(rule.nlri.protocol, Some(17));
+    assert_eq!(rule.nlri.dst_ports, vec![53]);
+    assert_eq!(rule.actions[0].action_type, ActionType::Discard);
+    let wire_scope = rule
+        .nlri
+        .scope
+        .as_ref()
+        .expect("a prefix rule under a VPN default scope is originated in that VRF");
+    assert_eq!(wire_scope.family, VpnFlowSpecFamily::Ipv4);
+    assert_eq!(wire_scope.rd(), "64500:40");
+    assert_eq!(rule.route_targets, vec!["64500:777"]);
+    assert_eq!(rule.nlri_hash(), saved.scope_hash);
+}
+
+#[tokio::test]
+async fn ipv6_detector_prefix_under_ipv4_default_scope_is_refused_without_global_fallback() {
+    let repo = Arc::new(MockRepository::new());
+    let speaker = Arc::new(MockAnnouncer::new());
+    let app = create_test_router(prefix_state(
+        prefix_settings(),
+        repo.clone(),
+        speaker.clone(),
+    ));
+    let (status, body) = {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/v1/events")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        prefix_event("carpet-v6", "2001:db8:100::/48", &[53]).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let body: Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        (status, body)
+    };
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap()
+            .contains("automatic default_scope family does not match"),
+        "{body}"
+    );
+    assert!(
+        repo.find_ban_event_by_external_id("vpn-detector", "carpet-v6")
+            .await
+            .unwrap()
+            .is_none(),
+        "the refused event is not consumed"
+    );
+    assert_eq!(repo.count_active_global().await.unwrap(), 0);
+    assert!(
+        speaker.list_active().await.unwrap().is_empty(),
+        "a family mismatch must never fall back to a global announcement"
+    );
+}
+
+#[tokio::test]
+async fn detector_prefix_dry_run_uses_the_same_vpn_decision_without_a_speaker_call() {
+    async fn decision(mode: OperationMode) -> (Value, Value, usize, Option<OperationMode>) {
+        let repo = Arc::new(MockRepository::new());
+        let speaker = Arc::new(MockAnnouncer::new());
+        let mut settings = prefix_settings();
+        settings.mode = mode;
+        let app = create_test_router(prefix_state(settings, repo.clone(), speaker.clone()));
+        let body = post(
+            &app,
+            "/v1/events",
+            prefix_event("carpet", "203.0.113.0/24", &[53]),
+            StatusCode::ACCEPTED,
+        )
+        .await;
+        let id: Uuid = body["mitigation_id"].as_str().unwrap().parse().unwrap();
+        let saved = repo.get_mitigation(id).await.unwrap().unwrap();
+        let rule = mitigation_rule(&saved).unwrap();
+        let origin_mode = saved.origin_mode;
+        (
+            body["status"].clone(),
+            serde_json::to_value(&rule).unwrap(),
+            speaker.list_active().await.unwrap().len(),
+            origin_mode,
+        )
+    }
+
+    let (dry_status, dry_rule, dry_announcements, dry_origin) =
+        decision(OperationMode::DryRun).await;
+    let (enforced_status, enforced_rule, enforced_announcements, enforced_origin) =
+        decision(OperationMode::Enforced).await;
+    assert_eq!(dry_status, enforced_status);
+    assert_eq!(
+        dry_rule, enforced_rule,
+        "dry run resolves the same scoped rule as enforced mode"
+    );
+    assert_eq!(dry_rule["nlri"]["scope"]["rd"], "64500:40");
+    assert_eq!(dry_rule["route_targets"], json!(["64500:777"]));
+    assert_eq!(dry_announcements, 0, "dry run never calls the speaker");
+    assert_eq!(enforced_announcements, 1);
+    assert_eq!(dry_origin, Some(OperationMode::DryRun));
+    assert_eq!(enforced_origin, Some(OperationMode::Enforced));
+}
+
+#[tokio::test]
+async fn reconciliation_and_withdrawal_reuse_the_saved_prefix_scope_snapshot() {
+    let repo = Arc::new(MockRepository::new());
+    let speaker = Arc::new(MockAnnouncer::new());
+    let initial = prefix_state(prefix_settings(), repo.clone(), speaker.clone());
+    let app = create_test_router(initial.clone());
+    let body = post(
+        &app,
+        "/v1/events",
+        prefix_event("carpet", "203.0.113.0/24", &[53]),
+        StatusCode::ACCEPTED,
+    )
+    .await;
+    let id: Uuid = body["mitigation_id"].as_str().unwrap().parse().unwrap();
+    let saved = repo.get_mitigation(id).await.unwrap().unwrap();
+    assert_eq!(saved.match_criteria.scope.as_ref().unwrap().name, "TRANSIT");
+    assert_eq!(speaker.list_active().await.unwrap().len(), 1);
+    drop(app);
+
+    // A daemon restart loses the rule; meanwhile the operator points the
+    // automatic default at another IPv4 scope.
+    speaker.restart().await;
+    assert!(speaker.list_active().await.unwrap().is_empty());
+    let mut changed = prefix_settings();
+    changed.bgp.default_scope = "NEXT4".into();
+    let restarted = prefix_state(changed, repo.clone(), speaker.clone());
+    let reconciler = ReconciliationLoop::new(repo.clone(), speaker.clone(), 30, false)
+        .with_app_state(restarted.clone());
+    reconciler.reconcile().await.unwrap();
+
+    let repaired = speaker.list_active().await.unwrap();
+    assert_eq!(repaired.len(), 1);
+    let rule = &repaired[0];
+    assert_eq!(rule.nlri.dst_prefix, "203.0.113.0/24");
+    assert_eq!(rule.nlri.protocol, Some(17));
+    assert_eq!(rule.nlri.dst_ports, vec![53]);
+    assert_eq!(rule.actions[0].action_type, ActionType::Discard);
+    let scope = rule
+        .nlri
+        .scope
+        .as_ref()
+        .expect("repair keeps the admitted VPN scope");
+    assert_eq!(
+        scope.rd(),
+        "64500:40",
+        "repair uses the saved snapshot, not the new default scope"
+    );
+    assert_eq!(scope.family, VpnFlowSpecFamily::Ipv4);
+    assert_eq!(rule.route_targets, vec!["64500:777"]);
+    assert_eq!(rule.nlri_hash(), saved.scope_hash);
+
+    // Withdrawal also follows the saved snapshot after the default changed.
+    let app = create_test_router(restarted);
+    let mut unban = prefix_event("carpet", "203.0.113.0/24", &[53]);
+    unban["action"] = json!("unban");
+    post(&app, "/v1/events", unban, StatusCode::ACCEPTED).await;
+    assert!(
+        speaker.list_active().await.unwrap().is_empty(),
+        "the saved scoped rule was withdrawn; a rule built from the new default would not match"
+    );
+    assert!(!repo.get_mitigation(id).await.unwrap().unwrap().is_active());
 }

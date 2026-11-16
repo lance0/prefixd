@@ -279,7 +279,7 @@ mod tests {
         );
     }
 
-    const TRANSIT: &str = "vpn_scopes:\n  TRANSIT:\n    family: ipv4\n    rd: '44407:40'\n    route_targets: ['44407:777']\n";
+    const TRANSIT: &str = "vpn_scopes:\n  TRANSIT:\n    family: ipv4\n    rd: '64500:40'\n    route_targets: ['64500:777']\n";
 
     #[test]
     fn legacy_scope_is_global_and_new_fields_stay_absent() {
@@ -293,7 +293,7 @@ mod tests {
     #[test]
     fn automatic_defaults_resolve_each_family_without_global_fallback() {
         let dual = format!(
-            "{TRANSIT}  TRANSIT6:\n    family: ipv6\n    rd: '44407:40'\n    route_targets: ['44407:777']\n"
+            "{TRANSIT}  TRANSIT6:\n    family: ipv6\n    rd: '64500:40'\n    route_targets: ['64500:777']\n"
         );
         let bgp = config(&format!(
             "default_scope: {{ipv4: TRANSIT, ipv6: TRANSIT6}}\n{dual}"
@@ -371,8 +371,8 @@ mod tests {
         let bgp = config(&format!("default_scope: TRANSIT\n{TRANSIT}")).unwrap();
         let snapshot = bgp.resolve_default_scope().unwrap().unwrap();
         assert_eq!(snapshot.name, "TRANSIT");
-        assert_eq!(snapshot.identity.rd(), "44407:40");
-        assert_eq!(snapshot.route_targets, ["44407:777"]);
+        assert_eq!(snapshot.identity.rd(), "64500:40");
+        assert_eq!(snapshot.route_targets, ["64500:777"]);
         let policy = &bgp.vpn_scopes["TRANSIT"];
         assert!(!policy.allow_source_only);
         assert_eq!(policy.min_source_prefix_length, 24);
@@ -410,14 +410,14 @@ mod tests {
 
     #[test]
     fn scope_names_cannot_alias_the_same_wire_identity() {
-        for rd in ["44407:40", "0x0000ad7700000028"] {
+        for rd in ["64500:40", "0x0000fbf400000028"] {
             let alias = format!(
-                "{TRANSIT}  ALIAS:\n    family: ipv4\n    rd: '{rd}'\n    route_targets: ['44407:999']\n"
+                "{TRANSIT}  ALIAS:\n    family: ipv4\n    rd: '{rd}'\n    route_targets: ['64500:999']\n"
             );
             assert!(config(&alias).is_err(), "accepted duplicate identity {rd}");
         }
         let distinct = format!(
-            "{TRANSIT}  OTHER:\n    family: ipv4\n    rd: '44407:41'\n    route_targets: ['44407:999']\n"
+            "{TRANSIT}  OTHER:\n    family: ipv4\n    rd: '64500:41'\n    route_targets: ['64500:999']\n"
         );
         assert!(config(&distinct).is_ok());
     }
@@ -441,9 +441,9 @@ mod tests {
         for bad in [
             "default_scope: missing\n".to_string(),
             TRANSIT.replace("family: ipv4", "family: ipv5"),
-            TRANSIT.replace("rd: '44407:40'", "rd: '65536:65536'"),
-            TRANSIT.replace("['44407:777']", "[]"),
-            TRANSIT.replace("['44407:777']", "['44407:777', '44407:777']"),
+            TRANSIT.replace("rd: '64500:40'", "rd: '65536:65536'"),
+            TRANSIT.replace("['64500:777']", "[]"),
+            TRANSIT.replace("['64500:777']", "['64500:777', '64500:777']"),
             TRANSIT.replace("TRANSIT:", "global:"),
             TRANSIT.replace("TRANSIT:", "'bad name':"),
             format!("{TRANSIT}    allow_source_onyl: true\n"),

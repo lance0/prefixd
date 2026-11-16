@@ -85,7 +85,7 @@ mod tests {
 
     fn config() -> BgpConfig {
         crate::config::parse_yaml(
-            "backend: mock\nlocal_asn: 65000\nrouter_id: 192.0.2.1\nvpn_scopes:\n  TRANSIT:\n    family: ipv4\n    rd: '44407:40'\n    route_targets: ['44407:777']\n",
+            "backend: mock\nlocal_asn: 65000\nrouter_id: 192.0.2.1\nvpn_scopes:\n  TRANSIT:\n    family: ipv4\n    rd: '64500:40'\n    route_targets: ['64500:777']\n",
         )
         .unwrap()
     }
@@ -95,10 +95,10 @@ mod tests {
         let mut config = config();
         let saved = config.resolve_scope("TRANSIT").unwrap().unwrap();
         assert!(check_named_snapshot(&config, &saved).is_ok());
-        config.vpn_scopes.get_mut("TRANSIT").unwrap().rd = "44407:41".into();
+        config.vpn_scopes.get_mut("TRANSIT").unwrap().rd = "64500:41".into();
         assert!(retained_scope(&config, &saved.identity, &saved.route_targets).is_err());
-        config.vpn_scopes.get_mut("TRANSIT").unwrap().rd = "44407:40".into();
-        config.vpn_scopes.get_mut("TRANSIT").unwrap().route_targets = vec!["44407:778".into()];
+        config.vpn_scopes.get_mut("TRANSIT").unwrap().rd = "64500:40".into();
+        config.vpn_scopes.get_mut("TRANSIT").unwrap().route_targets = vec!["64500:778".into()];
         assert!(check_named_snapshot(&config, &saved).is_err());
         config.vpn_scopes.clear();
         assert!(check_named_snapshot(&config, &saved).is_err());
@@ -109,8 +109,8 @@ mod tests {
         let config = config();
         let saved = config.resolve_scope("TRANSIT").unwrap().unwrap();
         assert!(retained_scope(&config, &saved.identity, &saved.route_targets).is_ok());
-        assert!(retained_scope(&config, &saved.identity, &["44407:778".into()]).is_err());
-        let other = VpnFlowSpecIdentity::new(VpnFlowSpecFamily::Ipv4, "44407:41").unwrap();
+        assert!(retained_scope(&config, &saved.identity, &["64500:778".into()]).is_err());
+        let other = VpnFlowSpecIdentity::new(VpnFlowSpecFamily::Ipv4, "64500:41").unwrap();
         assert!(retained_scope(&config, &other, &saved.route_targets).is_err());
     }
 
@@ -141,7 +141,7 @@ mod tests {
             },
             FlowSpecAction::discard(),
         )
-        .with_route_targets(vec!["44407:778".into()]);
+        .with_route_targets(vec!["64500:778".into()]);
         repo.insert_withdrawal_for_test(WithdrawalRequest {
             operation_id: uuid::Uuid::new_v4(),
             mitigation_id: uuid::Uuid::new_v4(),

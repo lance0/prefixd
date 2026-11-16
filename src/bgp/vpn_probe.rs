@@ -230,7 +230,7 @@ mod tests {
     }
 
     fn v4() -> VpnFlowSpecIdentity {
-        VpnFlowSpecIdentity::new(VpnFlowSpecFamily::Ipv4, "44407:40").unwrap()
+        VpnFlowSpecIdentity::new(VpnFlowSpecFamily::Ipv4, "64500:40").unwrap()
     }
 
     #[tokio::test(start_paused = true)]
@@ -243,7 +243,7 @@ mod tests {
         let hit = cache.observe(speaker.clone(), &v4()).await;
         assert_eq!((hit, speaker.probes()), (first, 1), "cache hit");
         // An IPv6 scope has its own slot.
-        let v6 = VpnFlowSpecIdentity::new(VpnFlowSpecFamily::Ipv6, "44407:40").unwrap();
+        let v6 = VpnFlowSpecIdentity::new(VpnFlowSpecFamily::Ipv6, "64500:40").unwrap();
         cache.observe(speaker.clone(), &v6).await;
         assert_eq!(speaker.probes(), 2);
         tokio::time::advance(Duration::from_millis(1)).await;
@@ -343,7 +343,7 @@ mod tests {
     async fn a_failed_mutation_invalidates_the_cached_result() {
         let speaker = Arc::new(Speaker::new("supported"));
         let cache = VpnProbeCache::default();
-        let v6 = VpnFlowSpecIdentity::new(VpnFlowSpecFamily::Ipv6, "44407:40").unwrap();
+        let v6 = VpnFlowSpecIdentity::new(VpnFlowSpecFamily::Ipv6, "64500:40").unwrap();
         cache.observe(speaker.clone(), &v4()).await;
         cache.observe(speaker.clone(), &v6).await;
         cache.invalidate(VpnFlowSpecFamily::Ipv4);

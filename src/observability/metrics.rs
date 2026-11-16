@@ -244,11 +244,11 @@ pub static INJECTION_LEASE_RENEWALS: Lazy<CounterVec> = Lazy::new(|| {
     .unwrap()
 });
 
-/// One-hot injection lease state: none, live, renewal_failing or expired (ADR 027).
+/// One-hot injection lease state: none, live, renewal_failing, expired, not_renewing or standby (ADR 027).
 pub static INJECTION_LEASE_STATE: Lazy<GaugeVec> = Lazy::new(|| {
     register_gauge_vec!(
         "prefixd_injection_lease_state",
-        "1 for this controller's current injection lease state (none, live, renewal_failing, expired), 0 for the others",
+        "1 for this controller's current injection lease state (none, live, renewal_failing, expired, not_renewing, standby), 0 for the others",
         &["state"]
     )
     .unwrap()

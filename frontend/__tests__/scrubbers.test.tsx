@@ -584,8 +584,8 @@ function pairResult(): DiversionPreview {
 function vpnResult(family: "ipv4" | "ipv6", routingScope = "TRANSIT"): DiversionPreview {
   const preview = result()
   preview.candidate.profile.scope = routingScope
-  preview.candidate.rule.nlri.scope = { family, rd: "44407:40" }
-  preview.candidate.rule.route_targets = ["44407:777"]
+  preview.candidate.rule.nlri.scope = { family, rd: "64500:40" }
+  preview.candidate.rule.route_targets = ["64500:777"]
 
   if (family === "ipv6") {
     preview.candidate.rule.nlri.dst_prefix = "2001:db8::20/128"
@@ -671,25 +671,25 @@ describe("configured VRF redirect target", { timeout: 10_000 }, () => {
   it("shows the action RT separately from scope RTs in preview and withdrawal", async () => {
     const preview = vpnResult("ipv4")
     delete preview.candidate.rule.target
-    preview.candidate.rule.redirect_route_target = "44407:888"
+    preview.candidate.rule.redirect_route_target = "64500:888"
     const configured = profiles(true, true)
-    configured.configuration[0] = { ...configured.configuration[0], scope: "TRANSIT", ipv4_target: null, redirect_route_target: "44407:888" }
+    configured.configuration[0] = { ...configured.configuration[0], scope: "TRANSIT", ipv4_target: null, redirect_route_target: "64500:888" }
     await render({ rows: [{ ...preview.candidate, status: "active" }], scrubbers: () => json(configured) })
-    expect(screen.getByText("VRF RT 44407:888")).toBeInTheDocument()
-    expect(screen.getByText(/203.0.113.20\/32 → VRF RT 44407:888/)).toHaveTextContent("RT 44407:777")
+    expect(screen.getByText("VRF RT 64500:888")).toBeInTheDocument()
+    expect(screen.getByText(/203.0.113.20\/32 → VRF RT 64500:888/)).toHaveTextContent("RT 64500:777")
     const dialog = await openWithdraw()
-    expect(within(dialog).getByText("VRF RT 44407:888")).toBeInTheDocument()
+    expect(within(dialog).getByText("VRF RT 64500:888")).toBeInTheDocument()
   })
 
   it.each(["ipv4", "ipv6"] as const)("keeps the configured VRF action in fresh %s confirmation", async family => {
     const preview = vpnResult(family)
     delete preview.candidate.rule.target
-    preview.candidate.rule.redirect_route_target = "44407:888"
-    preview.confirmation = "VPN-scoped-match -> VRF RT 44407:888"
+    preview.candidate.rule.redirect_route_target = "64500:888"
+    preview.confirmation = "VPN-scoped-match -> VRF RT 64500:888"
     const request = { ...vpnRequest(family), confirmation: preview.confirmation }
     controller.route("POST", "/v1/vpn/diversions/preview", () => json(preview))
     controller.route("POST", "/v1/vpn/diversions", () => json(preview.candidate))
-    await expect(createDiversion(request, "TRANSIT")).resolves.toMatchObject({ rule: { redirect_route_target: "44407:888" } })
+    await expect(createDiversion(request, "TRANSIT")).resolves.toMatchObject({ rule: { redirect_route_target: "64500:888" } })
     const sent = JSON.parse(controller.calls("POST", "/v1/vpn/diversions")[0].body ?? "{}")
     expect(sent.diversion).not.toHaveProperty("target")
     expect(sent.diversion).not.toHaveProperty("redirect_route_target")
@@ -699,7 +699,7 @@ describe("configured VRF redirect target", { timeout: 10_000 }, () => {
     const preview = vpnResult("ipv4")
 
     if (targetCase === "missing") delete preview.candidate.rule.target
-    else preview.candidate.rule.redirect_route_target = "44407:888"
+    else preview.candidate.rule.redirect_route_target = "64500:888"
     controller.route("POST", "/v1/vpn/diversions/preview", () => json(preview))
     await expect(createDiversion(vpnRequest("ipv4"), "TRANSIT")).rejects.toThrow("did not acknowledge")
     expect(controller.calls("POST", "/v1/vpn/diversions")).toHaveLength(0)
