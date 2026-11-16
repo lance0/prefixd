@@ -384,8 +384,9 @@ Follow the [release checklist](docs/project/release-checklist.md). In short:
    prints.
 2. Open `chore(release): prepare vX.Y.Z`. It must pass `just gate`, both
    rustbgpd fixture pins and the upgrade proof, as recorded in its body.
-3. Merge it. When `ci.yml` passes on the merge commit, the release workflow
-   tags it `vX.Y.Z` and publishes the images and the GitHub Release.
+3. Merge it. `ci.yml` starts the release workflow, which requires the latest CI
+   and Interop push runs to pass on that merge commit before tagging `vX.Y.Z`
+   and publishing the images and the GitHub Release.
 4. Verify the image digests and the install contract.
 
 Never re-tag, move a tag or overwrite a release; fix forward with a patch

@@ -80,8 +80,8 @@ docker run -d --name "$name" --cpuset-cpus "$cpus" \
     -v "$work/notify.sh:/usr/local/bin/prefixd-fastnetmon.sh:ro" \
     -v "$work/calls:/calls" "$image" >/dev/null
 deadline=$((SECONDS + 30))
-until docker exec "$name" "$client" get_banlist >/dev/null 2>&1; do
-    [ "$SECONDS" -lt "$deadline" ] || { echo "probe: FastNetMon API not up within 30s" >&2; exit 1; }
+until output="$(timeout 5 docker exec "$name" "$client" get_banlist 2>&1)" && [[ "$output" != *"Query failed"* ]]; do
+    [ "$SECONDS" -lt "$deadline" ] || { printf 'probe: FastNetMon API readiness timed out: %s\n' "$output" >&2; exit 1; }
     sleep 1
 done
 

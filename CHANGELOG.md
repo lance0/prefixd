@@ -515,6 +515,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Releases require the latest CI and Interop push runs to pass on the exact
+  release commit before tagging or publishing. A missing, pending or failed
+  Interop run, including the FastNetMon lane, blocks publication even when CI
+  passes. The FastNetMon lab now catches API refusals written only to stderr,
+  including during readiness, instead of accepting their zero exit status.
 - `prefixdctl` works in the Compose controller. Both controller services set
   `PREFIXD_API=http://127.0.0.1:8080`, so `docker compose exec` runs no longer
   fail against the CLI's default port 80.
