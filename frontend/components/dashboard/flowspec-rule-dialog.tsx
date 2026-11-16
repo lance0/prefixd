@@ -341,6 +341,33 @@ export function playbookPrefill(vector: string, playbooks: ConfigPlaybook[], for
   return { playbook: playbook.name, fields }
 }
 
+const REASON_PREFIX = "Mitigate now: "
+
+/**
+ * Writes the picker's fields into the form, except the ones the operator has edited since
+ * choosing the vector. Rerun when the destination or ports change, since both can select a
+ * different playbook or protocol family.
+ */
+export function applyPrefill(form: RuleForm, vector: string, playbooks: ConfigPlaybook[], own: ReadonlySet<keyof RuleForm>): RuleForm {
+  const next = playbookPrefill(vector, playbooks, form)
+  const result = { ...form }
+
+  if (next.fields.protocol !== undefined && !own.has("protocol")) result.protocol = next.fields.protocol
+
+  if (next.fields.action !== undefined && !own.has("action")) result.action = next.fields.action
+
+  if (next.fields.rateBps !== undefined && !own.has("rateBps")) result.rateBps = next.fields.rateBps
+
+  if (next.fields.ttl !== undefined && !own.has("ttl")) result.ttl = next.fields.ttl
+
+  // A reason the operator typed is kept; one the picker wrote follows the playbook.
+  if (!own.has("reason") && (!form.reason || form.reason.startsWith(REASON_PREFIX))) {
+    result.reason = `${REASON_PREFIX}${vector}${next.playbook ? ` (playbook ${next.playbook})` : ""}`
+  }
+
+  return result
+}
+
 function previewProtocol(protocol: string): number | null {
   switch (protocol) {
     case "udp": return 17
@@ -371,7 +398,8 @@ export function FlowSpecRuleDialog({ open, onOpenChange, canSourceOnly = true, f
   const { data: playbooks, error: playbooksError } = useConfigPlaybooks(fromPlaybook && open)
   const [form, setForm] = useState<RuleForm>(EMPTY_FORM)
   const [vector, setVector] = useState("")
-  const [prefill, setPrefill] = useState<PlaybookPrefill | null>(null)
+  // Fields the operator changed after choosing a vector; a later prefill leaves them alone.
+  const ownEdits = useRef(new Set<keyof RuleForm>())
   const [touched, setTouched] = useState<Set<keyof RuleForm>>(new Set())
   const [submitted, setSubmitted] = useState(false)
   const [isSubmitting, setIsSubmitting] = useState(false)
@@ -434,7 +462,14 @@ export function FlowSpecRuleDialog({ open, onOpenChange, canSourceOnly = true, f
 
   const update = <K extends keyof RuleForm>(field: K, value: RuleForm[K]) => {
     invalidateAdmission()
-    setForm((prev) => ({ ...prev, [field]: value }))
+    const matchInput = field === "victimIp" || field === "dstPorts"
+
+    if (vector && !matchInput) ownEdits.current.add(field)
+    setForm((prev) => {
+      const next = { ...prev, [field]: value }
+
+      return vector && matchInput ? applyPrefill(next, vector, playbooks?.playbooks ?? [], ownEdits.current) : next
+    })
     setTouched((prev) => new Set(prev).add(field))
   }
 
@@ -442,21 +477,21 @@ export function FlowSpecRuleDialog({ open, onOpenChange, canSourceOnly = true, f
     invalidateAdmission()
     setForm(EMPTY_FORM)
     setVector("")
-    setPrefill(null)
+    ownEdits.current = new Set()
     setTouched(new Set())
     setSubmitted(false)
     setError(null)
   }
 
+  // Choosing a vector is explicit, so it rewrites every field the playbook sets.
   const chooseVector = (value: string) => {
-    const next = playbookPrefill(value, playbooks?.playbooks ?? [], form)
     invalidateAdmission()
     setVector(value)
-    setPrefill(next)
-    const reason = `Mitigate now: ${value}${next.playbook ? ` (playbook ${next.playbook})` : ""}`
-    // A reason the operator typed is kept; one this picker wrote follows the vector.
-    setForm((prev) => ({ ...prev, ...next.fields, reason: !prev.reason || prev.reason.startsWith("Mitigate now: ") ? reason : prev.reason }))
+    ownEdits.current = new Set()
+    setForm((prev) => applyPrefill(prev, value, playbooks?.playbooks ?? [], ownEdits.current))
   }
+
+  const prefill = fromPlaybook && vector ? playbookPrefill(vector, playbooks?.playbooks ?? [], form) : null
 
   const handleCheckAdmission = async () => {
     setSubmitted(true)
@@ -559,7 +594,7 @@ export function FlowSpecRuleDialog({ open, onOpenChange, canSourceOnly = true, f
             </Select>
             <p id="fs-vector-help" className="text-xs text-muted-foreground" aria-live="polite">
               {playbooksError ? "Playbooks could not be loaded. Set the rule fields directly."
-                : prefill?.playbook ? `Protocol, action, rate and TTL from playbook ${prefill.playbook}. Destination ports stay as entered.`
+                : prefill?.playbook ? `Protocol, action, rate and TTL from playbook ${prefill.playbook}, unless you change them. Destination ports stay as entered.`
                   : "Sets protocol, action, rate and TTL from the playbook policy would use for this vector."}
             </p>
             {prefill?.note ? <p className="text-xs text-warning">{prefill.note}</p> : null}

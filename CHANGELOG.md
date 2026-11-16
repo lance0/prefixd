@@ -311,9 +311,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The dashboard's Administration page has an **API tokens** tab for an Admin
   session: a table of every token, active first and filterable by creator; a
   create dialog that shows the new secret once, with a copy button and
-  ready-to-paste setup for FastNetMon, Alertmanager, a bearer webhook or
-  Grafana, `prefixdctl` and a `curl -K -` test, none of which contains the
-  secret; and revocation behind a confirmation that names the token, its
+  ready-to-paste setup that stores the token in a file only the client's
+  account can read, then configures FastNetMon, a FastNetMon hostgroup shim,
+  Alertmanager, a bearer webhook or Grafana, `prefixdctl` and a `curl -K -`
+  test, none of which contains the secret; and revocation behind a confirmation that names the token, its
   source and its last use. The secret is kept only while the dialog is open,
   never in the data cache, the URL, browser storage or the console, and
   closing the dialog before copying asks first. See

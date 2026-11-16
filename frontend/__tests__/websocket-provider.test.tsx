@@ -6,8 +6,8 @@ import { WebSocketProvider, useWebSocketContext } from "@/components/websocket-p
 import { ConnectionStatus } from "@/components/connection-status"
 import { useEvents, useHealth, useMitigations, useSignalGroupsPaginated, useStats } from "@/hooks/use-api"
 import type { WsMessage } from "@/hooks/use-websocket-types"
-import { getHealth, type NotificationPreferences } from "@/lib/api"
-import { appWrapper, json, settle, useFakeController } from "./support/fake-controller"
+import type { NotificationPreferences } from "@/lib/api"
+import { appWrapper, deferred, json, settle, useFakeController } from "./support/fake-controller"
 
 const controller = useFakeController()
 
@@ -186,6 +186,10 @@ describe("WebSocketProvider server frames", () => {
 
   it("times out a stalled handshake, then recovers through the same-origin feed", async () => {
     vi.useFakeTimers()
+    // The provider polls health like the rest of the shell: answer the first read, then hold the next.
+    const health = deferred<Response>()
+    let reads = 0
+    controller.route("GET", "/v1/health", () => reads++ === 0 ? json({ status: "ok" }) : health.promise)
     const app = appWrapper({ withoutAuth: true })
 
     const { result } = renderHook(() => useWebSocketContext(), {
@@ -208,8 +212,10 @@ describe("WebSocketProvider server frames", () => {
     // Live also needs a recent API response; the last one here is 16 seconds old.
     render(<ConnectionStatus state={result.current.connectionState} />)
     expect(screen.getByText("Stale")).toBeVisible()
-    controller.route("GET", "/v1/health", () => json({ status: "ok" }))
-    await act(async () => { await getHealth() })
+    await act(async () => {
+      health.resolve(json({ status: "ok" }))
+      await vi.advanceTimersByTimeAsync(0)
+    })
     expect(screen.getByText("Live")).toBeVisible()
     expect(screen.getByRole("status")).toHaveAccessibleName(/HTTP polling also remains active/)
   })

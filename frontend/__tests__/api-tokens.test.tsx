@@ -109,6 +109,8 @@ describe("API tokens tab", { timeout: 10_000 }, () => {
     dialog = within(await screen.findByRole("dialog", { name: "Token fnm-pop2 created" }))
     expect(JSON.parse(controller.calls("POST", "/v1/tokens")[0].body ?? "")).toEqual({ name: "fnm-pop2", scope: "ingest", source: "fastnetmon", pop: "pop2" })
     expect(dialog.getByLabelText("Token")).toHaveValue(SECRET)
+    // Focus moves into the new view, so the secret and its copy action are announced.
+    await waitFor(() => expect(dialog.getByRole("button", { name: "Copy token" })).toHaveFocus())
     // The snippets read the token from a file and keep it off curl's command line.
     const snippets = dialog.getAllByText((_, element) => element?.tagName === "PRE").map((pre) => pre.textContent ?? "")
     expect(snippets.join("\n")).toContain('PREFIXD_TOKEN_FILE="/etc/prefixd/fnm-pop2.token"')
@@ -199,6 +201,19 @@ describe("API tokens tab", { timeout: 10_000 }, () => {
     fireEvent.click(confirm.getByRole("button", { name: "Revoke" }))
     await waitFor(() => expect(controller.calls("POST", "/v1/tokens/fnm-pop1/revoke")).toHaveLength(1))
     await waitFor(() => expect(screen.queryByRole("button", { name: "Revoke fnm-pop1" })).not.toBeInTheDocument())
+    // The revoked row's button is gone, so focus lands on the next action rather than the page.
+    await waitFor(() => expect(screen.getByRole("button", { name: "Create token" })).toHaveFocus())
+  })
+
+  it("filters by a creator named like the Anyone option", async () => {
+    tokens = [token("by-all", { created_by: "all" }), token("by-alice")]
+    await renderAdmin("credentials", "admin")
+    await screen.findByText("by-all")
+    await choose(screen.getByRole("combobox", { name: "Created by" }), "all")
+    await waitFor(() => expect(screen.queryByText("by-alice")).not.toBeInTheDocument())
+    expect(screen.getByText("by-all")).toBeInTheDocument()
+    await choose(screen.getByRole("combobox", { name: "Created by" }), "Anyone")
+    expect(await screen.findByText("by-alice")).toBeInTheDocument()
   })
 
   it("keeps the confirmation open with the controller's reason when a revoke fails", async () => {
@@ -212,13 +227,21 @@ describe("API tokens tab", { timeout: 10_000 }, () => {
 })
 
 describe("operator accounts without a session", () => {
-  it.each(["none"])("lists accounts in %s mode but offers no identity changes", async (mode) => {
+  it.each(["none", "mtls"])("lists accounts in %s mode but offers no identity changes", async (mode) => {
     await renderAdmin(mode, null, "/admin?tab=users")
     expect(await screen.findByText("alice")).toBeInTheDocument()
     expect(screen.getByText(/need a signed-in Admin session/)).toBeInTheDocument()
     expect(screen.queryByRole("button", { name: "Add user" })).not.toBeInTheDocument()
     expect(screen.queryByRole("button", { name: /Change password/ })).not.toBeInTheDocument()
     expect(screen.queryByRole("button", { name: /^Delete/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole("tab", { name: "API tokens" })).not.toBeInTheDocument()
+  })
+
+  it("lists accounts read-only in mtls mode for a signed-in Admin too", async () => {
+    await renderAdmin("mtls", "admin", "/admin?tab=users")
+    expect(await screen.findByText("alice")).toBeInTheDocument()
+    expect(screen.queryByRole("button", { name: "Add user" })).not.toBeInTheDocument()
+    expect(screen.queryByRole("button", { name: /Change password/ })).not.toBeInTheDocument()
   })
 
   it("offers identity changes to an Admin session", async () => {
@@ -231,10 +254,20 @@ describe("operator accounts without a session", () => {
 describe("token snippets", () => {
   const origin = "https://prefixd.example.net"
 
+  function fileSetup(snippets: { title: string; text: string }[]) {
+    return snippets[0].text.split("\n")
+  }
+
   it("covers each client from a token file, never the secret", () => {
     const fastnetmon = tokenSnippets({ name: "fnm-pop1", scope: "ingest", source: "fastnetmon" }, origin)
     expect(fastnetmon.map((snippet) => snippet.title)).toEqual(["Token file", "FastNetMon notify script (/etc/default/prefixd)", "Test with curl"])
     expect(fastnetmon[1].text).toBe(`PREFIXD_API="${origin}"\nPREFIXD_TOKEN_FILE="/etc/prefixd/fnm-pop1.token"`)
+
+    const hostgroup = tokenSnippets({ name: "fnm-hg", scope: "ingest", source: "fastnetmon-hostgroup" }, origin)
+    expect(hostgroup[1].title).toBe("Hostgroup shim, one event per attacked network")
+    expect(hostgroup[1].text).toContain('"source": "fastnetmon-hostgroup"')
+    expect(hostgroup[1].text).toContain(`$(cat /etc/prefixd/fnm-hg.token)`)
+    expect(hostgroup[1].text).toContain(`curl -K - -X POST "${origin}/v1/events"`)
 
     const alertmanager = tokenSnippets({ name: "am", scope: "ingest", source: "alertmanager" }, origin)
     expect(alertmanager[1].text).toContain(`url: "${origin}/v1/signals/alertmanager"`)
@@ -248,9 +281,42 @@ describe("token snippets", () => {
     expect(operator.map((snippet) => snippet.title)).toEqual(["Token file", "prefixdctl", "Test with curl"])
     expect(operator[2].text).toContain(`curl -K - --fail-with-body ${origin}/v1/health/detail`)
 
-    for (const snippet of [...fastnetmon, ...alertmanager, ...webhook, ...operator]) {
+    for (const snippet of [...fastnetmon, ...hostgroup, ...alertmanager, ...webhook, ...operator]) {
       expect(snippet.text).not.toMatch(/prefixd_[A-Za-z0-9_-]{43}/)
       expect(snippet.text).not.toMatch(/curl[^|\n]* -H ['"]?Authorization/)
     }
+  })
+
+  it.each([
+    [{ name: "fnm-pop1", scope: "ingest", source: "fastnetmon" }, "fastnetmon"],
+    [{ name: "fnm-hg", scope: "ingest", source: "fastnetmon-hostgroup" }, "fastnetmon"],
+    [{ name: "am", scope: "ingest", source: "alertmanager" }, "alertmanager"],
+    [{ name: "kentik-1", scope: "ingest", source: "kentik" }, "<the client's account>"],
+    [{ name: "ci", scope: "operator", source: null }, "<the client's account>"],
+  ] as const)("makes the token file %j private to %s", (token, user) => {
+    const file = `/etc/prefixd/${token.name}.token`
+    const lines = fileSetup(tokenSnippets(token, origin))
+    const commands = lines.filter((line) => !line.startsWith("#"))
+
+    // The directory exists, the file is created private, then handed to the client and made read-only.
+    expect(commands).toEqual([
+      `CLIENT_USER="${user}"`,
+      "sudo install -d -m 0755 /etc/prefixd",
+      `sudo sh -c 'umask 077 && cat > ${file}'`,
+      `sudo chown "$CLIENT_USER" ${file}`,
+      `sudo chmod 0400 ${file}`,
+    ])
+    expect(lines.join("\n")).not.toMatch(/chmod (0?[0-7][0-7][1-7]|[ao]\+r)/)
+
+    // The test reads the client's file through sudo, as a login user cannot.
+    const test = tokenSnippets(token, origin).at(-1)?.text ?? ""
+    expect(test).toContain(`"$(sudo cat ${file})"`)
+  })
+
+  it("says where Alertmanager runs and how to mount the file into a container", () => {
+    const text = fileSetup(tokenSnippets({ name: "am", scope: "ingest", source: "alertmanager" }, origin)).join("\n")
+    expect(text).toContain("prometheus on Debian and Ubuntu packages")
+    expect(text).toMatch(/In a container, mount the file read-only/)
+    expect(text).toContain("never make it world-readable")
   })
 })

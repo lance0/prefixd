@@ -2,7 +2,8 @@ import { fireEvent, screen, waitFor, within } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { WebhookAdaptersEditor } from "@/components/dashboard/correlation/webhook-adapters"
 import type { CorrelationConfig } from "@/lib/api"
-import { json, operatorResponse, renderApp, signIn, useFakeController } from "./support/fake-controller"
+import { act } from "react"
+import { deferred, json, operatorResponse, renderApp, signIn, useFakeController } from "./support/fake-controller"
 
 const controller = useFakeController()
 
@@ -52,6 +53,23 @@ describe("webhook adapter editor", () => {
     expect(dialog.getByRole("alert")).not.toHaveTextContent("API error")
     expect(screen.getByRole("dialog", { name: "New webhook adapter" })).toBeInTheDocument()
     expect(dialog.getByRole("textbox", { name: "Name" })).toHaveValue("radware")
+  })
+
+  it("keeps the editor until its save lands, so a late completion cannot close another draft", async () => {
+    const save = deferred<Response>()
+    controller.route("PUT", "/v1/config/correlation", () => save.promise)
+    const dialog = await draft()
+    fireEvent.change(dialog.getByRole("textbox", { name: "Secret env var" }), { target: { value: "PREFIXD_WEBHOOK_RADWARE_SECRET" } })
+    fireEvent.click(dialog.getByRole("button", { name: "Save" }))
+    await waitFor(() => expect(controller.calls("PUT", "/v1/config/correlation")).toHaveLength(1))
+
+    expect(dialog.getByRole("button", { name: "Cancel" })).toBeDisabled()
+    fireEvent.keyDown(dialog.getByRole("textbox", { name: "Name" }), { key: "Escape" })
+    expect(screen.getByRole("dialog", { name: "New webhook adapter" })).toBeInTheDocument()
+    expect(dialog.getByRole("textbox", { name: "Name" })).toHaveValue("radware")
+
+    await act(async () => { save.resolve(json({ config: correlation, loaded_at: "2026-11-16T00:00:00Z" })) })
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "New webhook adapter" })).not.toBeInTheDocument())
   })
 
   it("closes once the controller accepts the adapter", async () => {

@@ -84,6 +84,13 @@ describe("validateAdapter", () => {
     expect(validateAdapter({ ...adapter, auth: { type: "bearer" as const } }, [], true)).toEqual([])
   })
 
+  it("skips the credential checks for a disabled adapter, as the controller does", () => {
+    const adapter = { ...base(), enabled: false, fields: { ...base().fields, action: "$.action" } }
+    adapter.auth = { type: "hmac", secret_env: "RADWARE_SECRET", header: "X-Signature-SHA256", algorithm: "sha256" }
+    expect(validateAdapter(adapter, [], true)).toEqual([])
+    expect(validateAdapter({ ...adapter, enabled: true }, [], true)).toHaveLength(2)
+  })
+
   it("does not require secret_env when auth type is bearer", () => {
     const adapter = { ...base(), auth: { type: "bearer" as const } }
     const errors = validateAdapter(adapter, [], true)

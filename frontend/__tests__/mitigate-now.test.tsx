@@ -1,9 +1,10 @@
-import { act, fireEvent, screen, waitFor, within } from "@testing-library/react"
+import { act, fireEvent, renderHook, screen, waitFor, within } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { MitigationsContentLive } from "@/components/dashboard/mitigations-content-live"
 import { playbookPrefill } from "@/components/dashboard/flowspec-rule-dialog"
+import { useKeyboardShortcuts } from "@/hooks/use-keyboard-shortcuts"
 import type { ConfigPlaybook, Mitigation } from "@/lib/api"
-import { json, operatorResponse, renderApp, settle, signIn, useFakeController } from "./support/fake-controller"
+import { appWrapper, json, operatorResponse, renderApp, settle, signIn, useFakeController } from "./support/fake-controller"
 
 const controller = useFakeController()
 const now = new Date().toISOString()
@@ -82,7 +83,6 @@ describe("mitigate now", { timeout: 10_000 }, () => {
     expect(dialog.getByLabelText(/^Rate/)).toHaveValue("5000000")
     expect(dialog.getByLabelText(/^TTL/)).toHaveValue("120")
     expect(dialog.getByLabelText(/^Reason/)).toHaveValue("Mitigate now: udp_flood (playbook udp_flood_police_first)")
-    fireEvent.change(dialog.getByLabelText(/^Destination ports/), { target: { value: "53" } })
 
     fireEvent.click(dialog.getByRole("button", { name: "Create rule" }))
     await waitFor(() => expect(router.push).toHaveBeenCalledWith(`/mitigations/${created.mitigation_id}`))
@@ -90,12 +90,52 @@ describe("mitigate now", { timeout: 10_000 }, () => {
     expect(controller.calls("POST", "/v1/mitigations")).toHaveLength(1)
     const body = JSON.parse(controller.calls("POST", "/v1/mitigations")[0].body ?? "")
     expect(body).toEqual({
-      victim_ip: "203.0.113.10", protocol: "udp", action: "police", rate_bps: 5_000_000, dst_ports: [53],
+      victim_ip: "203.0.113.10", protocol: "udp", action: "police", rate_bps: 5_000_000,
       ttl_seconds: 120, reason: "Mitigate now: udp_flood (playbook udp_flood_police_first)",
     })
     // No detector claim: the controller attributes the rule to the signed-in operator.
     expect(body).not.toHaveProperty("source")
     expect(body).not.toHaveProperty("operator_id")
+  })
+
+  it("follows the destination and ports entered below the picker, keeping the operator's own edits", async () => {
+    const { router } = await openAs("operator", "/mitigations?mitigate=true")
+    const dialog = within(await screen.findByRole("dialog", { name: "Mitigate now" }))
+    const vector = dialog.getByRole("combobox", { name: "Attack vector" })
+    await waitFor(() => expect(vector).toBeEnabled())
+
+    const pick = async (name: string) => {
+      fireEvent.keyDown(vector, { key: "Enter" })
+      fireEvent.click(await screen.findByRole("option", { name }))
+    }
+
+    const fill = (label: RegExp, value: string) => fireEvent.change(dialog.getByLabelText(label), { target: { value } })
+
+    // Top down: the vector first, then an IPv6 destination moves ICMP to ICMPv6.
+    await pick("ICMP flood")
+    expect(dialog.getByRole("combobox", { name: "Protocol" })).toHaveTextContent("icmp")
+    fill(/^Destination IP or CIDR/, "2001:db8::10")
+    expect(dialog.getByRole("combobox", { name: "Protocol" })).toHaveTextContent("icmpv6")
+
+    // Ports entered after the vector select the playbook that requires them.
+    await pick("UDP flood")
+    expect(dialog.getByRole("combobox", { name: "Action" })).toHaveTextContent("police")
+    fill(/^Destination ports/, "53")
+    expect(dialog.getByRole("combobox", { name: "Action" })).toHaveTextContent("discard")
+    expect(dialog.getByLabelText(/^TTL/)).toHaveValue("45")
+    expect(dialog.getByLabelText(/^Reason/)).toHaveValue("Mitigate now: udp_flood (playbook udp_ported)")
+
+    // The operator's TTL survives a later recompute; the fields the picker wrote follow it.
+    fill(/^TTL/, "90")
+    fill(/^Destination ports/, "")
+    expect(dialog.getByRole("combobox", { name: "Action" })).toHaveTextContent("police")
+    expect(dialog.getByLabelText(/^Rate/)).toHaveValue("5000000")
+    expect(dialog.getByLabelText(/^TTL/)).toHaveValue("90")
+    expect(dialog.getByLabelText(/^Reason/)).toHaveValue("Mitigate now: udp_flood (playbook udp_flood_police_first)")
+
+    fireEvent.click(dialog.getByRole("button", { name: "Create rule" }))
+    await waitFor(() => expect(router.push).toHaveBeenCalledWith(`/mitigations/${created.mitigation_id}`))
+    expect(JSON.parse(controller.calls("POST", "/v1/mitigations")[0].body ?? "")).toMatchObject({ victim_ip: "2001:db8::10", protocol: "udp", action: "police", rate_bps: 5_000_000, ttl_seconds: 90 })
   })
 
   it("keeps an operator's own reason when the vector changes", async () => {
@@ -114,6 +154,15 @@ describe("mitigate now", { timeout: 10_000 }, () => {
     expect(screen.queryByRole("button", { name: "Mitigate now" })).not.toBeInTheDocument()
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument()
     expect(controller.calls("GET", "/v1/config/playbooks")).toHaveLength(0)
+  })
+})
+
+describe("mitigate now shortcut", () => {
+  it.each([[false, 0], [true, 1]] as const)("opens from n only for a role that can mitigate (%s)", (canMitigate, pushes) => {
+    const app = appWrapper({ withoutAuth: true })
+    renderHook(() => useKeyboardShortcuts({ canMitigate }), { wrapper: app.wrapper })
+    fireEvent.keyDown(window, { key: "n" })
+    expect(app.handles.router.push.mock.calls.filter(([url]) => url === "/mitigations?mitigate=true")).toHaveLength(pushes)
   })
 })
 

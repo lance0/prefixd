@@ -368,6 +368,9 @@ function AdapterDialog({
     <Dialog
       open={open}
       onOpenChange={(o) => {
+        // A save in flight closes this editor when it lands, so the editor stays until then:
+        // dismissing it early would let that completion close a newer one.
+        if (saving) return
         onOpenChange(o)
 
         if (o && initial) setForm(initial)
@@ -550,6 +553,7 @@ function AdapterDialog({
             variant="outline"
             size="sm"
             onClick={() => onOpenChange(false)}
+            disabled={saving}
           >
             Cancel
           </Button>
@@ -737,13 +741,14 @@ export function validateAdapter(
     errors.push("fields.victim_ip is required")
   }
 
+  // The controller skips the credential checks for a disabled adapter until it is enabled.
   if (adapter.auth.type === "hmac" && !adapter.auth.secret_env) {
     errors.push("auth.secret_env is required for HMAC")
-  } else if (adapter.auth.type === "hmac" && !adapter.auth.secret_env.startsWith(SECRET_ENV_PREFIX)) {
+  } else if (adapter.enabled && adapter.auth.type === "hmac" && !adapter.auth.secret_env.startsWith(SECRET_ENV_PREFIX)) {
     errors.push(`auth.secret_env must start with ${SECRET_ENV_PREFIX}`)
   }
 
-  if (adapter.auth.type === "hmac" && adapter.fields.action && !adapter.fields.source_id) {
+  if (adapter.enabled && adapter.auth.type === "hmac" && adapter.fields.action && !adapter.fields.source_id) {
     errors.push("fields.source_id is required when an HMAC adapter maps fields.action, so a replayed signed unban is recognized")
   }
 

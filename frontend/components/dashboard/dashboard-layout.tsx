@@ -9,6 +9,7 @@ import { StaleDataNotice } from "@/components/connection-status"
 import { CommandPalette } from "./command-palette"
 import { KeyboardShortcutsModal } from "./keyboard-shortcuts-modal"
 import { useKeyboardShortcuts } from "@/hooks/use-keyboard-shortcuts"
+import { usePermissions } from "@/hooks/use-permissions"
 import { cn } from "@/lib/utils"
 
 const SIDEBAR_COLLAPSED_KEY = "prefixd-sidebar-collapsed"
@@ -35,7 +36,10 @@ export function DashboardLayout({ children }: { children: React.ReactNode }) {
     localStorage.setItem(SIDEBAR_COLLAPSED_KEY, String(newState))
   }
 
+  const { canWithdraw } = usePermissions()
+
   useKeyboardShortcuts({
+    canMitigate: canWithdraw,
     onCommandPalette: () => setCommandPaletteOpen(true),
     onToggleSidebar: handleToggleCollapse,
     onToggleHelp: () => setShortcutsModalOpen((prev) => !prev),
@@ -56,9 +60,9 @@ export function DashboardLayout({ children }: { children: React.ReactNode }) {
         </div>
 
         {/* Command palette */}
-        <CommandPalette open={commandPaletteOpen} onOpenChange={setCommandPaletteOpen} />
+        <CommandPalette open={commandPaletteOpen} onOpenChange={setCommandPaletteOpen} canMitigate={canWithdraw} />
 
-        <KeyboardShortcutsModal open={shortcutsModalOpen} onOpenChange={setShortcutsModalOpen} />
+        <KeyboardShortcutsModal open={shortcutsModalOpen} onOpenChange={setShortcutsModalOpen} canMitigate={canWithdraw} />
       </div>
     </Dialog>
   )

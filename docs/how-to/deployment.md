@@ -172,11 +172,13 @@ first, and can be filtered by creator. **Create token** takes a name, a scope, a
 source for an ingest token (it suggests `fastnetmon`, `fastnetmon-hostgroup`,
 `alertmanager`, the enabled bearer webhook adapters and the configured
 correlation sources), an optional POP and an optional expiry. The new token is
-shown once, with a copy button and ready-to-paste client setup that reads it
-from a file: the FastNetMon script's `/etc/default/prefixd` lines, an
-Alertmanager receiver with `credentials_file`, a webhook or Grafana header, or
-`prefixdctl` with `PREFIXD_TOKEN`, plus a `curl -K -` test that keeps the token
-off the command line. The dashboard keeps the secret only while that dialog is
+shown once, with a copy button and ready-to-paste client setup. The setup stores
+the token in `/etc/prefixd/<name>.token`, owned by the client's account with
+mode 0400, and reads it from there: the FastNetMon script's
+`/etc/default/prefixd` lines, a FastNetMon hostgroup shim, an Alertmanager
+receiver with `credentials_file`, a webhook or Grafana header, or `prefixdctl`
+with `PREFIXD_TOKEN`, plus a `curl -K -` test that keeps the token off the
+command line. The dashboard keeps the secret only while that dialog is
 open and asks before closing it uncopied. Revoking asks for confirmation naming
 the token, its source and its last use. The tab needs a signed-in Admin
 session; it is not shown to other roles, mTLS clients or `none` mode, and the

@@ -112,12 +112,12 @@ export default function AdminPage() {
   const { operator } = useAuth()
   const permissions = usePermissions()
   // Tokens need an Admin session; `none` mode and mTLS still list operators but cannot change them.
-  const [activeTab, setActiveTab] = useTabParam(permissions.canManageIdentity ? TABS_ALL : permissions.canManageUsers ? TABS_WITH_USERS : TABS_BASE)
+  const [activeTab, setActiveTab] = useTabParam(permissions.canManageIdentity ? TABS_ALL : permissions.canListOperators ? TABS_WITH_USERS : TABS_BASE)
   const { data: health, error: healthError, isLoading: healthLoading, isStale: healthStale, mutate: mutateHealth } = useHealthDetail()
   const { data: stats, error: statsError, isLoading: statsLoading, mutate: mutateStats } = useStats()
   const { data: safelist, error: safelistError, isLoading: safelistLoading, mutate: mutateSafelist } = useSafelist()
   const { data: pops, error: popsError, isLoading: popsLoading, mutate: mutatePops } = usePops()
-  const { data: operators, error: operatorsError, isLoading: operatorsLoading, mutate: mutateOperators } = useOperators(permissions.canManageUsers)
+  const { data: operators, error: operatorsError, isLoading: operatorsLoading, mutate: mutateOperators } = useOperators(permissions.canListOperators)
 
   const [newPrefix, setNewPrefix] = useState("")
   const [newReason, setNewReason] = useState("")
@@ -147,7 +147,7 @@ export default function AdminPage() {
     setSafelistError2(null)
     
     try {
-      await addSafelist(newPrefix.trim(), newReason.trim(), "dashboard")
+      await addSafelist(newPrefix.trim(), newReason.trim())
       await mutateSafelist()
       setNewPrefix("")
       setNewReason("")
@@ -270,7 +270,7 @@ export default function AdminPage() {
               <Badge variant="secondary">{safelist.length}</Badge>
             )}
           </TabsTrigger>
-          {permissions.canManageUsers && (
+          {permissions.canListOperators && (
             <TabsTrigger value="users">Users</TabsTrigger>
           )}
           {permissions.canManageIdentity && (
@@ -512,7 +512,7 @@ export default function AdminPage() {
         </TabsContent>
 
         {/* Users Tab (admin only) */}
-        {permissions.canManageUsers && (
+        {permissions.canListOperators && (
           <TabsContent value="users" className="mt-4">
             <Card>
               <CardHeader>

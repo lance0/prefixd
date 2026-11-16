@@ -140,7 +140,7 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
     setWithdrawError(null)
 
     try {
-      await withdrawMitigation(withdrawTarget.mitigation_id, reason, "dashboard")
+      await withdrawMitigation(withdrawTarget.mitigation_id, reason)
       mutate()
 
       return true
@@ -197,11 +197,7 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
     setBulkWithdrawError(null)
 
     try {
-      const result = await bulkWithdrawMitigations(
-        [...selectedIds],
-        reason,
-        "dashboard"
-      )
+      const result = await bulkWithdrawMitigations([...selectedIds], reason)
 
       setBulkWithdrawResults(result.results)
       setSelectedIds(new Set(result.results

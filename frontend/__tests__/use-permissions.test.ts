@@ -19,6 +19,20 @@ async function settledPermissions() {
 }
 
 describe("usePermissions", () => {
+  it.each([null, "admin"] as const)("lets mTLS list operators but never manage identities (session %s)", async (role) => {
+    session("mtls", role)
+
+    const perms = await settledPermissions()
+
+    expect(perms.canListOperators).toBe(true)
+    expect(perms.canManageIdentity).toBe(false)
+  })
+
+  it("keeps identity management to an Admin session in credentials mode", async () => {
+    session("credentials", "admin")
+    expect((await settledPermissions()).canManageIdentity).toBe(true)
+  })
+
   it("grants all permissions when auth is disabled", async () => {
     session("none", null)
 
@@ -29,7 +43,7 @@ describe("usePermissions", () => {
     expect(perms.isAdmin).toBe(true)
     expect(perms.isOperator).toBe(true)
     expect(perms.canWithdraw).toBe(true)
-    expect(perms.canManageUsers).toBe(true)
+    expect(perms.canListOperators).toBe(true)
     expect(perms.canReloadConfig).toBe(true)
     expect(perms.role).toBe("admin")
   })
@@ -44,7 +58,7 @@ describe("usePermissions", () => {
     expect(perms.isOperator).toBe(true)
     expect(perms.isViewer).toBe(true)
     expect(perms.canWithdraw).toBe(true)
-    expect(perms.canManageUsers).toBe(true)
+    expect(perms.canListOperators).toBe(true)
     expect(perms.canManageSafelist).toBe(true)
     expect(perms.canReloadConfig).toBe(true)
   })
@@ -58,7 +72,7 @@ describe("usePermissions", () => {
     expect(perms.isOperator).toBe(true)
     expect(perms.isViewer).toBe(true)
     expect(perms.canWithdraw).toBe(true)
-    expect(perms.canManageUsers).toBe(false)
+    expect(perms.canListOperators).toBe(false)
     expect(perms.canManageSafelist).toBe(false)
     expect(perms.canReloadConfig).toBe(false)
   })
@@ -72,7 +86,7 @@ describe("usePermissions", () => {
     expect(perms.isOperator).toBe(false)
     expect(perms.isViewer).toBe(true)
     expect(perms.canWithdraw).toBe(false)
-    expect(perms.canManageUsers).toBe(false)
+    expect(perms.canListOperators).toBe(false)
     expect(perms.canManageSafelist).toBe(false)
     expect(perms.canReloadConfig).toBe(false)
   })
@@ -91,7 +105,7 @@ describe("usePermissions", () => {
     expect(perms.isOperator).toBe(false)
     expect(perms.isViewer).toBe(false)
     expect(perms.canWithdraw).toBe(false)
-    expect(perms.canManageUsers).toBe(false)
+    expect(perms.canListOperators).toBe(false)
   })
 
   it.each(["health", "auth"])("waits for initial %s before allowing anonymous mode", async (pending) => {
@@ -102,7 +116,7 @@ describe("usePermissions", () => {
     expect(result.current.settled).toBe(false)
     expect(result.current.authDisabled).toBe(false)
     expect(result.current.canWithdraw).toBe(false)
-    expect(result.current.canManageUsers).toBe(false)
+    expect(result.current.canListOperators).toBe(false)
   })
 
   it.each([null, "viewer", "operator", "admin"] as const)("keeps %s permissions unchanged during a failed-health retry", async (role) => {

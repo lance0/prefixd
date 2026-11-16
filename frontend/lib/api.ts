@@ -642,14 +642,11 @@ export async function getMitigation(id: string): Promise<Mitigation> {
   return fetchApi<Mitigation>(`/v1/mitigations/${id}`)
 }
 
-export async function withdrawMitigation(
-  id: string,
-  reason: string,
-  operator: string
-): Promise<void> {
+/** The controller records the authenticated principal as the actor; the body names no operator. */
+export async function withdrawMitigation(id: string, reason: string): Promise<void> {
   await fetchApi(`/v1/mitigations/${id}/withdraw`, {
     method: "POST",
-    body: JSON.stringify({ reason, operator_id: operator }),
+    body: JSON.stringify({ reason }),
   })
 }
 
@@ -978,14 +975,10 @@ export interface BulkWithdrawResponse {
   results: BulkWithdrawResult[]
 }
 
-export async function bulkWithdrawMitigations(
-  ids: string[],
-  reason: string,
-  operator: string
-): Promise<BulkWithdrawResponse> {
+export async function bulkWithdrawMitigations(ids: string[], reason: string): Promise<BulkWithdrawResponse> {
   return fetchApi<BulkWithdrawResponse>("/v1/mitigations/withdraw", {
     method: "POST",
-    body: JSON.stringify({ mitigation_ids: ids, reason, operator_id: operator }),
+    body: JSON.stringify({ mitigation_ids: ids, reason }),
   })
 }
 
@@ -1001,13 +994,10 @@ export interface BulkAcknowledgeResponse {
   results: BulkAcknowledgeResult[]
 }
 
-export async function bulkAcknowledgeMitigations(
-  ids: string[],
-  operator: string
-): Promise<BulkAcknowledgeResponse> {
+export async function bulkAcknowledgeMitigations(ids: string[]): Promise<BulkAcknowledgeResponse> {
   return fetchApi<BulkAcknowledgeResponse>("/v1/mitigations/acknowledge", {
     method: "POST",
-    body: JSON.stringify({ mitigation_ids: ids, operator_id: operator }),
+    body: JSON.stringify({ mitigation_ids: ids }),
   })
 }
 
@@ -1157,14 +1147,10 @@ export async function getSafelist(): Promise<SafelistEntry[]> {
   return fetchApi<SafelistEntry[]>("/v1/safelist")
 }
 
-export async function addSafelist(
-  prefix: string,
-  reason: string,
-  operator: string
-): Promise<void> {
+export async function addSafelist(prefix: string, reason: string): Promise<void> {
   await fetchApi("/v1/safelist", {
     method: "POST",
-    body: JSON.stringify({ prefix, reason, operator_id: operator }),
+    body: JSON.stringify({ prefix, reason }),
   })
 }
 

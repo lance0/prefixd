@@ -1,6 +1,6 @@
 "use client"
 
-import { useId, useState, type FormEvent } from "react"
+import { useId, useRef, useState, type FormEvent } from "react"
 import { Copy, Plus, RefreshCw, Ban } from "lucide-react"
 import { toast } from "sonner"
 import { Card, CardContent, CardDescription, CardHeader } from "@/components/ui/card"
@@ -32,6 +32,9 @@ const SOURCE_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/
 const BUILT_IN_SOURCES = ["fastnetmon", "fastnetmon-hostgroup", "alertmanager"]
 const EXPIRY_DAYS = ["never", "30", "90", "365"] as const
 
+// Not a valid username (`^[A-Za-z0-9_-]{1,64}$`), so it never collides with a creator.
+const ANY_CREATOR = "*"
+
 type TokenState = "active" | "expired" | "revoked"
 
 function tokenState(token: ApiToken, now: number): TokenState {
@@ -45,26 +48,53 @@ export interface TokenSnippet {
   text: string
 }
 
+/** The account each known client runs as; it alone may read the token file. */
+function clientUser(token: Pick<ApiToken, "scope" | "source">): string {
+  if (token.scope === "ingest" && (token.source === "fastnetmon" || token.source === "fastnetmon-hostgroup")) return "fastnetmon"
+
+  if (token.scope === "ingest" && token.source === "alertmanager") return "alertmanager"
+
+  return "<the client's account>"
+}
+
 /**
  * Ready-to-paste setup for a new token's client (ADR 034 §13). Every snippet reads the token
- * from a file, so the secret itself never appears here: it is shown once, in its own field.
+ * from a file only the client's account can read, so the secret itself never appears here: it
+ * is shown once, in its own field.
  */
 export function tokenSnippets(token: Pick<ApiToken, "name" | "scope" | "source">, origin: string, bearerAdapters: string[] = []): TokenSnippet[] {
   const file = `/etc/prefixd/${token.name}.token`
-  const header = `printf 'header = "Authorization: Bearer %s"\\n' "$(cat ${file})" |`
+  // The file is the client's alone, so a test from a login shell reads it through sudo.
+  const header = `printf 'header = "Authorization: Bearer %s"\\n' "$(sudo cat ${file})" |`
+  const user = clientUser(token)
 
-  const snippets: TokenSnippet[] = [{
-    title: "Token file",
-    text: [
-      "# Paste the token, press Enter, then Ctrl-D. Only the client's user should read the file.",
-      `sudo sh -c 'umask 077 && cat > ${file}'`,
-    ].join("\n"),
-  }]
+  const fileSetup = [
+    "# Paste the token, press Enter, then Ctrl-D. Only CLIENT_USER can read the file.",
+    `CLIENT_USER="${user}"`,
+    "sudo install -d -m 0755 /etc/prefixd",
+    `sudo sh -c 'umask 077 && cat > ${file}'`,
+    `sudo chown "$CLIENT_USER" ${file}`,
+    `sudo chmod 0400 ${file}`,
+  ]
+
+  if (token.scope === "ingest" && token.source === "alertmanager") {
+    fileSetup.splice(1, 0,
+      "# CLIENT_USER is the account Alertmanager runs as: prometheus on Debian and Ubuntu packages.",
+      "# In a container, mount the file read-only and owned by the container's user (nobody in the",
+      "# official image); never make it world-readable.")
+  }
+
+  const snippets: TokenSnippet[] = [{ title: "Token file", text: fileSetup.join("\n") }]
 
   if (token.scope !== "ingest") {
     snippets.push({
       title: "prefixdctl",
-      text: [`export PREFIXD_API=${origin}`, `export PREFIXD_TOKEN="$(cat ${file})"`, "prefixdctl status"].join("\n"),
+      text: [
+        "# As CLIENT_USER, which owns the token file:",
+        `export PREFIXD_API=${origin}`,
+        `export PREFIXD_TOKEN="$(cat ${file})"`,
+        "prefixdctl status",
+      ].join("\n"),
     }, {
       title: "Test with curl",
       text: [
@@ -81,6 +111,16 @@ export function tokenSnippets(token: Pick<ApiToken, "name" | "scope" | "source">
     snippets.push({
       title: "FastNetMon notify script (/etc/default/prefixd)",
       text: [`PREFIXD_API="${origin}"`, `PREFIXD_TOKEN_FILE="${file}"`].join("\n"),
+    })
+  } else if (token.source === "fastnetmon-hostgroup") {
+    snippets.push({
+      title: "Hostgroup shim, one event per attacked network",
+      text: [
+        "# As fastnetmon. Each network needs its own event ID.",
+        `printf 'header = "Authorization: Bearer %s"\\n' "$(cat ${file})" |`,
+        `  curl -K - -X POST "${origin}/v1/events" -H "Content-Type: application/json" \\`,
+        `    -d '{"event_id": "<unique id>", "timestamp": "<RFC 3339 time>", "source": "fastnetmon-hostgroup", "victim_ip": "<network CIDR>", "vector": "udp_flood", "confidence": 0.9}'`,
+      ].join("\n"),
     })
   } else if (token.source === "alertmanager") {
     snippets.push({
@@ -139,7 +179,9 @@ export function ApiTokensPanel() {
   const [revokeTarget, setRevokeTarget] = useState<ApiToken | null>(null)
   const [revokeError, setRevokeError] = useState<string | null>(null)
   const [isRevoking, setIsRevoking] = useState(false)
-  const [creator, setCreator] = useState("all")
+  const [creator, setCreator] = useState(ANY_CREATOR)
+  const createButton = useRef<HTMLButtonElement | null>(null)
+  const revoked = useRef(false)
   const now = Date.now()
 
   const bearerAdapters = (correlation?.webhook_adapters ?? [])
@@ -153,7 +195,7 @@ export function ApiTokensPanel() {
   const order: Record<TokenState, number> = { active: 0, expired: 1, revoked: 2 }
 
   const rows = (tokens ?? [])
-    .filter((token) => creator === "all" || token.created_by === creator)
+    .filter((token) => creator === ANY_CREATOR || token.created_by === creator)
     .sort((a, b) => order[tokenState(a, now)] - order[tokenState(b, now)] || a.name.localeCompare(b.name))
 
   const handleRevoke = async () => {
@@ -164,6 +206,8 @@ export function ApiTokensPanel() {
     try {
       await revokeApiToken(revokeTarget.name)
       toast.success(`Token ${revokeTarget.name} revoked`)
+      // Its revoke button disappears, so focus moves to the next action instead.
+      revoked.current = true
       setRevokeTarget(null)
       await mutate()
     } catch (e) {
@@ -181,7 +225,7 @@ export function ApiTokensPanel() {
             Named credentials for detectors and automation. An ingest token posts events only as its
             source; operator and admin tokens act as those roles. Revoking takes effect on the next request.
           </CardDescription>
-          <Button size="sm" onClick={() => setCreateOpen(true)}>
+          <Button ref={createButton} size="sm" onClick={() => setCreateOpen(true)}>
             <Plus className="size-4" aria-hidden="true" />
             Create token
           </Button>
@@ -194,7 +238,7 @@ export function ApiTokensPanel() {
             <Select value={creator} onValueChange={setCreator}>
               <SelectTrigger id="token-creator" className="h-8 w-48"><SelectValue /></SelectTrigger>
               <SelectContent>
-                <SelectItem value="all">Anyone</SelectItem>
+                <SelectItem value={ANY_CREATOR}>Anyone</SelectItem>
                 {creators.map((name) => <SelectItem key={name} value={name}>{name}</SelectItem>)}
               </SelectContent>
             </Select>
@@ -289,7 +333,12 @@ export function ApiTokensPanel() {
       />
 
       <AlertDialog open={revokeTarget !== null} onOpenChange={(open) => { if (!open && !isRevoking) setRevokeTarget(null) }}>
-        <AlertDialogContent>
+        <AlertDialogContent onCloseAutoFocus={(event) => {
+          if (!revoked.current) return
+          revoked.current = false
+          event.preventDefault()
+          createButton.current?.focus()
+        }}>
           <AlertDialogHeader>
             <AlertDialogTitle>Revoke {revokeTarget?.name}?</AlertDialogTitle>
             <AlertDialogDescription asChild>
@@ -431,7 +480,7 @@ function CreateTokenDialog({ open, onOpenChange, sources, bearerAdapters, onCrea
               <Label htmlFor={`${id}-secret`}>Token</Label>
               <div className="flex gap-2">
                 <Input id={`${id}-secret`} readOnly value={created.token} className="h-9 font-mono text-xs" spellCheck={false} autoComplete="off" onFocus={(event) => event.currentTarget.select()} />
-                <Button type="button" size="sm" className="h-9 shrink-0" onClick={async () => {
+                <Button type="button" size="sm" className="h-9 shrink-0" autoFocus onClick={async () => {
                   if (await copy(created.token, "Token")) {
                     setCopied(true)
                     setConfirmDiscard(false)
@@ -452,7 +501,7 @@ function CreateTokenDialog({ open, onOpenChange, sources, bearerAdapters, onCrea
                       <Copy className="size-3.5" aria-hidden="true" />
                     </Button>
                   </div>
-                  <pre className="overflow-x-auto rounded-md border bg-muted/40 p-2 font-mono text-xs">{snippet.text}</pre>
+                  <pre className="whitespace-pre-wrap break-all rounded-md border bg-muted/40 p-2 font-mono text-xs">{snippet.text}</pre>
                 </div>
               ))}
             </section>
