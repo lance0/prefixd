@@ -149,6 +149,17 @@ impl ReconciliationLoop {
             .repo
             .active_mitigation_inventory(self.owning_pop())
             .await?;
+        // Publish only a complete read, including zero. An unreadable database
+        // must not erase evidence needed to alert on lost renewal.
+        if let Some(pop) = self.owning_pop() {
+            let count = rows
+                .iter()
+                .filter(|row| row.pop == pop && crate::domain::leased_by(row, lease.owner()))
+                .count();
+            crate::observability::metrics::LEASED_MITIGATIONS_ACTIVE
+                .with_label_values(&[pop])
+                .set(count as f64);
+        }
         lease.observe_intent_expiry(crate::domain::leased_expiry(&rows, lease.owner()));
         Ok(())
     }
@@ -5624,6 +5635,66 @@ mod tests {
             ..live_config()
         };
         blackhole_reconciler(repo, speaker, config, false).with_lease(lease)
+    }
+
+    #[tokio::test]
+    async fn leased_alert_count_retains_failed_reads_and_clears_after_complete_empty_read() {
+        use crate::observability::metrics::LEASED_MITIGATIONS_ACTIVE;
+        let _metrics_guard = RECONCILIATION_TEST_LOCK.lock().await;
+        let repo = Arc::new(MockRepository::new());
+        let lease = Arc::new(crate::domain::LeaseKeeper::new(LEASE_OWNER.into(), 60));
+        let reconciler =
+            leased_reconciler(repo.clone(), Arc::new(FaultyBlackholes::default()), lease);
+        LEASED_MITIGATIONS_ACTIVE.reset();
+        repo.fail_active_reads.store(true, SeqCst);
+        assert!(reconciler.observe_leased_intent().await.is_err());
+        assert!(
+            !crate::observability::gather_metrics().contains("prefixd_leased_mitigations_active{")
+        );
+        repo.fail_active_reads.store(false, SeqCst);
+        let rule = leased_rule_row("192.0.2.10/32");
+        let blackhole = leased_row("192.0.2.1");
+        let unleased = action_mitigation("192.0.2.11/32", FlowSpecAction::discard());
+        let mut pending = leased_rule_row("192.0.2.12/32");
+        pending.status = MitigationStatus::Pending;
+        let mut dry_run = leased_rule_row("192.0.2.13/32");
+        dry_run.origin_mode = Some(crate::config::OperationMode::DryRun);
+        let mut foreign_owner = leased_rule_row("192.0.2.14/32");
+        foreign_owner.action_params.injection_owner = "another-owner".into();
+        let mut foreign_pop = leased_rule_row("192.0.2.15/32");
+        foreign_pop.pop = "another-pop".into();
+        for row in [
+            &rule,
+            &blackhole,
+            &unleased,
+            &pending,
+            &dry_run,
+            &foreign_owner,
+            &foreign_pop,
+        ] {
+            repo.insert_mitigation(row).await.unwrap();
+        }
+        reconciler.observe_leased_intent().await.unwrap();
+        let count = LEASED_MITIGATIONS_ACTIVE.with_label_values(&["test"]);
+        assert_eq!(count.get(), 2.0);
+        repo.fail_active_reads.store(true, SeqCst);
+        assert!(reconciler.observe_leased_intent().await.is_err());
+        assert_eq!(
+            count.get(),
+            2.0,
+            "unknown inventory retains the last complete count"
+        );
+        repo.fail_active_reads.store(false, SeqCst);
+        for mut row in [rule, blackhole] {
+            row.withdraw(None);
+            repo.update_mitigation(&row).await.unwrap();
+        }
+        reconciler.observe_leased_intent().await.unwrap();
+        assert_eq!(
+            count.get(),
+            0.0,
+            "unleased, foreign and simulated rows never count"
+        );
     }
 
     /// A successful active-intent read bounds renewal to the latest leased

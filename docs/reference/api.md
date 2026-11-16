@@ -3773,6 +3773,24 @@ or `standby`) and `0` for
 the others, matching health detail's `speaker.lease.state` after each
 renewal tick and state change. Both series exist with zero values in every deployment.
 
+`prefixd_leased_mitigations_active{pop}` counts active enforced FlowSpec and
+blackhole intent recorded under this controller's injection owner in the last
+complete inventory. It is absent before the first successful read, explicitly
+zero after a successful empty read, and retained after a failed read. Pending,
+dry-run, unleased and foreign-owner rows are excluded. It counts database
+intent, which can include overdue rows awaiting cleanup, not installed routes.
+
+`prefixd_injection_lease_renewal_overdue` is refreshed on every metrics scrape
+without database or speaker calls. It is `1` when the keeper has no generation,
+renewal is disabled or stopped at its TTL bound, or two configured renewal
+intervals elapsed since the last successful add, renewal or live-lease adoption.
+Elapsed time uses the monotonic clock, including when the renewal task is
+stalled. It is `0` when no lease keeper is configured. A live-lease adoption
+proves the generation exists but does not measure its remote deadline; this
+metric reports local renewal risk, not remaining speaker lease time. The
+[leased outage alert](../how-to/grafana.md#availability-alerts) combines it with
+leased intent and scrape health, preserving instance and POP labels.
+
 Series labelled `action_type` (`prefixd_mitigations_active`,
 `prefixd_mitigations_created_total`, `prefixd_mitigations_expired_total` and
 `prefixd_mitigations_withdrawn_total`) use `blackhole` for blackholes. Blackhole

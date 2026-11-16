@@ -75,6 +75,17 @@ copies of those logs as credentials: restrict access and reset affected
 operators' passwords using an Admin session. Changing a password also invalidates
 that operator's existing sessions. Upgrading does not remove old log copies.
 
+## Leased mitigation outage alert
+
+Update and reload the bundled `grafana/prometheus-alerts.yml` in Prometheus,
+and route `PrefixdLeasedMitigationsAtRisk` to the on-call operator. The rule
+uses two new controller metrics and needs the upgraded controller. Keep the
+scrape job named `prefixd`, with a stable `instance` per target and the shipped
+15-second scrape and evaluation intervals. The alert distinguishes leased
+intent from unleased rules and warns about failed scrapes or overdue renewal;
+it does not prove router enforcement. See [availability alerts](grafana.md#availability-alerts)
+for its one-hour outage lookback and notification timing limits.
+
 ## Unknown configuration keys
 
 The release that introduces this check ignores keys it does not recognize after

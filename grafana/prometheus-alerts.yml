@@ -1,6 +1,6 @@
 # prefixd availability alerts. TTL expiry, withdrawals and reconciliation need
 # a running controller that holds its POP's fence; routes already announced
-# stay on the speaker while it is down. See docs/how-to/grafana.md.
+# may lapse when leased or remain when unleased. See docs/how-to/grafana.md.
 groups:
   - name: prefixd-availability
     rules:
@@ -13,8 +13,37 @@ groups:
           summary: "prefixd is down"
           description: >-
             {{ $labels.instance }} has failed scrapes for 2 minutes. TTL expiry
-            and withdrawals stop while it is down, and announced routes stay on
-            the speaker.
+            and withdrawals stop while it is down. Leased routes may lapse;
+            unleased routes can remain on the speaker.
+
+      # Keep the last complete leased count through failed scrapes. Explicit
+      # zero samples prevent an old mitigation from firing after it ended.
+      # A healthy process checks renewal time on each scrape even if its
+      # renewal task has stalled. The POP comes from the inventory series.
+      - alert: PrefixdLeasedMitigationsAtRisk
+        expr: |
+          last_over_time(prefixd_leased_mitigations_active{job="prefixd"}[1h]) > 0
+          and on (job, instance)
+          (
+            up{job="prefixd"} == 0
+            or
+            (
+              up{job="prefixd"} == 1
+              and on (job, instance) prefixd_injection_lease_renewal_overdue == 1
+            )
+          )
+        for: 15s
+        labels:
+          severity: critical
+        annotations:
+          summary: "Leased mitigations may lapse"
+          description: >-
+            prefixd on {{ $labels.instance }} at POP {{ $labels.pop }} last
+            reported {{ $value }} active leased mitigation(s), but its scrape
+            is failing or lease renewal is overdue. The speaker removes leased
+            routes when their lease expires. Restore the controller and check
+            its database, lease health and speaker state. This is retained
+            intent and renewal evidence, not proof of router enforcement.
 
       - alert: PrefixdNotReady
         expr: max by (job) (prefixd_controller_fence_active) == 0
@@ -52,8 +81,9 @@ groups:
           summary: "Blackholes may outlive an inactive prefixd"
           description: >-
             prefixd had active blackholes when its last active controller
-            stopped. They stay announced until prefixd returns or an operator
-            withdraws them on the speaker. Restart prefixd: it expires overdue
+            stopped. Unleased blackholes can stay announced until prefixd
+            returns or an operator withdraws them; leased blackholes may lapse.
+            Restart prefixd: it expires overdue
             blackholes, and startup reconciliation removes routes left by
             terminal rows. If you withdraw by hand on the speaker, also
             withdraw in prefixd once it returns, or reconciliation re-announces
