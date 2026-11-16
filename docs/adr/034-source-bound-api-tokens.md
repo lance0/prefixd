@@ -307,7 +307,8 @@ shown to Admins only:
   ready-to-paste snippet for the chosen source:
   - the FastNetMon script's `/etc/default/prefixd` lines (`PREFIXD_API`,
     `PREFIXD_TOKEN`);
-  - Alertmanager `http_config.authorization` with `credentials_file`;
+  - Alertmanager's webhook receiver authorization settings, in the form that
+    section 9 records once verified;
   - a webhook `Authorization: Bearer` header;
   - a `curl` test.
 
@@ -412,7 +413,59 @@ that posts total-hostgroup events to `/v1/events`, and the native hostgroup
 adapter when it lands, use an ingest token bound to the prefix-allowlisted
 source. A separate token per shim keeps revocation independent.
 
-### 9. What the interim patch becomes
+### 9. Credential delivery per detector
+
+The controller accepts an ingest credential in one of two forms:
+
+- **Bearer header (preferred):** `Authorization: Bearer prefixd_...`, carrying
+  an ingest token.
+- **HMAC signature:** the generic webhook adapter's existing per-adapter HMAC
+  (ADR 020). The adapter's secret is the credential, bound to the adapter
+  name. Use it for senders that sign request bodies.
+
+The controller does not accept a token in a query string, URL path or request
+body. Those leak through access logs, proxy logs, browser history and error
+reports, and the dashboard would have to display a secret-bearing URL.
+Whether to accept `Authorization: Basic` with the token as the password, for
+senders that support only basic auth, is decided once the detector
+capabilities below are verified. It is the same secret in a different header
+encoding, so it is no weaker than a bearer header.
+
+| Integration | Route and source | How it presents the credential |
+| --- | --- | --- |
+| FastNetMon Community | `/v1/events`, `fastnetmon` | The bundled notify script sends `Authorization: Bearer $PREFIXD_TOKEN` from `/etc/default/prefixd` (mode 0600). The script runs on the detector host, so FastNetMon itself never needs to carry a secret. |
+| FastNetMon Advanced, host alerts | `/v1/signals/fastnetmon`, `fastnetmon` | TODO: unverified. Confirm, with a cited source, whether FastNetMon Advanced's JSON callback can send a custom `Authorization` header, basic auth or a signature. If it can send a header, use a bearer ingest token. If it cannot, use the relay below. |
+| FastNetMon Advanced, total-hostgroup alerts | the native hostgroup adapter when it lands, or a shim to `/v1/events`, bound to the prefix-allowlisted source | Same callback mechanism as host alerts, with the same TODO. Until the native adapter exists, the shim is a relay that holds its own ingest token. |
+| Alertmanager | `/v1/signals/alertmanager`, `alertmanager` | TODO: unverified. Confirm, with a cited source, the webhook receiver's authorization settings: a bearer credential, whether it can be read from a file, and basic auth. If a bearer credential is supported, the dashboard snippet uses it, preferring a file over an inline secret. |
+| Generic webhook, `auth.type: hmac` | `/v1/signals/webhook/{name}`, the adapter name | The sender signs the body with the adapter's secret, held in the environment variable named by `secret_env`. This is unchanged and needs no token. Which vendors sign, and how, is recorded per vendor in the webhook guide. |
+| Generic webhook, `auth.type: bearer` | the same | An ingest token bound to the adapter name, sent as `Authorization: Bearer`. A token bound to another source gets 403. |
+| Generic webhook, `auth.type: none` | the same | Refused outside `none` mode (section 3). |
+| Corroborating pushers | `/v1/signals/corroborator`, the configured corroborating source | A bearer ingest token bound to that source. |
+| `prefixdctl` | the admin and operator API | `--token` or the `PREFIXD_API_TOKEN` client variable sends a bearer operator or admin token. `send-corroborator` needs an ingest token bound to its `--source`, or an admin token. `tokens` uses the local database path (section 6). |
+
+**A sender that cannot carry a per-detector secret** never gets a weaker
+controller-side path, such as a source trusted from the network address, an
+unauthenticated route or a shared default token. It uses one of these, in
+order of preference:
+
+1. **A generic webhook adapter with HMAC**, if the sender can sign.
+2. **A relay next to the detector** that receives the sender's callback on
+   loopback or a private interface, adds `Authorization: Bearer`, and forwards
+   it to the controller over TLS. The bundled FastNetMon notify script is this
+   pattern, and a prefix shim is another. The relay host stores the token in a
+   0600 file. The relay accepts callbacks only from the detector's address and
+   logs no headers.
+3. **A reverse proxy in front of the controller** that injects the header for
+   one route, and only for the detector's source address over a private
+   network. This ties the credential to a network location. The proxy
+   configuration then holds the secret, so it gets the same file permissions
+   and secret handling. Use it only when the first two options are not
+   possible, and record that choice in the deployment's notes.
+
+If a detector can do none of these, it cannot be an authenticated prefixd
+source. It may still alert a human, who acts from the dashboard.
+
+### 10. What the interim patch becomes
 
 The closed interim patch is not merged. Its parts move into the implementation:
 
@@ -428,7 +481,7 @@ The closed interim patch is not merged. Its parts move into the implementation:
 - **Upgrade notes.** Its skeleton becomes the release's "Source-bound ingest
   tokens" upgrade section.
 
-### 10. Out of scope
+### 11. Out of scope
 
 - **Certificate-to-role mapping for mTLS**, including certificate-to-source
   binding through `authorize_ingest`.
@@ -600,3 +653,7 @@ The ADR chooses a default for each of these:
    alternative also offers an admin API transport for remote management.
 7. **Expiry default.** The chosen default is none. The alternative is a
    mandatory or default expiry for operator and admin tokens only.
+8. **Basic auth.** Decide whether to accept `Authorization: Basic` carrying
+   the token as the password. This depends on the outstanding detector
+   capability checks in section 9. The default is not to accept it until a
+   supported detector needs it.
