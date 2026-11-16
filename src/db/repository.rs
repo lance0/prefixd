@@ -663,7 +663,23 @@ impl RepositoryTrait for Repository {
         source: &str,
         external_id: &str,
     ) -> Result<Option<AttackEvent>> {
-        let event = sqlx::query_as::<_, AttackEvent>(
+        // Row locking linearizes a retry with an earlier admission's COMMIT.
+        // Bound this new wait, including pool acquisition, and let a dropped
+        // BEGIN finish so its detached result rolls back normally.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let pool = self.pool.clone();
+            let mut tx = tokio::spawn(async move {
+                pool.begin_with("BEGIN ISOLATION LEVEL READ COMMITTED").await
+            })
+            .await
+            .map_err(|_| sqlx::Error::PoolTimedOut)??;
+            sqlx::query("SET LOCAL lock_timeout = '3s'")
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query("SET LOCAL statement_timeout = '4s'")
+                .execute(&mut *tx)
+                .await?;
+            let event = sqlx::query_as::<_, AttackEvent>(
             r#"
             SELECT event_id, external_event_id, source, event_timestamp, ingested_at,
                    victim_ip, vector, protocol, bps, pps, top_dst_ports_json, top_src_ports_json, confidence,
@@ -677,9 +693,13 @@ impl RepositoryTrait for Repository {
         )
         .bind(source)
         .bind(external_id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await?;
-        Ok(event)
+            tx.commit().await?;
+            Ok::<_, PrefixdError>(event)
+        })
+        .await
+        .map_err(|_| sqlx::Error::PoolTimedOut)?
     }
 
     async fn list_events_filtered(

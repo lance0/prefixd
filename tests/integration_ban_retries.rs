@@ -689,3 +689,106 @@ async fn postgres_outcome_write_is_bounded_while_event_row_stays_locked() {
     held.rollback().await.unwrap();
     assert_eq!(stored(&ctx, "held-outcome").await.outcome, before.outcome);
 }
+
+#[tokio::test]
+async fn postgres_duplicate_lookup_is_bounded_while_matching_event_stays_locked() {
+    let ctx = context().await;
+    let (status, accepted) = post(ctx.state.clone(), event("held-lookup")).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{accepted}");
+    let before = stored(&ctx, "held-lookup").await;
+    let mut held = ctx.pool.begin().await.unwrap();
+    let blocker: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *held)
+        .await
+        .unwrap();
+    sqlx::query("SELECT event_id FROM events WHERE event_id = $1 FOR UPDATE")
+        .bind(before.event_id)
+        .execute(&mut *held)
+        .await
+        .unwrap();
+    let repo = ctx.repo.clone();
+    // Shorter than the repository's outer five-second deadline: removing the
+    // server bounds must fail this watchdog, not succeed through that fallback.
+    let watchdog = tokio::time::Instant::now() + Duration::from_millis(4500);
+    let reading = tokio::spawn(async move {
+        repo.find_ban_event_by_external_id("retry-test", "held-lookup")
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+                WHERE $1 = ANY(pg_blocking_pids(pid)) AND query LIKE '%FROM events%FOR UPDATE%')",
+            )
+            .bind(blocker)
+            .fetch_one(&ctx.pool)
+            .await
+            .unwrap();
+            if waiting {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("duplicate lookup reached the held event-row lock");
+    let failed = tokio::time::timeout_at(watchdog, reading)
+        .await
+        .expect("server deadline returned while matching event remained locked")
+        .unwrap()
+        .unwrap_err();
+    let prefixd::error::PrefixdError::Database(sqlx::Error::Database(error)) = failed else {
+        panic!("expected PostgreSQL timeout, got {failed}");
+    };
+    assert!(matches!(error.code().as_deref(), Some("55P03" | "57014")));
+
+    let (status, failed) = tokio::time::timeout(
+        Duration::from_secs(6),
+        post(ctx.state.clone(), event("held-lookup")),
+    )
+    .await
+    .expect("HTTP lookup failure releases its lifecycle turn");
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{failed}");
+    assert!(failed.get("event_outcome").is_none());
+    assert!(ctx.state.mitigation_lock.try_lock().is_ok());
+    let mut independent = event("independent-of-held-event");
+    independent["victim_ip"] = json!("203.0.113.11");
+    let (status, accepted) =
+        tokio::time::timeout(Duration::from_secs(5), post(ctx.state.clone(), independent))
+            .await
+            .expect("independent admission progresses while the old event stays locked");
+    assert_eq!(status, StatusCode::ACCEPTED, "{accepted}");
+    held.rollback().await.unwrap();
+    assert_eq!(stored(&ctx, "held-lookup").await.outcome, before.outcome);
+}
+
+#[tokio::test]
+async fn postgres_duplicate_lookup_bounds_pool_acquisition() {
+    let ctx = context().await;
+    let mut held = Vec::new();
+    for _ in 0..10 {
+        held.push(ctx.pool.acquire().await.unwrap());
+    }
+    assert_eq!(ctx.pool.num_idle(), 0);
+    let failed = tokio::time::timeout(
+        Duration::from_secs(6),
+        ctx.repo
+            .find_ban_event_by_external_id("retry-test", "pool-held"),
+    )
+    .await
+    .expect("outer lookup deadline bounds exhausted pool acquisition")
+    .unwrap_err();
+    assert!(matches!(
+        failed,
+        prefixd::error::PrefixdError::Database(sqlx::Error::PoolTimedOut)
+    ));
+    assert_eq!(
+        ctx.pool.num_idle(),
+        0,
+        "connections were held until after the deadline"
+    );
+    drop(held);
+    tokio::time::timeout(Duration::from_secs(5), ctx.pool.close())
+        .await
+        .expect("detached BEGIN result is cleaned up after cancellation");
+}
