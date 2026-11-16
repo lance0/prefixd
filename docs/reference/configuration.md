@@ -1596,8 +1596,10 @@ to alert destinations as needed.
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `PREFIXD_TOKEN` | API token for prefixdctl | None |
-| `PREFIXD_API` | API URL for prefixdctl | `http://127.0.0.1` |
-| `PREFIXD_API_TOKEN` | No longer read. The controller logs a warning naming it, `prefixd --check` prints one, and prefixdctl warns when it is set without `PREFIXD_TOKEN`; none of them refuses | None |
+| `PREFIXD_TOKEN_FILE` | File holding prefixdctl's API token, such as `/dev/stdin`; conflicts with `PREFIXD_TOKEN` | None |
+| `PREFIXD_API` | API URL for prefixdctl; the Compose controller services set `http://127.0.0.1:8080` | `http://127.0.0.1` |
+| `PREFIXD_API_TOKEN` | No longer read. The controller logs a warning naming it, `prefixd --check` prints one, and prefixdctl warns when it is set without `PREFIXD_TOKEN` or `PREFIXD_TOKEN_FILE`; none of them refuses | None |
+| `POSTGRES_PASSWORD` | Compose only: the PostgreSQL password, required; `scripts/compose-bootstrap.sh env` writes one into `.env` | None; Compose refuses to start |
 | `RUST_LOG` | Complete tracing filter override | Configured filter; default `info` quiets PostgreSQL notices |
 | `DATABASE_URL` | PostgreSQL connection | Config value |
 
