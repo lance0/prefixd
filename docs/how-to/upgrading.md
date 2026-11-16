@@ -23,7 +23,10 @@ From v0.23.0, follow [v0.23.0 → 0.23.1](#v0230--0231) first; from v0.22.1,
 Migration 026 adds an internal retry boundary to `events`, using a constant
 false default without rewriting existing rows. New detector bans retain their
 admitted mitigation IDs atomically and can resume an interrupted attempt with
-the same event ID. The schema version becomes 26; older binaries refuse it.
+the same event ID. The schema version becomes 26. Stop every older controller
+before migration and keep it off the upgraded database; v0.27.0 has no
+newer-schema guard. Follow the
+[database downgrade procedure](#database-schema-version-and-downgrade).
 
 An older incomplete or failed attempt may have extended a mitigation before
 its outcome was recorded, then lost that association to a later extension.
