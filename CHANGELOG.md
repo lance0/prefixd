@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrade notes
 
+- Reload the bundled Prometheus rules to enable
+  `PrefixdLeasedMitigationsAtRisk`, which uses new leased-intent and renewal
+  metrics from the upgraded controller. Keep 15-second scrape and evaluation
+  intervals; see [leased outage alert](docs/how-to/upgrading.md#leased-mitigation-outage-alert).
 - **Compose needs `POSTGRES_PASSWORD`.** `docker-compose.yml` no longer falls
   back to the published `prefixd_secret`; every Compose command refuses to run
   until the variable is set. Before upgrading an existing Compose stack, put
@@ -320,6 +324,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `PrefixdLeasedMitigationsAtRisk` alerts per controller instance and POP when
+  scrapes fail or renewal is overdue while leased FlowSpec or blackhole intent
+  was active. It retains the last complete count through database failures,
+  excludes unleased and dry-run rows, and checks renewal time on each scrape
+  even if the renewal task stalls. The outage lookback is one hour; the alert
+  reports renewal risk, not router enforcement.
 - `prefixdctl tokens verify` reads a token secret from `--token-file` or stdin,
   never the command line, looks it up in the local database and prints the
   token's name, scope, source, POP and status without the secret or its hash.
