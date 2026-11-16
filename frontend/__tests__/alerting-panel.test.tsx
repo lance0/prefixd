@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react"
+import { act, cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { AlertingConfigPanel } from "@/components/dashboard/alerting-config-panel"
 import type { AlertingDestination } from "@/lib/api"
@@ -81,6 +81,32 @@ it("matches edit-mode results to the saved destination each card came from", asy
   expect(screen.queryByText("pagerduty test failure")).toBeNull()
   expect(within(destinationRow("Discord")).queryByText("slack test failure")).toBeNull()
   expect(within(destinationRow("Discord")).queryByText(/test failure/)).toBeNull()
+})
+
+it("shows no result on draft cards after the saved configuration changes under the draft", async () => {
+  let saved = destinations
+  controller.route("GET", "/v1/config/alerting", () => json({ destinations: saved, events: [] }))
+  // The saved configuration now holds only Slack, at index 0.
+  controller.route("POST", "/v1/config/alerting/test", () =>
+    json({ results: [{ index: 0, destination: "slack", status: "error", error: "slack test failure" }] }),
+  )
+  const app = renderApp(<AlertingConfigPanel />)
+  fireEvent.click(await screen.findByRole("button", { name: "Edit" }))
+  // Another operator removes PagerDuty while this draft is open.
+  saved = [destinations[1]!]
+  await act(async () => {
+    await app.mutate()("alerting-config")
+  })
+  await waitFor(() => expect(controller.calls("GET", "/v1/config/alerting")).toHaveLength(2))
+
+  fireEvent.click(screen.getByRole("button", { name: "Test" }))
+  await waitFor(() => expect(controller.calls("POST", "/v1/config/alerting/test")).toHaveLength(1))
+  await settle()
+
+  // The draft still holds both cards, and neither saved position is trusted:
+  // the PagerDuty card's old index 0 now names Slack.
+  expect(within(destinationRow("PagerDuty")).queryByText("slack test failure")).toBeNull()
+  expect(screen.queryByText("slack test failure")).toBeNull()
 })
 
 it("discards an in-flight test result when configuration is saved", async () => {

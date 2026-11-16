@@ -319,18 +319,23 @@ export function AlertingConfigPanel() {
   const [testError, setTestError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   const testGeneration = useRef(0)
-  const configIdentity = JSON.stringify(data)
-  useEffect(() => {
-    testGeneration.current += 1
-    setTestResults(null)
-    setTestError(null)
-  }, [configIdentity])
 
   // Draft state for editing
   const [draft, setDraft] = useState<DraftDestination[] | null>(null)
   const [draftEvents, setDraftEvents] = useState<string[] | null>(null)
   const [editingIndex, setEditingIndex] = useState<number | null>(null)
   const [addingType, setAddingType] = useState<DestType | null>(null)
+
+  const configIdentity = JSON.stringify(data)
+  useEffect(() => {
+    testGeneration.current += 1
+    setTestResults(null)
+    setTestError(null)
+    // The saved configuration changed under an open draft, so its cards'
+    // saved positions may now name other destinations. Keep the edits, but
+    // treat every card like an added one: no result until a new draft.
+    setDraft((prev) => prev?.map((dest) => ({ ...dest, _source: undefined })) ?? null)
+  }, [configIdentity])
 
   const isEditing = draft !== null
 
