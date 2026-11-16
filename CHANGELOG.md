@@ -565,6 +565,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Skip unrelated live-mitigation inventory for an unban with no targets while
+  preserving its durable empty replay record.
+
 - Keep an unapplied detector ban retryable while withdrawal is pending, including
   when an earlier rule has a permanent refusal. Alertmanager and generic
   webhooks return `503` for ban-side server failures and deduplicate successful
