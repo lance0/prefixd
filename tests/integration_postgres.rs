@@ -8461,7 +8461,7 @@ mod api_tokens {
     #[tokio::test]
     async fn cli_verifies_a_token_secret_without_echoing_it() {
         let ctx = TestContext::new().await;
-        let verify = |args: Vec<String>, stdin: String| {
+        let verify = |args: Vec<String>, stdin: String, env: Vec<(&'static str, String)>| {
             let url = ctx.state.settings.storage.connection_string.clone();
             async move {
                 let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_prefixdctl"))
@@ -8469,6 +8469,7 @@ mod api_tokens {
                     .env("DATABASE_URL", url)
                     .env_remove("PREFIXD_TOKEN")
                     .env_remove("PREFIXD_TOKEN_FILE")
+                    .envs(env)
                     .stdin(std::process::Stdio::piped())
                     .stdout(std::process::Stdio::piped())
                     .stderr(std::process::Stdio::piped())
@@ -8522,6 +8523,7 @@ mod api_tokens {
         let (code, stdout, stderr) = verify(
             args(&["--format", "json", "tokens", "verify"]),
             format!("{ingest}\n"),
+            vec![],
         )
         .await;
         assert_eq!(code, Some(0), "{stderr}");
@@ -8538,6 +8540,7 @@ mod api_tokens {
         let (code, stdout, stderr) = verify(
             args(&["tokens", "verify", "--token-file", file.to_str().unwrap()]),
             String::new(),
+            vec![],
         )
         .await;
         assert_eq!(code, Some(0), "{stderr}");
@@ -8546,6 +8549,29 @@ mod api_tokens {
             "Token 'cli-verify': scope operator, source -, pop any, active"
         );
         assert!(!leaks(&operator, &(stdout + &stderr)));
+
+        // A global API token file is not read for local commands: with
+        // `/dev/stdin` it would consume the secret meant for `tokens verify`,
+        // and an unreadable one must not block local management.
+        let (code, stdout, stderr) = verify(
+            args(&["tokens", "verify"]),
+            format!("{ingest}\n"),
+            vec![("PREFIXD_TOKEN_FILE", "/dev/stdin".to_owned())],
+        )
+        .await;
+        assert_eq!(code, Some(0), "{stderr}");
+        assert!(stdout.contains("Token 'fnm-verify'"), "{stdout}");
+        let missing = dir.path().join("missing.token").display().to_string();
+        for local in [&["tokens", "list"][..], &["operators", "list"][..]] {
+            let (code, _, stderr) = verify(
+                args(local),
+                String::new(),
+                vec![("PREFIXD_TOKEN_FILE", missing.clone())],
+            )
+            .await;
+            assert_eq!(code, Some(0), "{local:?}: {stderr}");
+            assert!(!stderr.contains("token file"), "{local:?}: {stderr}");
+        }
 
         let (unknown, _) = prefixd::auth::token::generate().unwrap();
         let noncanonical = format!("{}B", &ingest[..ingest.len() - 1]);
@@ -8556,7 +8582,7 @@ mod api_tokens {
             ("empty", "", "one token on one line"),
         ] {
             let (code, stdout, stderr) =
-                verify(args(&["tokens", "verify"]), format!("{input}\n")).await;
+                verify(args(&["tokens", "verify"]), format!("{input}\n"), vec![]).await;
             assert_eq!(code, Some(1), "{label}: {stderr}");
             assert!(stderr.contains(expected), "{label}: {stderr}");
             assert!(stdout.is_empty(), "{label}: {stdout}");
@@ -8577,7 +8603,7 @@ mod api_tokens {
             (&operator, "cli-verify", "expired"),
         ] {
             let (code, stdout, stderr) =
-                verify(args(&["tokens", "verify"]), format!("{secret}\n")).await;
+                verify(args(&["tokens", "verify"]), format!("{secret}\n"), vec![]).await;
             assert_eq!(code, Some(1), "{name}: {stderr}");
             assert!(stdout.contains(status), "{name}: {stdout}");
             assert!(

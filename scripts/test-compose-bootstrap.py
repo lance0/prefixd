@@ -22,7 +22,12 @@ FAKE_DOCKER = r"""#!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FAKE_LOG"
 args="$*"
 case "$args" in
-    *"config --format yaml"*) echo "name: prefixd" ;;
+    *"config --format yaml"*)
+        if [[ -n "${FAKE_BLOCK_ENV:-}" ]]; then
+            touch "$FAKE_LOG.blocked"
+            for _ in $(seq 300); do [[ -e "$FAKE_LOG.release" ]] && break; sleep 0.1; done
+        fi
+        echo "name: prefixd" ;;
     "volume ls"*)
         [[ -z "${FAKE_VOLUME_FAIL:-}" ]] || { echo "permission denied" >&2; exit 1; }
         [[ -z "${FAKE_PG_VOLUME:-}" ]] || echo prefixd_postgres-data ;;
@@ -375,6 +380,30 @@ class EnvFile(Harness):
         self.assertEqual(self.env_file().read_text(), "POSTGRES_PASSWORD=kept\n")
         self.assertNotIn("exported-canary", result.stdout + result.stderr)
         self.assertFalse(self.calls("volume ls"))
+
+    def test_concurrent_env_runs_write_one_password(self):
+        argv, env, cwd = self.command("env", block_env="1")
+        first = subprocess.Popen(
+            argv, env=env, cwd=cwd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
+        try:
+            # Handshake: the first run holds the lock between its read and write.
+            blocked = Path(f"{self.log}.blocked")
+            deadline = time.monotonic() + 30
+            while not blocked.exists():
+                if first.poll() is not None:
+                    self.fail(f"first run exited early: {first.communicate()[1]}")
+                self.assertLess(time.monotonic(), deadline, "first run never took the lock")
+                time.sleep(0.05)
+            second = self.run_script("env")
+            self.assertEqual(second.returncode, 1, second.stdout)
+            self.assertIn("another 'env' run holds", second.stderr)
+        finally:
+            Path(f"{self.log}.release").touch()
+            _, err = first.communicate(timeout=60)
+        self.assertEqual(first.returncode, 0, err)
+        self.assertRegex(self.env_file().read_text(), r"^POSTGRES_PASSWORD=[0-9a-f]{64}\n$")
+        self.assertFalse((self.repo / ".env.lock").exists())
 
     def test_a_failed_volume_listing_writes_no_password(self):
         result = self.run_script("env", volume_fail="1")

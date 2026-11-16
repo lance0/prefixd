@@ -887,7 +887,15 @@ async fn main() -> ExitCode {
             "warning: {REMOVED_TOKEN_ENV} is set but no longer read; set PREFIXD_TOKEN to an API token"
         );
     }
+    // Local database commands send no request: reading the API token file for
+    // them would consume a `tokens verify` secret on stdin, and an unreadable
+    // file would block them.
+    let local = matches!(
+        cli.command,
+        Commands::Operators(_) | Commands::Tokens(_) | Commands::Migrations
+    );
     let token = match &cli.token_file {
+        Some(_) if local => None,
         Some(path) => match read_token_file(path) {
             Ok(token) => Some(token),
             Err(error) => {
@@ -1112,11 +1120,27 @@ async fn cmd_diversions(client: &Client, command: DiversionCommands) -> Result<(
     Ok(())
 }
 
+/// How long `status` waits for the operation mode, response body included.
+const SETTINGS_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
 async fn cmd_status(client: &Client, format: OutputFormat) -> Result<(), String> {
     let mut health: HealthResponse = client.get("/v1/health/detail").await?;
     // The mode is extra context: an unreadable one never hides the health
     // that did load, nor changes the exit code.
-    health.mode = match client.get::<serde_json::Value>("/v1/config/settings").await {
+    // Bounded, body included, so a stalled settings route cannot hold back
+    // the health that already loaded.
+    let settings = tokio::time::timeout(
+        SETTINGS_READ_TIMEOUT,
+        client.get::<serde_json::Value>("/v1/config/settings"),
+    )
+    .await
+    .unwrap_or_else(|_| {
+        Err(format!(
+            "no answer within {} s",
+            SETTINGS_READ_TIMEOUT.as_secs()
+        ))
+    });
+    health.mode = match settings {
         Ok(settings) => settings["settings"]["mode"].as_str().map(str::to_owned),
         Err(error) => {
             eprintln!("warning: cannot read the operation mode: {error}");

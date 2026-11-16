@@ -59,6 +59,15 @@ if [[ "$mode" == env ]]; then
         die "POSTGRES_PASSWORD is set in your environment, and it overrides .env for every Compose command; run 'unset POSTGRES_PASSWORD', rerun this, and keep it unset for later Compose commands"
     env_file=$root/.env
     [[ ! -L "$env_file" ]] || die "$env_file is a symbolic link; edit the intended file directly"
+    # One env run at a time, from the first read of .env through the write:
+    # two concurrent runs would both find no password and both append one.
+    env_lock=$root/.env.lock
+    if ! mkdir "$env_lock" 2>/dev/null; then
+        [[ ! -d "$env_lock" || -L "$env_lock" ]] ||
+            die "another 'env' run holds $env_lock; if none is running, remove that directory and rerun"
+        die "cannot create the lock directory $env_lock; check that you may write to $root"
+    fi
+    trap 'rmdir "$env_lock"' EXIT
     assignment='^[[:space:]]*(export[[:space:]]+)?POSTGRES_PASSWORD='
     if [[ -e "$env_file" ]] && current=$(grep -E "$assignment" "$env_file"); then
         [[ "$current" != *$'\n'* ]] || die "$env_file sets POSTGRES_PASSWORD more than once; keep one"

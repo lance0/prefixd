@@ -553,3 +553,62 @@ async fn cli_status_survives_an_unreadable_mode() {
         server.abort();
     }
 }
+
+/// A settings route that never answers, or answers and then stalls its body,
+/// cannot hold back `status`: the mode read is bounded, and its timeout takes
+/// the `Mode: unavailable` path with the health that loaded.
+#[tokio::test]
+async fn cli_status_bounds_a_stalled_mode_read() {
+    let health = serde_json::json!({
+        "status": "healthy", "bgp_sessions": {}, "active_mitigations": 0,
+        "database": "connected", "gobgp": { "status": "connected" }
+    });
+    for stall in ["headers", "body"] {
+        let health = health.clone();
+        let app = Router::new()
+            .route(
+                "/v1/health/detail",
+                axum::routing::get(move || async move { Json(health) }),
+            )
+            .route(
+                "/v1/config/settings",
+                axum::routing::get(move || async move {
+                    if stall == "headers" {
+                        std::future::pending::<()>().await;
+                    }
+                    // Status and headers go out; the body never arrives.
+                    let body = futures_util::stream::pending::<
+                        Result<axum::body::Bytes, std::io::Error>,
+                    >();
+                    axum::response::Response::builder()
+                        .header("content-type", "application/json")
+                        .body(axum::body::Body::from_stream(body))
+                        .unwrap()
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let api = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let output = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            tokio::process::Command::new(env!("CARGO_BIN_EXE_prefixdctl"))
+                .args(["--api", &api, "status"])
+                .env("PREFIXD_TOKEN", "stalled-mode-test-token")
+                .env_remove("PREFIXD_TOKEN_FILE")
+                .env_remove("PREFIXD_SESSION_COOKIE")
+                .stdin(std::process::Stdio::null())
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await
+        .expect("status finishes despite the stalled mode read")
+        .unwrap();
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert_eq!(output.status.code(), Some(0), "{stall}: {stderr}");
+        assert!(stdout.contains("Status: healthy"), "{stall}: {stdout}");
+        assert!(stdout.contains("Mode: unavailable"), "{stall}: {stdout}");
+        assert!(stderr.contains("no answer within 3 s"), "{stall}: {stderr}");
+        server.abort();
+    }
+}

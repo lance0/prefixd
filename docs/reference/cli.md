@@ -81,7 +81,9 @@ the environment as well.
 
 A token file holds one token on one line, at most 1 KiB. `/dev/stdin` on a
 terminal echoes what you type, so redirect a file or pipe into it rather than
-typing the token.
+typing the token. Only commands that call the API read it; the local database
+commands (`operators`, `tokens` and `migrations`) ignore it, so it neither
+consumes the stdin of `tokens verify` nor blocks them when unreadable.
 
 Help output names these variables but never prints their values. prefixdctl
 never sends both credentials: a token and a session cookie together, from flags
@@ -164,7 +166,7 @@ prefixdctl status
 `Mode` is the running operation mode, `enforced` or `dry-run`, read from
 `GET /v1/config/settings`; `--format json` adds it as `mode`. Status therefore
 makes two requests, both readable by any role. When the mode cannot be read,
-status prints `Mode: unavailable`, leaves `mode` out of the JSON, warns on
+or takes more than 3 seconds, body included, status prints `Mode: unavailable`, leaves `mode` out of the JSON, warns on
 stderr, and still reports the health it read; the exit code follows the
 health request alone.
 
@@ -429,13 +431,16 @@ each one.
 ### Verify Token
 
 ```bash
-prefixdctl tokens verify < .prefixd/cli.token
-prefixdctl --format json tokens verify --token-file /etc/prefixd/fastnetmon.token
-# Token 'fnm-pop1': scope ingest, source fastnetmon, pop iad1, active
+# On the Compose stack, in the controller service, with the secret on stdin
+docker compose exec -T prefixd-rustbgpd prefixdctl tokens verify < .prefixd/fastnetmon.token
+# Token 'fastnetmon-20261116-110148': scope ingest, source fastnetmon, pop any, active
+docker compose exec -T prefixd-rustbgpd prefixdctl --format json tokens verify < .prefixd/cli.token
 ```
 
-Reads a secret from `--token-file` or stdin, never from the command line, looks
-its hash up in this database and prints the token's name, scope, source, POP and
+Like the other `tokens` commands it needs database access (`DATABASE_URL`), so
+run it where the controller runs, not on a detector host; use `prefixd-gobgp`
+with the `gobgp` profile. It reads a secret from `--token-file` or stdin, never
+from the command line, and looks its hash up in this database and prints the token's name, scope, source, POP and
 status (`active`, `revoked` or `expired`); `-f json` prints the record with a
 `status` field. It never prints the secret or its hash. It exits 1 for an
 unknown, revoked or expired token and for malformed input, and writes nothing,

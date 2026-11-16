@@ -368,8 +368,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   FastNetMon Advanced.
 - `scripts/compose-bootstrap.sh` bootstraps a fresh Compose stack with no
   shared secret. `env` writes a random `POSTGRES_PASSWORD` into a 0600 `.env`
-  before the first start; it refuses while the variable is exported in the
-  shell, when a PostgreSQL volume exists, and when it cannot list volumes.
+  before the first start, one run at a time; it refuses while the variable is
+  exported in the shell, when a PostgreSQL volume exists, and when it cannot
+  list volumes.
   `rustbgpd` or `gobgp` then creates the first Admin at
   a hidden password prompt, unless one exists, and mints an ingest token bound
   to `fastnetmon` and an operator token for `prefixdctl` into `.prefixd/`
@@ -393,10 +394,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of the container's environment. A token file with `--token` or
   `PREFIXD_TOKEN`, an unreadable file, a file of more than one line and one
   over 1 KiB are usage errors (exit 2) that name the file, never its contents.
+  Only commands that call the API read it; local database commands ignore it.
 - `prefixdctl status` shows the running mode, `Mode: enforced` or
   `Mode: dry-run`, and `--format json` adds `mode`. It reads
   `GET /v1/config/settings`, so status makes two requests. When that read
-  fails, status prints `Mode: unavailable`, omits `mode`, warns on stderr and
+  fails or takes more than 3 seconds, status prints `Mode: unavailable`, omits `mode`, warns on stderr and
   keeps the exit code of the health request.
 - The Administration **Users** tab lists accounts read-only, with a note to
   use `prefixdctl operators`, unless the viewer is an Admin with a signed-in
