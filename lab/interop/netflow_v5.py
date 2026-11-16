@@ -53,7 +53,8 @@ def datagram(victim, sequence, packets, uptime_ms):
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    # python3 -OO strips docstrings.
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0] if __doc__ else None)
     parser.add_argument("collector", help="host:port")
     parser.add_argument("victim")
     parser.add_argument("--packets", type=int, default=1000, help="packets per record per second")

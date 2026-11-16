@@ -22,11 +22,18 @@ WITHDREW = f"SUCCESS: Withdrew mitigation {MID} for 203.0.113.10 (200)"
 
 
 class ScriptLogTests(unittest.TestCase):
+    def outcome(self, parse, lines, victim):
+        """A parsed outcome that must exist."""
+        found = parse(lines, victim)
+        if found is None:
+            self.fail(f"{parse.__name__} found no outcome for {victim} in {lines}")
+        return found
+
     def test_messages_drop_the_timestamp(self):
         self.assertEqual(messages(f"2026-11-16T03:37:22+0000 {SENT}\n"), [SENT])
 
     def test_ban_accepted(self):
-        got = ban_outcome([SENT, ACCEPTED], "203.0.113.10")
+        got = self.outcome(ban_outcome, [SENT, ACCEPTED], "203.0.113.10")
         self.assertEqual((got["result"], got["http"], got["status"]), ("SUCCESS", 202, "accepted"))
         self.assertEqual(got["body"]["mitigation_id"], MID)
 
@@ -41,11 +48,13 @@ class ScriptLogTests(unittest.TestCase):
         ):
             with self.subTest(line=line):
                 self.assertNotEqual(
-                    ban_outcome([SENT, RETRY, line], "203.0.113.10")["result"], "SUCCESS"
+                    self.outcome(ban_outcome, [SENT, RETRY, line], "203.0.113.10")["result"],
+                    "SUCCESS",
                 )
         # A script that cannot run curl fails before it logs the send.
         self.assertEqual(
-            ban_outcome(["ERROR: curl is required"], "203.0.113.10")["result"], "ERROR"
+            self.outcome(ban_outcome, ["ERROR: curl is required"], "203.0.113.10")["result"],
+            "ERROR",
         )
 
     def test_another_victims_ban_is_not_this_outcome(self):
@@ -54,14 +63,20 @@ class ScriptLogTests(unittest.TestCase):
         self.assertIsNone(ban_outcome([SENT, ACCEPTED], "203.0.113.1"))
 
     def test_unban(self):
-        self.assertEqual(unban_outcome([QUERY, WITHDREW], "203.0.113.10")["mitigation_ids"], [MID])
+        self.assertEqual(
+            self.outcome(unban_outcome, [QUERY, WITHDREW], "203.0.113.10")["mitigation_ids"], [MID]
+        )
         self.assertIsNone(unban_outcome([QUERY], "203.0.113.10"))
         nothing = (
             "No active mitigations found for 203.0.113.10 after 5 attempts, nothing to withdraw"
         )
-        self.assertEqual(unban_outcome([QUERY, nothing], "203.0.113.10")["result"], "NOTHING_FOUND")
+        self.assertEqual(
+            self.outcome(unban_outcome, [QUERY, nothing], "203.0.113.10")["result"], "NOTHING_FOUND"
+        )
         failed = f"ERROR withdrawing {MID} (500): boom"
-        self.assertEqual(unban_outcome([QUERY, failed], "203.0.113.10")["result"], "ERROR")
+        self.assertEqual(
+            self.outcome(unban_outcome, [QUERY, failed], "203.0.113.10")["result"], "ERROR"
+        )
         self.assertIsNone(unban_outcome([WITHDREW], "203.0.113.10"), "no query, no outcome")
 
 

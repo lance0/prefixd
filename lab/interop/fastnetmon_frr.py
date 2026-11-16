@@ -395,7 +395,10 @@ class FastNetMonLab(Lab):
             timeout=30,
         ).stdout.splitlines()
         dockerfile = Path(__file__).resolve().parent / "fastnetmon.Dockerfile"
-        found["fastnetmon_base"] = re.search(r"^FROM (\S+)", dockerfile.read_text(), re.M).group(1)
+        base = re.search(r"^FROM (\S+)", dockerfile.read_text(), re.M)
+        if base is None:
+            raise AssertionError(f"{dockerfile.name} has no FROM line")
+        found["fastnetmon_base"] = base.group(1)
         found["fastnetmon_image_id"] = subprocess.run(
             ["docker", "image", "inspect", "-f", "{{.Id}}", "prefixd-fastnetmon:interop"],
             text=True,
@@ -416,7 +419,8 @@ class FastNetMonLab(Lab):
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    # python3 -OO strips docstrings.
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0] if __doc__ else None)
     for name in (
         "speaker",
         "api",
