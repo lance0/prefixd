@@ -11,6 +11,11 @@ Proposed 2026-11-13 and accepted 2026-11-14. Amends
 [ADR 028](028-amplification-matches.md). This decision adds no detector,
 built-in aggregation, prefix RTBH or automatic playbook escalation.
 
+Amended by [ADR 034](034-source-bound-api-tokens.md) (proposed 2026-11-15):
+`detector_prefix_sources` becomes authorization keyed on a source bound to the
+caller's credential; the label-filter caveat in §1 applies until it is
+implemented.
+
 ## Context
 
 Carpet bombing spreads attack traffic across many addresses in a prefix. Each
