@@ -9451,6 +9451,157 @@ async fn atomic_unban_cancel_during_commit_keeps_complete_intent_postgres() {
 }
 
 #[tokio::test]
+async fn cancelled_http_unban_commit_blocks_a_newer_ban_without_replacing_intent() {
+    use std::sync::atomic::Ordering::SeqCst;
+
+    let ctx = TestContext::new().await;
+    let (state, speaker) = quota_state_in(
+        &ctx,
+        "commit-race-pop",
+        common::test_settings().quotas,
+        prefixd::config::OperationMode::Enforced,
+    )
+    .await;
+    let target_id = state
+        .verified_speaker_binding()
+        .unwrap()
+        .unwrap()
+        .target_id();
+    let app = prefixd::api::create_test_router(state);
+    let event = |id: &str, action: &str| {
+        Request::post("/v1/events")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "event_id": id, "timestamp": chrono::Utc::now(),
+                    "source": "commit-race", "victim_ip": "203.0.113.10",
+                    "vector": "udp_flood", "confidence": 0.9, "pps": 50000,
+                    "top_dst_ports": [53], "action": action,
+                })
+                .to_string(),
+            ))
+            .unwrap()
+    };
+    let response = app
+        .clone()
+        .oneshot(event("original-ban", "ban"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let body = creation_json(response).await;
+    let id = body["mitigation_id"].as_str().unwrap().parse().unwrap();
+    // Compare PostgreSQL's captured row, including its timestamp precision.
+    let original = ctx.repo.get_mitigation(id).await.unwrap().unwrap();
+    let rule = prefixd::domain::mitigation_rule(&original).unwrap();
+    assert_eq!(speaker.adds.load(SeqCst), 1);
+    assert_eq!(speaker.deletes.load(SeqCst), 0);
+    assert_eq!(speaker.list_active().await.unwrap().len(), 1);
+
+    let mut blocker = ctx.pool.acquire().await.unwrap();
+    sqlx::query("SELECT pg_advisory_lock(1886545528, 337305)")
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    sqlx::raw_sql(
+        "CREATE FUNCTION block_http_unban_commit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_advisory_xact_lock(1886545528, 337305); RETURN NEW; END $$; CREATE CONSTRAINT TRIGGER block_http_unban_commit AFTER INSERT ON withdrawal_requests DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION block_http_unban_commit();",
+    )
+    .execute(&ctx.pool)
+    .await
+    .unwrap();
+    let unban = tokio::spawn(app.clone().oneshot(event("original-unban", "unban")));
+    wait_for_unban_sql_wait(&ctx, "COMMIT%").await;
+    assert!(ctx.repo.pending_withdrawals(None).await.unwrap().is_empty());
+    assert_eq!(speaker.adds.load(SeqCst), 1);
+    assert_eq!(speaker.deletes.load(SeqCst), 0);
+    unban.abort();
+    assert!(unban.await.unwrap_err().is_cancelled());
+
+    let mut newer = tokio::spawn(app.clone().oneshot(event("newer-ban", "ban")));
+    tokio::select! {
+        () = wait_for_unban_sql_wait(&ctx, "%mitigations%") => (),
+        result = &mut newer => panic!("newer ban returned before the unban COMMIT: {result:?}"),
+    }
+    assert_eq!(speaker.adds.load(SeqCst), 1);
+    assert_eq!(speaker.deletes.load(SeqCst), 0);
+    sqlx::query("SELECT pg_advisory_unlock(1886545528, 337305)")
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    let response = tokio::time::timeout(std::time::Duration::from_secs(5), newer)
+        .await
+        .expect("newer ban finishes once the unban COMMIT is released")
+        .unwrap()
+        .unwrap();
+    let status = response.status();
+    let body = creation_json(response).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    let newer_event = ctx
+        .repo
+        .find_ban_event_by_external_id("commit-race", "newer-ban")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        newer_event.outcome.outcome,
+        prefixd::domain::EventOutcome::Failed
+    );
+    assert!(newer_event.outcome.outcome_mitigation_ids.is_empty());
+    assert_eq!(
+        ctx.repo.get_mitigation(id).await.unwrap().unwrap(),
+        original
+    );
+    assert_eq!(speaker.adds.load(SeqCst), 1);
+    assert_eq!(speaker.deletes.load(SeqCst), 0);
+
+    let pending = ctx.repo.pending_withdrawals(None).await.unwrap();
+    assert_eq!(pending.len(), 1);
+    let request = &pending[0];
+    assert!(!request.operation_id.is_nil());
+    assert_eq!(request.mitigation_id, id);
+    assert_eq!(request.pop, "commit-race-pop");
+    assert_eq!(request.target_id, Some(target_id));
+    assert_eq!(request.nlri_hash, rule.nlri_hash());
+    assert_eq!(request.rule_kind, "flowspec");
+    assert_eq!(request.rule_json, serde_json::to_string(&rule).unwrap());
+    assert_eq!(request.mitigation_updated_at, original.updated_at);
+    assert_eq!(request.actor_type, "operator");
+    assert_eq!(request.actor, "anonymous");
+    assert_eq!(request.reason, "Detector unban: commit-race");
+    assert_eq!(request.detector_source.as_deref(), Some("commit-race"));
+    assert_eq!(request.terminal_status, "withdrawn");
+    assert!(request.speaker_delete_required);
+    assert!(request.completed_at.is_none());
+    let immutable_before: serde_json::Value = sqlx::query_scalar(
+        "SELECT to_jsonb(w) - 'completed_at' FROM withdrawal_requests w WHERE operation_id = $1",
+    )
+    .bind(request.operation_id)
+    .fetch_one(&ctx.pool)
+    .await
+    .unwrap();
+
+    let response = app.oneshot(event("original-unban", "unban")).await.unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let body = creation_json(response).await;
+    assert_eq!(body["mitigation_ids"], serde_json::json!([id]));
+    assert_eq!(speaker.adds.load(SeqCst), 1);
+    assert_eq!(speaker.deletes.load(SeqCst), 1);
+    assert!(speaker.list_active().await.unwrap().is_empty());
+    assert!(ctx.repo.pending_withdrawals(None).await.unwrap().is_empty());
+    let saved: Vec<(serde_json::Value, bool)> = sqlx::query_as(
+        "SELECT to_jsonb(w) - 'completed_at', completed_at IS NOT NULL FROM withdrawal_requests w WHERE mitigation_id = $1",
+    )
+    .bind(id)
+    .fetch_all(&ctx.pool)
+    .await
+    .unwrap();
+    assert_eq!(saved, [(immutable_before, true)]);
+    assert_eq!(
+        ctx.repo.get_mitigation(id).await.unwrap().unwrap().status,
+        MitigationStatus::Withdrawn
+    );
+}
+
+#[tokio::test]
 async fn atomic_unban_rechecks_the_complete_snapshot_under_the_row_lock() {
     let ctx = TestContext::new().await;
     let targets = atomic_unban_targets(&ctx).await;
