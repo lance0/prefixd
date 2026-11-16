@@ -696,9 +696,9 @@ sources:
   alertmanager:
     weight: 0.8
     type: telemetry
-  dashboard:
+  radware:
     weight: 1.0
-    type: manual
+    type: detector
 "#;
         let config: CorrelationConfig = crate::config::parse_yaml(yaml).unwrap();
         assert!(config.enabled);
@@ -710,7 +710,7 @@ sources:
         assert_eq!(config.sources["fastnetmon"].weight, 2.0);
         assert_eq!(config.sources["fastnetmon"].r#type, "detector");
         assert_eq!(config.sources["alertmanager"].weight, 0.8);
-        assert_eq!(config.sources["dashboard"].weight, 1.0);
+        assert_eq!(config.sources["radware"].weight, 1.0);
     }
 
     #[test]

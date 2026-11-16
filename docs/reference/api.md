@@ -963,8 +963,9 @@ Content-Type: application/json
 ```
 
 Directly create a mitigation with the exact parameters provided, skipping playbook
-evaluation. The dashboard's "Rule" form posts here. Its "Mitigate Now" form
-instead submits an attack event through `POST /v1/events`, which applies playbooks.
+evaluation. The dashboard's "Rule" and "Mitigate now" forms post here; "Mitigate
+now" prefills the form from the playbook for the chosen attack vector and posts no
+event, so the rule is audited under the operator who submitted it.
 
 **Request:**
 

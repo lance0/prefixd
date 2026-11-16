@@ -23,7 +23,6 @@ import { usePermissions } from "@/hooks/use-permissions"
 import { getAllMitigations, formatRoutingScope, withdrawMitigation, bulkWithdrawMitigations, type BulkWithdrawResult, type Mitigation } from "@/lib/api"
 import { cn } from "@/lib/utils"
 import { downloadCsv } from "@/lib/csv"
-import { MitigateNowDialog } from "@/components/dashboard/mitigate-now-dialog"
 import { BlackholeDialog } from "@/components/dashboard/blackhole-dialog"
 import { WithdrawConfirmDialog } from "@/components/dashboard/withdraw-confirm-dialog"
 import { FlowSpecRuleDialog } from "@/components/dashboard/flowspec-rule-dialog"
@@ -141,7 +140,7 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
     setWithdrawError(null)
 
     try {
-      await withdrawMitigation(withdrawTarget.mitigation_id, reason, "dashboard")
+      await withdrawMitigation(withdrawTarget.mitigation_id, reason)
       mutate()
 
       return true
@@ -198,11 +197,7 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
     setBulkWithdrawError(null)
 
     try {
-      const result = await bulkWithdrawMitigations(
-        [...selectedIds],
-        reason,
-        "dashboard"
-      )
+      const result = await bulkWithdrawMitigations([...selectedIds], reason)
 
       setBulkWithdrawResults(result.results)
       setSelectedIds(new Set(result.results
@@ -694,7 +689,7 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
         )}
       </WithdrawConfirmDialog>
 
-      <MitigateNowDialog open={mitigateNowOpen} onOpenChange={setMitigateNowOpen} />
+      {permissions.canWithdraw && <FlowSpecRuleDialog open={mitigateNowOpen} onOpenChange={setMitigateNowOpen} canSourceOnly={permissions.isAdmin} fromPlaybook />}
       {permissions.canWithdraw && <FlowSpecRuleDialog open={ruleOpen} onOpenChange={setRuleOpen} canSourceOnly={permissions.isAdmin} />}
       {permissions.isAdmin && <BlackholeDialog open={blackholeOpen} onOpenChange={setBlackholeOpen} />}
     </div>

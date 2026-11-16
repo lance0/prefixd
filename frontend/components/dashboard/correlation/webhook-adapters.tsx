@@ -37,7 +37,7 @@ import {
 } from "@/components/ui/select"
 import { useCorrelationConfig } from "@/hooks/use-api"
 import { usePermissions } from "@/hooks/use-permissions"
-import { updateCorrelationConfig } from "@/lib/api"
+import { serverErrors, updateCorrelationConfig } from "@/lib/api"
 import type {
   CorrelationConfig,
   WebhookAdapter,
@@ -53,7 +53,9 @@ import {
   Copy,
 } from "lucide-react"
 
-const NAME_PATTERN = /^[a-z0-9-]{1,64}$/
+// The adapter name is its source, so it follows the token source rule without underscores.
+const NAME_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/
+const SECRET_ENV_PREFIX = "PREFIXD_WEBHOOK_"
 
 export function WebhookAdaptersEditor() {
   const { data: config, error, isLoading, mutate } = useCorrelationConfig()
@@ -64,9 +66,10 @@ export function WebhookAdaptersEditor() {
 
   const adapters = config?.webhook_adapters ?? []
 
+  /** Saves the adapters; returns the controller's refusal reasons, or null once saved. */
   const persist = useCallback(
-    async (updater: (adapters: WebhookAdapter[]) => WebhookAdapter[]) => {
-      if (!config) return
+    async (updater: (adapters: WebhookAdapter[]) => WebhookAdapter[]): Promise<string[] | null> => {
+      if (!config) return ["The correlation configuration is not loaded. Retry."]
 
       const next: CorrelationConfig = {
         ...config,
@@ -77,17 +80,17 @@ export function WebhookAdaptersEditor() {
         await updateCorrelationConfig(next)
         await mutate()
         toast.success("Webhook adapters saved")
+
+        return null
       } catch (e) {
-        toast.error("Failed to save", {
-          description: e instanceof Error ? e.message : String(e),
-        })
+        return serverErrors(e instanceof Error ? e.message : String(e))
       }
     },
     [config, adapters, mutate],
   )
 
-  const handleUpsert = (adapter: WebhookAdapter) => {
-    persist((list) => {
+  const handleUpsert = async (adapter: WebhookAdapter): Promise<string[] | null> => {
+    const refused = await persist((list) => {
       const idx = list.findIndex((a) => a.name === adapter.name)
 
       if (idx >= 0) {
@@ -99,15 +102,22 @@ export function WebhookAdaptersEditor() {
 
       return [...list, adapter]
     })
+
+    // A refused save keeps the editor open with the controller's reasons.
+    if (refused) return refused
     setDialogOpen(false)
     setEditing(null)
+
+    return null
   }
 
-  const handleDelete = () => {
+  const handleDelete = async () => {
     if (!deleteTarget) return
     const name = deleteTarget
-    persist((list) => list.filter((a) => a.name !== name))
     setDeleteTarget(null)
+    const refused = await persist((list) => list.filter((a) => a.name !== name))
+
+    if (refused) toast.error("Failed to save", { description: refused.join(" ") })
   }
 
   if (isLoading) {
@@ -224,7 +234,7 @@ export function WebhookAdaptersEditor() {
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction onClick={handleDelete}>Remove</AlertDialogAction>
+            <AlertDialogAction onClick={() => { void handleDelete() }}>Remove</AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
@@ -324,15 +334,17 @@ function AdapterDialog({
   onOpenChange: (o: boolean) => void
   initial: WebhookAdapter | null
   existingNames: string[]
-  onSubmit: (a: WebhookAdapter) => void
+  onSubmit: (a: WebhookAdapter) => Promise<string[] | null>
 }) {
   const id = useId()
   const [form, setForm] = useState<WebhookAdapter>(initial ?? newAdapter())
   const [saving, setSaving] = useState(false)
+  const [refused, setRefused] = useState<string[]>([])
 
   // Reset form whenever `initial` changes (dialog opened for a different adapter).
   useEffect(() => {
     setForm(initial ?? newAdapter())
+    setRefused([])
   }, [initial])
 
   const isNew = !existingNames.includes(form.name)
@@ -343,9 +355,10 @@ function AdapterDialog({
   const handleSave = async () => {
     if (!canSave) return
     setSaving(true)
+    setRefused([])
 
     try {
-      await Promise.resolve(onSubmit(form))
+      setRefused((await onSubmit(form)) ?? [])
     } finally {
       setSaving(false)
     }
@@ -355,6 +368,9 @@ function AdapterDialog({
     <Dialog
       open={open}
       onOpenChange={(o) => {
+        // A save in flight closes this editor when it lands, so the editor stays until then:
+        // dismissing it early would let that completion close a newer one.
+        if (saving) return
         onOpenChange(o)
 
         if (o && initial) setForm(initial)
@@ -374,12 +390,12 @@ function AdapterDialog({
         <div className="space-y-4 text-xs">
           <Field
             label="Name"
-            hint="URL path segment, [a-z0-9-]{1,64}"
+            hint="URL path segment and the adapter's source: lowercase letters, digits and hyphens, starting with a letter or digit"
             value={form.name}
             onChange={(v) => setForm({ ...form, name: v })}
             disabled={initial !== null && existingNames.includes(initial.name)}
             error={
-              !NAME_PATTERN.test(form.name) ? "Must match [a-z0-9-]{1,64}" : undefined
+              !NAME_PATTERN.test(form.name) ? "Must match ^[a-z0-9][a-z0-9-]{0,63}$" : undefined
             }
           />
 
@@ -421,16 +437,23 @@ function AdapterDialog({
                   Bearer token
                 </SelectItem>
                 <SelectItem value="none">
-                  None (insecure)
+                  None (only with http.auth.mode none)
                 </SelectItem>
               </SelectContent>
             </Select>
+            <p className="mt-1 text-xs text-muted-foreground">
+              {auth.type === "bearer"
+                ? "The sender presents an ingest API token bound to this adapter's name."
+                : auth.type === "none"
+                  ? "Anyone who can reach the controller could post as this adapter, so the controller refuses it unless authentication is off."
+                  : "The sender signs each body with the secret. Map fields.source_id below if the adapter maps fields.action or is on a detector allowlist."}
+            </p>
 
             {auth.type === "hmac" && (
               <div className="space-y-2 mt-2 pl-2 border-l-2">
                 <Field
                   label="Secret env var"
-                  hint="Name of the env var holding the HMAC secret (value never sent)"
+                  hint={`A controller environment variable starting with ${SECRET_ENV_PREFIX}, holding at least 32 bytes. Only the name is saved here.`}
                   value={auth.secret_env}
                   onChange={(v) =>
                     setForm({
@@ -507,6 +530,15 @@ function AdapterDialog({
             </div>
           </div>
 
+          {refused.length > 0 && (
+            <div role="alert" className="rounded border border-destructive/30 bg-destructive/5 p-2 text-xs text-destructive space-y-0.5">
+              <div className="font-medium">The controller refused this configuration:</div>
+              {refused.map((e) => (
+                <div key={e} className="break-words">{e}</div>
+              ))}
+            </div>
+          )}
+
           {errors.length > 0 && (
             <div className="rounded border border-destructive/30 bg-destructive/5 p-2 text-xs text-destructive space-y-0.5">
               {errors.map((e) => (
@@ -521,6 +553,7 @@ function AdapterDialog({
             variant="outline"
             size="sm"
             onClick={() => onOpenChange(false)}
+            disabled={saving}
           >
             Cancel
           </Button>
@@ -594,7 +627,7 @@ function FieldMapEditor({
     ["bps", 'Optional number', false],
     ["pps", 'Optional number', false],
     ["confidence", 'Optional number', false],
-    ["source_id", 'Optional; used for dedup', false],
+    ["source_id", 'Used for dedup. Required on an HMAC adapter that maps action or is named in blackhole.detector_sources or guardrails.detector_prefix_sources', false],
     ["top_dst_ports", 'Optional array of ports', false],
     ["top_src_ports", 'Optional array of UDP source ports', false],
     ["action", 'Optional "ban" or "unban"', false],
@@ -697,7 +730,7 @@ export function validateAdapter(
   const errors: string[] = []
 
   if (!NAME_PATTERN.test(adapter.name)) {
-    errors.push("name must match [a-z0-9-]{1,64}")
+    errors.push("name must match ^[a-z0-9][a-z0-9-]{0,63}$")
   }
 
   if (isNew && existingNames.includes(adapter.name)) {
@@ -708,8 +741,15 @@ export function validateAdapter(
     errors.push("fields.victim_ip is required")
   }
 
+  // The controller skips the credential checks for a disabled adapter until it is enabled.
   if (adapter.auth.type === "hmac" && !adapter.auth.secret_env) {
     errors.push("auth.secret_env is required for HMAC")
+  } else if (adapter.enabled && adapter.auth.type === "hmac" && !adapter.auth.secret_env.startsWith(SECRET_ENV_PREFIX)) {
+    errors.push(`auth.secret_env must start with ${SECRET_ENV_PREFIX}`)
+  }
+
+  if (adapter.enabled && adapter.auth.type === "hmac" && adapter.fields.action && !adapter.fields.source_id) {
+    errors.push("fields.source_id is required when an HMAC adapter maps fields.action, so a replayed signed unban is recognized")
   }
 
   if (

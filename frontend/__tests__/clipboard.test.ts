@@ -128,4 +128,19 @@ describe("copyText", () => {
 
     expect(copiedValue()).toBe("body")
   })
+
+  it("removes the fallback textarea even when the copy throws, so a secret never stays in the DOM", async () => {
+    setSecureContext(false)
+    setClipboard(undefined)
+    setClipboardWritePermission("granted")
+    document.execCommand = vi.fn<typeof document.execCommand>(() => {
+      expect(document.querySelector("textarea")?.value).toBe("prefixd_secret")
+      throw new Error("execCommand failed")
+    })
+
+    await expect(copyText("prefixd_secret")).resolves.toBe(false)
+
+    expect(document.execCommand).toHaveBeenCalled()
+    expect(document.querySelector("textarea")).toBeNull()
+  })
 })

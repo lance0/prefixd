@@ -143,6 +143,11 @@ prefixdctl operators list
 
 Usernames match `^[A-Za-z0-9_-]{1,64}$`.
 
+An Admin signed in to the dashboard can also create and delete accounts and set
+passwords under **Administration → Users**. That needs a signed-in session: with
+`mtls` or `none` mode the tab lists accounts only, so manage them with
+`prefixdctl operators`.
+
 ### Create API Tokens
 
 Detectors and automation authenticate with named API tokens, created the same
@@ -159,6 +164,28 @@ prefixdctl tokens create --name ci-deploy --scope operator
 
 See [API tokens](../reference/cli.md#api-tokens) for listing, revocation and
 rotation.
+
+An Admin signed in to the dashboard can manage tokens under
+**Administration → API tokens**: the table shows each token's scope, bound
+source, POP, creator, creation, last use, expiry and revocation, active tokens
+first, and can be filtered by creator. **Create token** takes a name, a scope, a
+source for an ingest token (it suggests `fastnetmon`, `fastnetmon-hostgroup`,
+`alertmanager`, the enabled bearer webhook adapters and the configured
+correlation sources), an optional POP and an optional expiry. The new token is
+shown once, with a copy button and ready-to-paste client setup. The setup stores
+the token in `/etc/prefixd/<name>.token`, owned by the client's account with
+mode 0400, and reads it from there: the FastNetMon script's
+`/etc/default/prefixd` lines, a FastNetMon hostgroup shim, an Alertmanager
+receiver with `credentials_file`, a webhook or Grafana header, or `prefixdctl`
+with `PREFIXD_TOKEN`, plus a `curl -K -` test that keeps the token off the
+command line. The snippets use the dialog's **Controller API URL**, prefilled with
+the page origin: set it to an address that reaches the controller API, such as
+the nginx ingress or the controller on port 8080, when the dashboard is served
+without nginx. The dashboard keeps the secret only while that dialog is
+open and asks before closing it uncopied. Revoking asks for confirmation naming
+the token, its source and its last use. The tab needs a signed-in Admin
+session; it is not shown to other roles, mTLS clients or `none` mode, and the
+controller refuses them.
 
 ### Auth Modes
 
@@ -316,6 +343,11 @@ receivers:
     webhook_configs:
       - url: "http://prefixd.internal/v1/signals/alertmanager"
         send_resolved: true   # Enables auto-withdraw on resolve
+        http_config:
+          authorization:
+            type: Bearer
+            # An ingest token bound to `alertmanager`, mode 0400
+            credentials_file: /etc/alertmanager/prefixd.token
 
 route:
   routes:
@@ -338,18 +370,20 @@ Resolved alerts (status=`resolved`) automatically withdraw the corresponding mit
 
 ### FastNetMon Setup
 
-FastNetMon runs the bundled notify script, `scripts/prefixd-fastnetmon.sh`. It
-posts each ban and unban to `/v1/events` with an ingest token bound to
-`fastnetmon`, read from a token file and handed to curl on stdin. An unban
-names the victim, so the ingest token is enough; it needs no read or withdraw
-access. Follow the [FastNetMon guide](detectors/fastnetmon.md) to install the
-script and its token file. Never put a token in `notify_script_args`, where any
-local user can read it from the process list.
+Install the bundled notify script, `scripts/prefixd-fastnetmon.sh`, with an
+ingest token bound to `fastnetmon` in a 0400 token file; see
+[FastNetMon](detectors/fastnetmon.md). The script posts each ban and unban to
+`/v1/events` and passes the token to curl on stdin, so it never appears on a
+command line. An unban names the victim, so the ingest token needs no read or
+withdraw access. Never put a token in `notify_script_args`, where any local
+user can read it from the process list. A sender that posts to
+`/v1/signals/fastnetmon` directly needs an ingest token bound to `fastnetmon`
+(`fastnetmon-hostgroup` for hostgroup alerts) in `Authorization: Bearer`.
+FastNetMon Advanced's native web callback cannot send one, so it needs a
+localhost relay that adds the token; see
+[credential delivery per detector](../adr/034-source-bound-api-tokens.md#13-credential-delivery-per-detector).
 
-FastNetMon Advanced's native web callback cannot send a credential, so it
-reaches `/v1/signals/fastnetmon` only through a localhost relay that adds the
-token; see [credential delivery per detector](../adr/034-source-bound-api-tokens.md#13-credential-delivery-per-detector).
-That adapter classifies the attack vector from the traffic breakdown (UDP/SYN/ICMP/TCP) and maps `action` to confidence:
+The adapter classifies the attack vector from the traffic breakdown (UDP/SYN/ICMP/TCP) and maps `action` to confidence:
 
 | FastNetMon Action | Confidence |
 |-------------------|------------|

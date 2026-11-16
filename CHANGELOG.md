@@ -117,6 +117,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Notification preferences (`GET` and `PUT /v1/preferences`) need a signed-in
   session; a token, an mTLS client and `none` mode get 403. A token or `none`
   mode had no operator account to store them under.
+- **Mitigate now creates a manual mitigation.** The dashboard's Mitigate now
+  action no longer posts an event with `source: "dashboard"` to `/v1/events`,
+  which Operator sessions can no longer reach. It opens the manual FlowSpec
+  rule form, prefilled with the protocol, action, rate and TTL of the playbook
+  that matches the chosen attack vector, and creates the rule with
+  `POST /v1/mitigations` as the signed-in operator. The rule goes through
+  manual admission, not correlation or playbook evaluation, takes destination
+  ports as the operator enters them, and is audited under the operator's
+  username rather than a `dashboard` detector. The shipped `correlation.yaml`
+  drops its `dashboard` source; no credential posts as `dashboard` any more, so
+  remove a `dashboard` entry from your `correlation.yaml` and from
+  `blackhole.detector_sources` or `guardrails.detector_prefix_sources`.
 - A token cannot pass through a proxy that adds `Authorization: Basic`: two
   `Authorization` headers are refused with 401. `prefixdctl` refuses a token
   together with `user:password` in `--api` (exit 2).
@@ -296,6 +308,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and a last-used time; creation and revocation are audited as
   `api_token.create` and `api_token.revoke`. See
   [API tokens](docs/reference/api.md#api-tokens).
+- The dashboard's Administration page has an **API tokens** tab for an Admin
+  session: a table of every token, active first and filterable by creator; a
+  create dialog that shows the new secret once, with a copy button and
+  ready-to-paste setup that stores the token in a file only the client's
+  account can read, then configures FastNetMon, a FastNetMon hostgroup shim,
+  Alertmanager, a bearer webhook or Grafana, `prefixdctl` and a `curl -K -`
+  test, none of which contains the secret; and revocation behind a confirmation that names the token, its
+  source and its last use. The secret is kept only while the dialog is open,
+  never in the data cache, the URL, browser storage or the console, and
+  closing the dialog before copying asks first. See
+  [Create API tokens](docs/how-to/deployment.md#create-api-tokens).
 - `prefixd --check` validates the configuration directory and exits before
   connecting to PostgreSQL or the speaker. It shares startup's loader and its
   pre-database checks, prints every error on its own line with the full path
@@ -334,6 +357,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The Administration **Users** tab lists accounts read-only, with a note to
+  use `prefixdctl operators`, unless the viewer is an Admin with a signed-in
+  session; in `none` and `mtls` mode its create, delete and password actions
+  are hidden instead of failing with 403. The dashboard no longer requests
+  notification preferences in those modes.
+- The webhook adapter editor names the rules the controller enforces: an
+  adapter name matching `^[a-z0-9][a-z0-9-]{0,63}$`, an HMAC `secret_env` in
+  the `PREFIXD_WEBHOOK_` namespace with at least 32 bytes, `fields.source_id`
+  on an HMAC adapter that maps `fields.action` or is on a detector allowlist,
+  and `auth.type: none` only with `http.auth.mode: none`. It checks the name,
+  the namespace and the `source_id` rule for `fields.action` before saving,
+  and a refused save keeps the editor open with the controller's reasons
+  instead of closing it behind a raw error toast.
 - The bundled FastNetMon script needs only bash and curl: it no longer uses
   `jq` or `python3`, takes the victim from its argument and never from stdin,
   keeps no state between ban and unban, and bounds each attempt with

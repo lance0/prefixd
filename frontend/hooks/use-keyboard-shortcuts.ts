@@ -7,9 +7,11 @@ interface KeyboardShortcutsOptions {
   onCommandPalette?: () => void
   onToggleSidebar?: () => void
   onToggleHelp?: () => void
+  /** Whether `n` opens Mitigate now; viewers cannot create mitigations. */
+  canMitigate?: boolean
 }
 
-export function useKeyboardShortcuts({ onCommandPalette, onToggleSidebar, onToggleHelp }: KeyboardShortcutsOptions = {}) {
+export function useKeyboardShortcuts({ onCommandPalette, onToggleSidebar, onToggleHelp, canMitigate = false }: KeyboardShortcutsOptions = {}) {
   const router = useRouter()
   const gPressedRef = useRef(false)
   const gTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -52,8 +54,8 @@ export function useKeyboardShortcuts({ onCommandPalette, onToggleSidebar, onTogg
         return
       }
 
-      // n for Mitigate Now
-      if (e.key === "n" && !e.metaKey && !e.ctrlKey) {
+      // n for Mitigate Now, for roles that can create a mitigation
+      if (canMitigate && e.key === "n" && !e.metaKey && !e.ctrlKey) {
         e.preventDefault()
         router.push("/mitigations?mitigate=true")
 
@@ -120,7 +122,7 @@ export function useKeyboardShortcuts({ onCommandPalette, onToggleSidebar, onTogg
         }
       }
     },
-    [router, onCommandPalette, onToggleSidebar, onToggleHelp],
+    [router, onCommandPalette, onToggleSidebar, onToggleHelp, canMitigate],
   )
 
   useEffect(() => {

@@ -104,7 +104,7 @@ describe("blackhole creation", () => {
     await settle()
     expect(screen.queryByRole("button", { name: "Blackhole a host" }) !== null).toBe(visible)
 
-    // Mitigate now stays the event path for operators, with no blackhole option.
+    // Mitigate now opens the manual FlowSpec dialog for operators, with no blackhole option.
     if (role === "operator") expect(screen.getByRole("button", { name: "Mitigate now" })).toBeInTheDocument()
   })
 

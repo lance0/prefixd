@@ -34,23 +34,6 @@ export function formatRoutingScope(scope?: VpnScopeSnapshot | null): string {
   return scope ? `${scope.name} · VPN${scope.identity.family === "ipv4" ? "v4" : "v6"} · RD ${scope.identity.rd} · RT ${scope.route_targets.join(", ")}` : "Global"
 }
 
-export function readAutomaticScope(settings: { [key: string]: JsonValue } | undefined): string | null {
-  if (!settings) return null
-
-  if (!isRecord(settings.bgp) || settings.bgp.default_scope === undefined) return "global"
-  const scope = settings.bgp.default_scope
-
-  if (isText(scope)) return scope
-
-  if (!isRecord(scope)) return null
-  const ipv4 = scope.ipv4 ?? "global"
-  const ipv6 = scope.ipv6 ?? "global"
-
-  if (!isText(ipv4) || !isText(ipv6)) return null
-
-  return `IPv4: ${ipv4} · IPv6: ${ipv6}`
-}
-
 /** Only complete, controller-owned scope policies become selectable. */
 export function readVpnScopes(settings: { [key: string]: JsonValue } | undefined): VpnScopePolicies {
   const scopes = settings && isRecord(settings.bgp) && isRecord(settings.bgp.vpn_scopes) ? settings.bgp.vpn_scopes : {}
@@ -659,14 +642,11 @@ export async function getMitigation(id: string): Promise<Mitigation> {
   return fetchApi<Mitigation>(`/v1/mitigations/${id}`)
 }
 
-export async function withdrawMitigation(
-  id: string,
-  reason: string,
-  operator: string
-): Promise<void> {
+/** The controller records the authenticated principal as the actor; the body names no operator. */
+export async function withdrawMitigation(id: string, reason: string): Promise<void> {
   await fetchApi(`/v1/mitigations/${id}/withdraw`, {
     method: "POST",
-    body: JSON.stringify({ reason, operator_id: operator }),
+    body: JSON.stringify({ reason }),
   })
 }
 
@@ -678,7 +658,7 @@ export interface CreateBlackholeRequest {
   ttl_seconds: number
 }
 
-/** Admin-only manual blackhole (ADR 027). Bearer tokens and Operator sessions get 403. */
+/** Admin-only manual blackhole (ADR 027). Operator sessions and operator tokens get 403. */
 export async function createBlackhole(request: CreateBlackholeRequest): Promise<Mitigation> {
   return fetchApi<Mitigation>("/v1/mitigations", {
     method: "POST",
@@ -995,14 +975,10 @@ export interface BulkWithdrawResponse {
   results: BulkWithdrawResult[]
 }
 
-export async function bulkWithdrawMitigations(
-  ids: string[],
-  reason: string,
-  operator: string
-): Promise<BulkWithdrawResponse> {
+export async function bulkWithdrawMitigations(ids: string[], reason: string): Promise<BulkWithdrawResponse> {
   return fetchApi<BulkWithdrawResponse>("/v1/mitigations/withdraw", {
     method: "POST",
-    body: JSON.stringify({ mitigation_ids: ids, reason, operator_id: operator }),
+    body: JSON.stringify({ mitigation_ids: ids, reason }),
   })
 }
 
@@ -1018,40 +994,10 @@ export interface BulkAcknowledgeResponse {
   results: BulkAcknowledgeResult[]
 }
 
-export async function bulkAcknowledgeMitigations(
-  ids: string[],
-  operator: string
-): Promise<BulkAcknowledgeResponse> {
+export async function bulkAcknowledgeMitigations(ids: string[]): Promise<BulkAcknowledgeResponse> {
   return fetchApi<BulkAcknowledgeResponse>("/v1/mitigations/acknowledge", {
     method: "POST",
-    body: JSON.stringify({ mitigation_ids: ids, operator_id: operator }),
-  })
-}
-
-export interface IngestEventRequest {
-  victim_ip: string
-  vector: string
-  source: string
-  timestamp: string
-  bps?: number | null
-  pps?: number | null
-  top_dst_ports?: number[]
-  confidence?: number | null
-  action?: string
-}
-
-export interface EventResponse {
-  /** This creation request had no successful speaker reply; not persisted status. */
-  announcement_outcome?: AnnouncementOutcome
-  event_id: string
-  mitigation_id: string | null
-  status: string
-}
-
-export async function ingestEvent(input: IngestEventRequest): Promise<EventResponse> {
-  return fetchApi<EventResponse>("/v1/events", {
-    method: "POST",
-    body: JSON.stringify(input),
+    body: JSON.stringify({ mitigation_ids: ids }),
   })
 }
 
@@ -1201,14 +1147,10 @@ export async function getSafelist(): Promise<SafelistEntry[]> {
   return fetchApi<SafelistEntry[]>("/v1/safelist")
 }
 
-export async function addSafelist(
-  prefix: string,
-  reason: string,
-  operator: string
-): Promise<void> {
+export async function addSafelist(prefix: string, reason: string): Promise<void> {
   await fetchApi("/v1/safelist", {
     method: "POST",
-    body: JSON.stringify({ prefix, reason, operator_id: operator }),
+    body: JSON.stringify({ prefix, reason }),
   })
 }
 
@@ -1350,6 +1292,52 @@ export async function changePassword(
     method: "PUT",
     body: JSON.stringify(body),
   })
+}
+
+// API tokens (ADR 034). Every call needs an Admin session; tokens, mTLS and `none` mode get 403.
+
+export type TokenScope = "ingest" | "operator" | "admin"
+
+/** A stored token. The controller never returns its secret or hash here. */
+export interface ApiToken {
+  token_id: string
+  name: string
+  scope: TokenScope
+  source: string | null
+  pop: string | null
+  created_at: string
+  created_by: string
+  expires_at: string | null
+  last_used_at: string | null
+  revoked_at: string | null
+  revoked_by: string | null
+}
+
+export interface NewApiToken {
+  name: string
+  scope: TokenScope
+  source?: string
+  pop?: string
+  expires_at?: string
+}
+
+/** The create response: the only time `token`, the secret, appears. Never cache it. */
+export interface CreatedApiToken extends ApiToken {
+  token: string
+}
+
+export async function getApiTokens(): Promise<ApiToken[]> {
+  const response = await fetchApi<{ tokens: ApiToken[]; count: number }>("/v1/tokens")
+
+  return response.tokens
+}
+
+export async function createApiToken(request: NewApiToken): Promise<CreatedApiToken> {
+  return fetchApi<CreatedApiToken>("/v1/tokens", { method: "POST", body: JSON.stringify(request) })
+}
+
+export async function revokeApiToken(name: string): Promise<ApiToken> {
+  return fetchApi<ApiToken>(`/v1/tokens/${encodeURIComponent(name)}/revoke`, { method: "POST" })
 }
 
 // Config endpoints (read-only)
@@ -1692,32 +1680,6 @@ export interface SourceConfig {
   confidence_mapping: Record<string, number>
   mode?: SourceMode
   match_dimensions?: MatchDimension[]
-}
-
-export interface CorroboratorInput {
-  source: string
-  vector?: string
-  customer_id?: string
-  pop?: string
-  service_id?: string
-  interface?: string
-  confidence?: number
-}
-
-export interface CorroboratorResponse {
-  signal_id: string
-  status: "attached" | "cached"
-  attached_group_ids: string[]
-}
-
-export async function sendCorroborator(
-  input: CorroboratorInput
-): Promise<CorroboratorResponse> {
-  return fetchApi<CorroboratorResponse>("/v1/signals/corroborator", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(input),
-  })
 }
 
 export interface WebhookFieldMap {

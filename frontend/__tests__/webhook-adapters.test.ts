@@ -9,7 +9,7 @@ function base(): WebhookAdapter {
     name: "radware",
     description: "",
     enabled: true,
-    auth: { type: "hmac", secret_env: "RADWARE_SECRET", header: "X-Signature-SHA256", algorithm: "sha256" },
+    auth: { type: "hmac", secret_env: "PREFIXD_WEBHOOK_RADWARE_SECRET", header: "X-Signature-SHA256", algorithm: "sha256" },
     root_path: null,
     fields: {
       victim_ip: "$.target.ip",
@@ -40,6 +40,8 @@ describe("validateAdapter", () => {
     ["has/slash"],
     [""],
     ["a".repeat(65)],
+    ["-leading-hyphen"],
+    ["under_score"],
   ])("rejects invalid name %s", (bad) => {
     const adapter = { ...base(), name: bad }
     const errors = validateAdapter(adapter, [], true)
@@ -67,6 +69,26 @@ describe("validateAdapter", () => {
     adapter.auth = { type: "hmac", secret_env: "", header: "X-Signature-SHA256", algorithm: "sha256" }
     const errors = validateAdapter(adapter, [], true)
     expect(errors).toContain("auth.secret_env is required for HMAC")
+  })
+
+  it.each(["PATH", "RADWARE_WEBHOOK_SECRET", "prefixd_webhook_lower"])("refuses secret_env %s outside the PREFIXD_WEBHOOK_ namespace", (name) => {
+    const adapter = base()
+    adapter.auth = { type: "hmac", secret_env: name, header: "X-Signature-SHA256", algorithm: "sha256" }
+    expect(validateAdapter(adapter, [], true)).toContain("auth.secret_env must start with PREFIXD_WEBHOOK_")
+  })
+
+  it("requires fields.source_id when an HMAC adapter maps fields.action", () => {
+    const adapter = { ...base(), fields: { ...base().fields, action: "$.action" } }
+    expect(validateAdapter(adapter, [], true).some((e) => e.startsWith("fields.source_id is required"))).toBe(true)
+    expect(validateAdapter({ ...adapter, fields: { ...adapter.fields, source_id: "$.id" } }, [], true)).toEqual([])
+    expect(validateAdapter({ ...adapter, auth: { type: "bearer" as const } }, [], true)).toEqual([])
+  })
+
+  it("skips the credential checks for a disabled adapter, as the controller does", () => {
+    const adapter = { ...base(), enabled: false, fields: { ...base().fields, action: "$.action" } }
+    adapter.auth = { type: "hmac", secret_env: "RADWARE_SECRET", header: "X-Signature-SHA256", algorithm: "sha256" }
+    expect(validateAdapter(adapter, [], true)).toEqual([])
+    expect(validateAdapter({ ...adapter, enabled: true }, [], true)).toHaveLength(2)
   })
 
   it("does not require secret_env when auth type is bearer", () => {

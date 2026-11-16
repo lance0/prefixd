@@ -17,9 +17,9 @@ import { Checkbox } from "@/components/ui/checkbox"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import { useConfigSettings } from "@/hooks/use-api"
+import { useConfigPlaybooks, useConfigSettings } from "@/hooks/use-api"
 import { useTimeFormat } from "@/components/time-zone-provider"
-import { createMitigation, createVpnFlowSpec, createSourceOnlyVpn, previewVpnFlowSpec, previewSourceOnlyVpn, readVpnScopes, formatRoutingScope, previewFlowSpecAdmission, type SourceOnlyVpnRequest, type VpnScopePolicy, type CreateFlowSpecRequest, type FlowSpecAdmissionPreview, type JsonValue } from "@/lib/api"
+import { createMitigation, createVpnFlowSpec, createSourceOnlyVpn, previewVpnFlowSpec, previewSourceOnlyVpn, readVpnScopes, formatRoutingScope, previewFlowSpecAdmission, type SourceOnlyVpnRequest, type VpnScopePolicy, type CreateFlowSpecRequest, type FlowSpecAdmissionPreview, type JsonValue, type ConfigPlaybook } from "@/lib/api"
 import { parseDestination } from "@/lib/destination"
 import { formatFlowSpecRule } from "./flowspec-preview"
 import { StatusPill } from "./status-pill"
@@ -291,6 +291,83 @@ function readGuardrails(settings: { [key: string]: JsonValue } | undefined): Rul
   }
 }
 
+/** The host vectors whose playbooks a single FlowSpec rule can carry, with the protocol each implies. */
+export const MITIGATE_NOW_VECTORS = [
+  { value: "udp_flood", label: "UDP flood", protocol: "udp" },
+  { value: "syn_flood", label: "SYN flood", protocol: "tcp" },
+  { value: "ack_flood", label: "ACK flood", protocol: "tcp" },
+  { value: "icmp_flood", label: "ICMP flood", protocol: "icmp" },
+  { value: "unknown", label: "Unknown", protocol: "any" },
+] as const
+
+export interface PlaybookPrefill {
+  /** The matching playbook, or null when none matches. */
+  playbook: string | null
+  fields: Partial<RuleForm>
+  /** Why the action was not prefilled, if it was not. */
+  note?: string
+}
+
+/**
+ * The rule fields implied by the playbook the controller would pick for `vector`: the first
+ * host-scope playbook for the vector, matched as policy matches it. A single-action step names
+ * no destination ports, so the operator's ports stay as entered.
+ */
+export function playbookPrefill(vector: string, playbooks: ConfigPlaybook[], form: Pick<RuleForm, "victimIp" | "dstPorts">): PlaybookPrefill {
+  const entry = MITIGATE_NOW_VECTORS.find((candidate) => candidate.value === vector)
+  const ipv6 = parseDestination(form.victimIp)?.ipv6 === true
+  const protocol = entry?.protocol === "icmp" && ipv6 ? "icmpv6" : entry?.protocol ?? "any"
+  const hasPorts = (parsePorts(form.dstPorts) ?? []).length > 0
+
+  const playbook = playbooks.find((candidate) => candidate.match.vector === vector &&
+    (candidate.match.scope ?? "host") === "host" && (!candidate.match.require_top_ports || hasPorts))
+
+  if (!playbook) return { playbook: null, fields: { protocol }, note: "No playbook matches this vector. Choose the action." }
+  const step = playbook.steps[0]
+  const fields: Partial<RuleForm> = { protocol }
+
+  if (step && step.ttl_seconds > 0) fields.ttl = String(step.ttl_seconds)
+
+  if (step?.action === "police" && step.rate_bps) {
+    fields.action = "police"
+    fields.rateBps = String(step.rate_bps)
+  } else if (step?.action === "discard") {
+    fields.action = "discard"
+    fields.rateBps = ""
+  } else {
+    return { playbook: playbook.name, fields, note: `Playbook ${playbook.name} has no single police or discard action. Choose the action.` }
+  }
+
+  return { playbook: playbook.name, fields }
+}
+
+const REASON_PREFIX = "Mitigate now: "
+
+/**
+ * Writes the picker's fields into the form, except the ones the operator has edited since
+ * choosing the vector. Rerun when the destination or ports change, since both can select a
+ * different playbook or protocol family.
+ */
+export function applyPrefill(form: RuleForm, vector: string, playbooks: ConfigPlaybook[], own: ReadonlySet<keyof RuleForm>): RuleForm {
+  const next = playbookPrefill(vector, playbooks, form)
+  const result = { ...form }
+
+  if (next.fields.protocol !== undefined && !own.has("protocol")) result.protocol = next.fields.protocol
+
+  if (next.fields.action !== undefined && !own.has("action")) result.action = next.fields.action
+
+  if (next.fields.rateBps !== undefined && !own.has("rateBps")) result.rateBps = next.fields.rateBps
+
+  if (next.fields.ttl !== undefined && !own.has("ttl")) result.ttl = next.fields.ttl
+
+  // A reason the operator typed is kept; one the picker wrote follows the playbook.
+  if (!own.has("reason") && (!form.reason || form.reason.startsWith(REASON_PREFIX))) {
+    result.reason = `${REASON_PREFIX}${vector}${next.playbook ? ` (playbook ${next.playbook})` : ""}`
+  }
+
+  return result
+}
+
 function previewProtocol(protocol: string): number | null {
   switch (protocol) {
     case "udp": return 17
@@ -306,17 +383,23 @@ interface FlowSpecRuleDialogProps {
   onOpenChange: (open: boolean) => void
   /** Source-only rules deny every destination in a VRF and require an administrator. */
   canSourceOnly?: boolean
+  /** Mitigate now: start from the playbook for a chosen attack vector. */
+  fromPlaybook?: boolean
 }
 
 /**
  * Manual FlowSpec rule (POST /v1/mitigations), including the ADR 028 source-port, fragment
  * and packet-length matches. Errors appear once a field is edited or submission is attempted.
  */
-export function FlowSpecRuleDialog({ open, onOpenChange, canSourceOnly = true }: FlowSpecRuleDialogProps) {
+export function FlowSpecRuleDialog({ open, onOpenChange, canSourceOnly = true, fromPlaybook = false }: FlowSpecRuleDialogProps) {
   const { formatTime } = useTimeFormat()
   const router = useRouter()
   const { data: settings } = useConfigSettings()
+  const { data: playbooks, error: playbooksError } = useConfigPlaybooks(fromPlaybook && open)
   const [form, setForm] = useState<RuleForm>(EMPTY_FORM)
+  const [vector, setVector] = useState("")
+  // Fields the operator changed after choosing a vector; a later prefill leaves them alone.
+  const ownEdits = useRef(new Set<keyof RuleForm>())
   const [touched, setTouched] = useState<Set<keyof RuleForm>>(new Set())
   const [submitted, setSubmitted] = useState(false)
   const [isSubmitting, setIsSubmitting] = useState(false)
@@ -379,17 +462,38 @@ export function FlowSpecRuleDialog({ open, onOpenChange, canSourceOnly = true }:
 
   const update = <K extends keyof RuleForm>(field: K, value: RuleForm[K]) => {
     invalidateAdmission()
-    setForm((prev) => ({ ...prev, [field]: value }))
+    const matchInput = field === "victimIp" || field === "dstPorts"
+
+    // A typed reason stays the operator's even before a vector is chosen.
+    if ((vector || field === "reason") && !matchInput) ownEdits.current.add(field)
+    setForm((prev) => {
+      const next = { ...prev, [field]: value }
+
+      return vector && matchInput ? applyPrefill(next, vector, playbooks?.playbooks ?? [], ownEdits.current) : next
+    })
     setTouched((prev) => new Set(prev).add(field))
   }
 
   const reset = () => {
     invalidateAdmission()
     setForm(EMPTY_FORM)
+    setVector("")
+    ownEdits.current = new Set()
     setTouched(new Set())
     setSubmitted(false)
     setError(null)
   }
+
+  // Choosing a vector is explicit, so it rewrites every field the playbook sets, except a
+  // reason the operator wrote, which stays theirs across vectors.
+  const chooseVector = (value: string) => {
+    invalidateAdmission()
+    setVector(value)
+    ownEdits.current = new Set(ownEdits.current.has("reason") ? ["reason"] : [])
+    setForm((prev) => applyPrefill(prev, value, playbooks?.playbooks ?? [], ownEdits.current))
+  }
+
+  const prefill = fromPlaybook && vector ? playbookPrefill(vector, playbooks?.playbooks ?? [], form) : null
 
   const handleCheckAdmission = async () => {
     setSubmitted(true)
@@ -471,13 +575,32 @@ export function FlowSpecRuleDialog({ open, onOpenChange, canSourceOnly = true }:
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2 text-balance text-sm">
               <ShieldPlus className="size-4 text-muted-foreground" aria-hidden="true" />
-              Create FlowSpec rule
+              {fromPlaybook ? "Mitigate now" : "Create FlowSpec rule"}
             </DialogTitle>
             <DialogDescription className="text-pretty text-xs">
+              {fromPlaybook ? "Start from the playbook for the attack vector, then adjust the rule. It is created as a manual mitigation, audited under your account. " : ""}
               Define the traffic match and action. The controller checks ownership, safelists
               and deployment guardrails before saving intent.
             </DialogDescription>
           </DialogHeader>
+
+          {fromPlaybook ? <div className="space-y-1.5">
+            <Label htmlFor="fs-vector">Attack vector</Label>
+            <Select value={vector} onValueChange={chooseVector} disabled={!playbooks}>
+              <SelectTrigger id="fs-vector" className="h-9" aria-describedby="fs-vector-help">
+                <SelectValue placeholder={playbooks ? "Select vector…" : playbooksError ? "Playbooks unavailable" : "Loading playbooks…"} />
+              </SelectTrigger>
+              <SelectContent>
+                {MITIGATE_NOW_VECTORS.map((entry) => <SelectItem key={entry.value} value={entry.value}>{entry.label}</SelectItem>)}
+              </SelectContent>
+            </Select>
+            <p id="fs-vector-help" className="text-xs text-muted-foreground" aria-live="polite">
+              {playbooksError ? "Playbooks could not be loaded. Set the rule fields directly."
+                : prefill?.playbook ? `Protocol, action, rate and TTL from playbook ${prefill.playbook}, unless you change them. Destination ports stay as entered.`
+                  : "Sets protocol, action, rate and TTL from the playbook policy would use for this vector."}
+            </p>
+            {prefill?.note ? <p className="text-xs text-warning">{prefill.note}</p> : null}
+          </div> : null}
 
           {Object.keys(scopes).length > 0 || scopeName !== "global" ? <div className="space-y-1.5">
             <Label htmlFor="fs-scope">Routing scope</Label>

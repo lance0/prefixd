@@ -259,7 +259,8 @@ FastNetMon Community ban, into a blackhole for the victim
 
 - **Source allowlist.** Only events whose `source` is listed in
   `blackhole.detector_sources` reach a blackhole step; others get `422`. The
-  dashboard's mitigate-now dialog stays off this path unless listed.
+  source is the one the caller's ingest token is bound to, so an Operator
+  never reaches a detector blackhole.
 - **Same guardrails as manual blackholes.** Ownership, safelist, quotas and the
   TTL cap apply. A repeated ban extends the blackhole to at most
   `blackhole.max_ttl_seconds` from now, and the FastNetMon unban withdraws it.
@@ -551,7 +552,7 @@ Real-time visibility into mitigation state:
 
 - **Overview** - Active mitigations, BGP session status, quota usage, 24h activity chart
 - **Mitigations** - List with filtering, sorting, pagination, inline withdraw, bulk withdraw (multi-select), CSV export
-- **Mitigate Now** - Operator modal (`n` shortcut, command palette action) posts policy-validated ban events
+- **Mitigate Now** - Operator shortcut (`n`, command palette action) to the manual FlowSpec rule form, prefilled with the protocol, action, rate and TTL of the playbook for a chosen attack vector; it creates a manual mitigation audited under the operator's account
 - **Rule** - Operator form for one manual FlowSpec rule, including source prefix, source ports, non-first fragments and packet length, with client checks that name the guardrail
 - **Events** - Attack event history with CSV export
 - **IP History** - Unified timeline per IP (events + mitigations + customer context), with incident report generation
