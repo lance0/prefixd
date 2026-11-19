@@ -11,6 +11,8 @@ Anchors and aliases are accepted, but `<<` merge keys remain ordinary keys and
 never override typed configuration. File includes and variable interpolation are
 not enabled. Parse errors omit source snippets to protect nearby credentials.
 
+For dashboard SSO in credentials mode, see [Connect an OIDC provider](../how-to/oidc.md).
+
 ## prefixd.yaml
 
 Main daemon configuration.

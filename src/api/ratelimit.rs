@@ -53,7 +53,9 @@ impl RateLimitClass {
     fn of(method: &Method, route: Option<&str>) -> Option<Self> {
         let route = match route {
             Some("/v1/health" | "/v1/ready" | "/metrics") => return None,
-            None | Some("/v1/auth/login") => return Some(Self::Auth),
+            None | Some("/v1/auth/login" | "/v1/auth/oidc/login" | "/v1/auth/oidc/callback") => {
+                return Some(Self::Auth);
+            }
             Some(route) => route,
         };
         if matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS) {

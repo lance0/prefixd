@@ -1826,6 +1826,26 @@ impl RepositoryTrait for Repository {
     }
 
     // Operator methods
+    async fn upsert_oidc_operator(
+        &self,
+        issuer: &str,
+        subject: &str,
+        role: OperatorRole,
+        version: &str,
+        expires: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Operator> {
+        // The reserved username cannot collide with a user-supplied local login.
+        let row = sqlx::query_as::<_, OperatorRow>(
+            "INSERT INTO operators (operator_id, username, password_hash, role, oidc_issuer, oidc_subject, oidc_expires_at, last_login_at)
+             SELECT id, 'oidc:' || id::text, $1, $2, $3, $4, $5, NOW() FROM gen_random_uuid() AS id
+             ON CONFLICT (oidc_issuer, oidc_subject) DO UPDATE SET
+                oidc_expires_at = EXCLUDED.oidc_expires_at, role = EXCLUDED.role, password_hash = EXCLUDED.password_hash, last_login_at = NOW()
+             RETURNING operator_id, username, password_hash, role, created_at, created_by, last_login_at")
+            .bind(version).bind(role.to_string()).bind(issuer).bind(subject).bind(expires)
+            .fetch_one(&self.pool).await?;
+        row.try_into()
+    }
+
     async fn get_operator_by_username(&self, username: &str) -> Result<Option<Operator>> {
         let row = sqlx::query_as::<_, OperatorRow>(
             r#"
@@ -1843,7 +1863,7 @@ impl RepositoryTrait for Repository {
         let row = sqlx::query_as::<_, OperatorRow>(
             r#"
             SELECT operator_id, username, password_hash, role, created_at, created_by, last_login_at
-            FROM operators WHERE operator_id = $1
+            FROM operators WHERE operator_id = $1 AND (oidc_expires_at IS NULL OR oidc_expires_at > NOW())
             "#,
         )
         .bind(id)

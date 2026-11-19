@@ -382,6 +382,7 @@ export interface PopInfo {
 }
 
 export interface PublicHealthResponse {
+  oidc_enabled?: boolean
   status: string
   version: string
   auth_mode: string

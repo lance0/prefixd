@@ -49,6 +49,13 @@ describe("login authentication mode", () => {
     expect(controller.calls("POST", "/v1/auth/login")).toHaveLength(0)
   })
 
+  it("offers one SSO link when the controller has an issuer", async () => {
+    session({ mode: "credentials" })
+    controller.route("GET", "/v1/health", () => json({ status: "ok", auth_mode: "credentials", oidc_enabled: true }))
+    renderApp(<LoginPage />)
+    expect(await screen.findByRole("link", { name: "Sign in with SSO" })).toHaveAttribute("href", "/api/prefixd/v1/auth/oidc/login")
+  })
+
   it("preserves password sign in for credentials mode", async () => {
     session({ mode: "credentials" })
     const { router } = renderApp(<LoginPage />)

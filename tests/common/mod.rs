@@ -102,7 +102,7 @@ impl TestContext {
         let auth_layer = create_auth_layer(
             self.pool.clone(),
             self.repo.clone(),
-            self.state.settings.http.auth.mode,
+            self.state.settings.http.auth.clone(),
             false,
         )
         .await;
@@ -184,6 +184,7 @@ pub fn test_settings() -> Settings {
         http: HttpConfig {
             listen: "127.0.0.1:0".to_string(),
             auth: AuthConfig {
+                oidc: None,
                 mode: AuthMode::None,
             },
             rate_limit: RateLimitConfig::default(),
@@ -537,7 +538,7 @@ impl E2ETestContext {
         let auth_layer = create_auth_layer(
             self.pool.clone(),
             self.repo.clone(),
-            self.state.settings.http.auth.mode,
+            self.state.settings.http.auth.clone(),
             false,
         )
         .await;

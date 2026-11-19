@@ -10142,3 +10142,121 @@ async fn generic_withdrawal_holds_the_mitigation_lock_until_commit() {
             .is_some()
     );
 }
+
+#[tokio::test]
+async fn oidc_login_maps_each_deployments_claim_and_expires_the_session() {
+    use axum::{
+        Json, Router,
+        routing::{get, post},
+    };
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    use hmac::{Hmac, KeyInit, Mac};
+    use prefixd::{
+        config::{AuthMode, OidcConfig},
+        domain::OperatorRole,
+    };
+    use serde_json::{Value, json};
+    use std::sync::{Arc, Mutex};
+
+    async fn request(app: &Router, uri: &str, cookie: &str) -> axum::response::Response {
+        app.clone()
+            .oneshot(
+                Request::get(uri)
+                    .header("cookie", cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+    fn cookie(response: &axum::response::Response) -> &str {
+        response.headers()["set-cookie"]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+    }
+
+    for (claim, group) in [("roles", "prefixd.viewer"), ("groups", "network-audit")] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let issuer = format!("http://{}", listener.local_addr().unwrap());
+        let metadata = json!({
+            "issuer":issuer, "authorization_endpoint":format!("{issuer}/authorize"),
+            "token_endpoint":format!("{issuer}/token"),"jwks_uri":format!("{issuer}/keys"),
+            "response_types_supported":["code"],"subject_types_supported":["public"],
+            "id_token_signing_alg_values_supported":["HS256"]
+        });
+        let token = Arc::new(Mutex::new(String::new()));
+        let reply = token.clone();
+        let provider = Router::new()
+            .route("/.well-known/openid-configuration",get(async move ||Json(metadata)))
+            .route("/keys",get(async ||Json(json!({"keys":[]}))))
+            .route("/token",post(async move ||Json(json!({"access_token":"fixture","token_type":"Bearer","id_token":reply.lock().unwrap().clone()}))));
+        let server = tokio::spawn(async move { axum::serve(listener, provider).await.unwrap() });
+        let mut ctx = TestContext::new().await;
+        let auth = &mut Arc::get_mut(&mut ctx.state).unwrap().settings.http.auth;
+        auth.mode = AuthMode::Credentials;
+        auth.oidc = Some(OidcConfig {
+            issuer: issuer.clone(),
+            client_id: "test".into(),
+            // Cargo supplies this public constant to the integration test process.
+            client_secret_env: "CARGO_PKG_NAME".into(),
+            redirect_uri: "https://prefixd.test/v1/auth/oidc/callback".into(),
+            extra_scopes: vec![],
+            role_claim: claim.into(),
+            role_mappings: [(group.into(), OperatorRole::Viewer)].into(),
+        });
+        let app = ctx.router().await;
+        let start = request(&app, "/v1/auth/oidc/login", "").await;
+        assert_eq!(start.status(), StatusCode::SEE_OTHER);
+        let url = reqwest::Url::parse(start.headers()["location"].to_str().unwrap()).unwrap();
+        let params: std::collections::HashMap<_, _> = url.query_pairs().collect();
+        assert_eq!(params["code_challenge_method"], "S256");
+        let now = chrono::Utc::now().timestamp();
+        let payload = json!({"iss":issuer,"sub":"operator-1","aud":"test","iat":now,"exp":now+600,"nonce":params["nonce"],(claim):[group]});
+        let jwt = format!(
+            "{}.{}",
+            URL_SAFE_NO_PAD.encode(br#"{"alg":"HS256"}"#),
+            URL_SAFE_NO_PAD.encode(payload.to_string())
+        );
+        let mut mac =
+            Hmac::<sha2::Sha256>::new_from_slice(env!("CARGO_PKG_NAME").as_bytes()).unwrap();
+        mac.update(jwt.as_bytes());
+        *token.lock().unwrap() = format!(
+            "{jwt}.{}",
+            URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes())
+        );
+        let callback = format!(
+            "/v1/auth/oidc/callback?state={}&code=fixture",
+            params["state"]
+        );
+        let response = request(&app, &callback, cookie(&start)).await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let session = cookie(&response);
+        let me = request(&app, "/v1/auth/me", session).await;
+        assert_eq!(me.status(), StatusCode::OK);
+        let me: Value =
+            serde_json::from_slice(&axum::body::to_bytes(me.into_body(), 4096).await.unwrap())
+                .unwrap();
+        assert_eq!(me["role"], "viewer");
+        assert_eq!(
+            request(&app, "/v1/operators", session).await.status(),
+            StatusCode::FORBIDDEN
+        );
+        sqlx::query("UPDATE operators SET oidc_expires_at = NOW() WHERE oidc_issuer = $1")
+            .bind(&issuer)
+            .execute(&ctx.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            request(&app, "/v1/auth/me", session).await.status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            request(&app, &callback, session).await.status(),
+            StatusCode::UNAUTHORIZED
+        );
+        server.abort();
+    }
+}

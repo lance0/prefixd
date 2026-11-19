@@ -7,7 +7,7 @@
 # 0.7.1 release has an incompatible requirement. Revisit when testcontainers
 # accepts 0.7 or replaces the crate.
 # The separate full-lock cargo-audit gate retains the explicit exceptions for
-# rsa (optional SQLx MySQL, no patched release) and libsqlite3-sys (optional
+# rsa (OIDC public-key verification and optional SQLx MySQL) and libsqlite3-sys (optional
 # SQLx SQLite, capped below the patched 0.39.0 by sqlx).
 ignore = ["RUSTSEC-2026-0440"]
 

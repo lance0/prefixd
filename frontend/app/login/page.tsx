@@ -69,6 +69,11 @@ export default function LoginPage() {
             </p>
           ) : (
             <form onSubmit={handleSubmit} className="space-y-4">
+              {health?.oidc_enabled && (
+                <Button asChild variant="outline" className="w-full">
+                  <a href="/api/prefixd/v1/auth/oidc/login">Sign in with SSO</a>
+                </Button>
+              )}
               {error && (
                 <div className="flex items-center gap-2 p-3 text-sm text-destructive bg-destructive/10 rounded-md">
                   <AlertCircle className="h-4 w-4" />

@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed, 2026-11-19. The deployment's identity provider still needs confirmation.
+Proposed, 2026-11-19. Draft implementation. Each installation configures one OIDC issuer.
 
 ## Context
 
@@ -19,7 +19,7 @@ The old LDAP configuration was a placeholder and was removed in version 0.20.0.
 
 ## Proposed integration
 
-Confirm which service the operator can connect to before selecting a transport.
+Configure one issuer in credentials mode and issue the dashboard session in the Rust controller. The [setup guide](../how-to/oidc.md) describes Entra and Keycloak configurations.
 
 - **Microsoft Entra ID or another OIDC issuer backed by AD.** Prefer an OIDC
   authorization-code callback in the Rust controller. With Entra, define app
@@ -52,11 +52,9 @@ Microsoft provider itself expects an Entra application registration.
 - Grant a session only when the verified assignments resolve to one distinct
   configured role. Two groups mapping to the same role are unambiguous.
   Missing assignments or matches for both viewer and admin deny login.
-  If raw group IDs are supported later, an overage marker means membership
+  For raw group IDs, an overage marker means membership
   is incomplete. [Entra group claims](https://learn.microsoft.com/en-us/security/zero-trust/develop/configure-tokens-group-claims-app-roles)
-- Give external identities their own revocable session version. Before
-  implementation, choose an absolute maximum age for a directory grant and
-  document the removal delay. At expiry require fresh provider authorization,
+- Give external identities their own revocable session version. Limit the directory grant to the earlier of the ID token expiry and one hour. At expiry require fresh provider authorization,
   including for an open dashboard WebSocket. Verify local emergency admin
   access during an issuer outage.
 - Exercise all three roles through the dashboard and direct API requests.

@@ -142,6 +142,34 @@ impl HttpConfig {
 
     /// mTLS authorization trusts the native listener to verify client certificates.
     pub(crate) fn validate_auth_transport(&self) -> crate::error::Result<()> {
+        if let Some(oidc) = &self.auth.oidc {
+            let https = |s: &str| {
+                reqwest::Url::parse(s).is_ok_and(|u| {
+                    u.scheme() == "https"
+                        && u.host().is_some()
+                        && u.username().is_empty()
+                        && u.password().is_none()
+                        && u.query().is_none()
+                        && u.fragment().is_none()
+                })
+            };
+            if self.auth.mode != AuthMode::Credentials
+                || !self.secure_cookies()
+                || !https(&oidc.issuer)
+                || !https(&oidc.redirect_uri)
+                || oidc.client_id.trim().is_empty()
+                || oidc.client_secret_env.is_empty()
+                || !oidc
+                    .client_secret_env
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+                || oidc.role_claim.trim().is_empty()
+                || oidc.role_mappings.is_empty()
+                || oidc.role_mappings.keys().any(|k| k.trim().is_empty())
+            {
+                return Err(crate::error::PrefixdError::Config("http.auth.oidc requires credentials mode, secure cookies, HTTPS issuer and redirect URI, client settings and role mappings".into()));
+            }
+        }
         if self.auth.mode != AuthMode::Mtls {
             return Ok(());
         }
@@ -166,6 +194,34 @@ impl HttpConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthConfig {
     pub mode: AuthMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oidc: Option<OidcConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OidcConfig {
+    pub issuer: String,
+    pub client_id: String,
+    pub client_secret_env: String,
+    pub redirect_uri: String,
+    #[serde(default)]
+    pub extra_scopes: Vec<String>,
+    pub role_claim: String,
+    pub role_mappings: std::collections::BTreeMap<String, crate::domain::OperatorRole>,
+}
+
+impl OidcConfig {
+    pub(crate) fn session_prefix(&self) -> String {
+        use sha2::{Digest, Sha256};
+        let config = serde_json::to_vec(self).expect("OIDC configuration is serializable");
+        format!("oidc:{}:", hex::encode(Sha256::digest(config)))
+    }
+}
+
+impl From<AuthMode> for AuthConfig {
+    fn from(mode: AuthMode) -> Self {
+        Self { mode, oidc: None }
+    }
 }
 
 /// The controller no longer reads this variable; `prefixdctl` reads

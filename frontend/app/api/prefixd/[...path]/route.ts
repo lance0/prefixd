@@ -31,6 +31,7 @@ async function proxyRequest(request: NextRequest, path: string) {
     }
 
     const response = await fetch(url, {
+      redirect: url.pathname.startsWith("/v1/auth/oidc/") ? "manual" : "follow",
       method: request.method,
       headers,
       body: request.body,

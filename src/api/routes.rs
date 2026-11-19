@@ -36,6 +36,8 @@ fn sessionless_routes() -> Router<Arc<AppState>> {
 fn public_routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/v1/health/detail", get(handlers::health_detail))
+        .route("/v1/auth/oidc/login", get(crate::auth::oidc::start))
+        .route("/v1/auth/oidc/callback", get(crate::auth::oidc::callback))
         .route("/v1/auth/login", post(handlers::login))
 }
 
@@ -280,7 +282,8 @@ pub fn create_test_router_with_session_store(
 ) -> Router {
     let session_layer =
         crate::auth::session_layer(session_store, state.settings.http.secure_cookies());
-    let backend = crate::auth::AuthBackend::new(state.repo.clone(), state.settings.http.auth.mode);
+    let backend =
+        crate::auth::AuthBackend::new(state.repo.clone(), state.settings.http.auth.clone());
     let auth_layer = axum_login::AuthManagerLayerBuilder::new(backend, session_layer).build();
 
     let router = public_routes()

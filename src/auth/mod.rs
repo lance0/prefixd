@@ -9,7 +9,7 @@ use std::sync::Arc;
 use tower_sessions::ExpiredDeletion;
 use tower_sessions_sqlx_store::PostgresStore;
 
-use crate::config::AuthMode;
+pub mod oidc;
 use crate::db::RepositoryTrait;
 
 pub type AuthSession = axum_login::AuthSession<AuthBackend>;
@@ -38,7 +38,7 @@ pub fn session_layer<S: tower_sessions::SessionStore>(
 pub async fn create_auth_layer(
     pool: PgPool,
     repo: Arc<dyn RepositoryTrait>,
-    mode: AuthMode,
+    mode: impl Into<crate::config::AuthConfig>,
     secure_cookies: bool,
 ) -> axum_login::AuthManagerLayer<AuthBackend, PostgresStore> {
     // Session store using PostgreSQL

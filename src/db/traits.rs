@@ -408,6 +408,18 @@ pub trait RepositoryTrait: Send + Sync {
     async fn list_mitigations_by_ip(&self, ip: &str, limit: u32) -> Result<Vec<Mitigation>>;
 
     // Operators
+    async fn upsert_oidc_operator(
+        &self,
+        _issuer: &str,
+        _subject: &str,
+        _role: OperatorRole,
+        _version: &str,
+        _expires: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Operator> {
+        Err(crate::error::PrefixdError::Config(
+            "OIDC identity storage unavailable".into(),
+        ))
+    }
     async fn get_operator_by_username(&self, username: &str) -> Result<Option<Operator>>;
     async fn get_operator_by_id(&self, id: Uuid) -> Result<Option<Operator>>;
     async fn create_operator(

@@ -747,7 +747,7 @@ pub fn verify_hmac_sha256(secret: &[u8], body: &[u8], header_value: &str) -> boo
     mac.update(body);
     let computed = mac.finalize().into_bytes();
 
-    computed.ct_eq(&expected).into()
+    computed.as_slice().ct_eq(&expected).into()
 }
 
 #[cfg(test)]

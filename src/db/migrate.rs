@@ -151,6 +151,11 @@ pub const MIGRATIONS: &[(i32, &str, &str)] = &[
         "ban_retry_boundary",
         include_str!("../../migrations/026_ban_retry_boundary.sql"),
     ),
+    (
+        27,
+        "oidc_operators",
+        include_str!("../../migrations/027_oidc_operators.sql"),
+    ),
 ];
 
 /// The highest version this binary knows. A database recording a higher

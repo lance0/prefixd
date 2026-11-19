@@ -27,11 +27,20 @@ pub struct Credentials {
 pub struct AuthBackend {
     repo: Arc<dyn RepositoryTrait>,
     mode: AuthMode,
+    oidc_prefix: Option<String>,
 }
 
 impl AuthBackend {
-    pub fn new(repo: Arc<dyn RepositoryTrait>, mode: AuthMode) -> Self {
-        Self { repo, mode }
+    pub fn new(
+        repo: Arc<dyn RepositoryTrait>,
+        config: impl Into<crate::config::AuthConfig>,
+    ) -> Self {
+        let config = config.into();
+        Self {
+            repo,
+            mode: config.mode,
+            oidc_prefix: config.oidc.map(|o| o.session_prefix()),
+        }
     }
 }
 
@@ -121,7 +130,14 @@ impl AuthnBackend for AuthBackend {
         }
 
         match self.repo.get_operator_by_id(*user_id).await {
-            Ok(op) => Ok(op),
+            Ok(op) => Ok(op.filter(|user| {
+                let version = user.password_hash.expose_secret();
+                !version.starts_with("oidc:")
+                    || self
+                        .oidc_prefix
+                        .as_ref()
+                        .is_some_and(|p| version.starts_with(p))
+            })),
             Err(e) => {
                 tracing::error!(error = %e, "failed to get operator by id");
                 Ok(None)

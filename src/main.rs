@@ -321,7 +321,7 @@ async fn main() -> anyhow::Result<()> {
     let auth_layer = create_auth_layer(
         pool,
         repo.clone(),
-        config.settings.http.auth.mode,
+        config.settings.http.auth.clone(),
         secure_cookies,
     )
     .await;
