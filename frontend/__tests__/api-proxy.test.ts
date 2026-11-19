@@ -68,12 +68,15 @@ describe("dashboard API proxy boundary", () => {
     const path = ["v1", "auth", "oidc", route]
     const target = "/" + path.join("/") + query
     const cookie = session + "; Path=/; HttpOnly; Secure; SameSite=Lax"
+
     fetchMock.mockResolvedValue(new Response(null, {
       status: 303, headers: { location, "set-cookie": cookie },
     }))
+
     const response = await routes.GET(new NextRequest("https://dashboard/api/prefixd" + target), {
       params: Promise.resolve({ path }),
     })
+
     const [url, options] = fetchMock.mock.calls[0]
     expect(url.toString()).toBe("http://prefixd:8080" + target)
     expect(options?.redirect).toBe("manual")
