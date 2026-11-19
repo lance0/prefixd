@@ -1018,33 +1018,8 @@ async fn profile_shares_windows_within_the_speaker_cap_and_refuses_retargeting()
     );
 }
 
-/// Issue a short-lived server certificate for the loopback HTTPS fixture.
-/// macOS also checks the validity period of locally issued TLS leaves.
-fn readiness_test_certificates() -> (String, String, String) {
-    use rcgen::{
-        BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer,
-        KeyPair, KeyUsagePurpose,
-    };
-    use std::time::SystemTime;
-
-    let mut ca = CertificateParams::default();
-    ca.distinguished_name
-        .push(DnType::CommonName, "prefixd readiness fixture CA");
-    ca.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-    ca.key_usages = vec![KeyUsagePurpose::KeyCertSign];
-    let ca_key = KeyPair::generate().unwrap();
-    let root = ca.self_signed(&ca_key).unwrap();
-
-    let mut leaf = CertificateParams::new(vec!["127.0.0.1".to_owned()]).unwrap();
-    let now = SystemTime::now();
-    leaf.not_before = (now - Duration::from_secs(60)).into();
-    leaf.not_after = (now + Duration::from_secs(3600)).into();
-    leaf.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
-    leaf.key_usages = vec![KeyUsagePurpose::DigitalSignature];
-    let leaf_key = KeyPair::generate().unwrap();
-    let certificate = leaf.signed_by(&leaf_key, &Issuer::new(ca, ca_key)).unwrap();
-    (root.pem(), certificate.pem(), leaf_key.serialize_pem())
-}
+#[path = "../../tests/common/tls.rs"]
+mod fixture_tls;
 
 #[tokio::test]
 async fn authenticated_https_readiness_refuses_redirects_large_bodies_and_bad_credentials() {
@@ -1078,7 +1053,7 @@ async fn authenticated_https_readiness_refuses_redirects_large_bodies_and_bad_cr
             }
         }
     })).route("/must-not-follow",get(move || { let count=redirect_count.clone();async move {count.fetch_add(1,SeqCst);StatusCode::OK} }));
-    let (ca, certificate, key) = readiness_test_certificates();
+    let (ca, certificate, key) = fixture_tls::loopback_certificates();
     let tls =
         axum_server::tls_rustls::RustlsConfig::from_pem(certificate.into_bytes(), key.into_bytes())
             .await
