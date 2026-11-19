@@ -17,6 +17,15 @@ From v0.23.0, follow [v0.23.0 → 0.23.1](#v0230--0231) first; from v0.22.1,
 [v0.20.0 → 0.21.0](#v0200--0210) before that; and from v0.19.1,
 [v0.19.1 → 0.20.0](#v0191--0200) before that.
 
+## Dashboard OIDC and schema version 27
+
+Migration 027 adds issuer, subject and grant expiry to the operators table
+and reserves an audit username for directory identities. It runs on startup
+even when OIDC is disabled. Existing local account names and password hashes
+are preserved. Stop older controllers before the migration and follow the
+[database downgrade procedure](#database-schema-version-and-downgrade) for
+rollback. To enable SSO, [configure one OIDC provider](oidc.md).
+
 ## Interrupted detector bans
 
 Migration 026 adds a nullable internal admission POP to `events` without

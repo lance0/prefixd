@@ -65,5 +65,13 @@ denies the next login. An already-issued grant can last until its deadline. An a
 deadline. Changing or removing the OIDC configuration invalidates existing SSO
 sessions on restart. Local credential login remains available for recovery.
 
-Select a provider that exposes OIDC. An installation with LDAP alone needs
-an identity service in front of the directory.
+**LDAP via Dex.** Point prefixd at the Dex issuer, configure the LDAP
+connector's user and group searches in Dex, and set `extra_scopes: [groups]`
+and `role_claim: groups` in prefixd. Map the exact group values Dex emits.
+[Dex LDAP connector](https://dexidp.io/docs/connectors/ldap/)
+
+On 2026-11-19, separate local fixtures exercised Keycloak 26.4.0 and Dex
+2.43.1 with OpenLDAP. Each issuer authenticated a user through its login form.
+The controller created a PostgreSQL-backed viewer session and returned 403
+from the admin operator list. These checks used loopback HTTP and exercised
+the Rust routes directly. The Entra setup above still needs a tenant test.
