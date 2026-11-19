@@ -91,6 +91,10 @@ command palette still need complete pagination.
 
 ## Later work
 
+[Directory group mapping](docs/adr/035-directory-group-mapping.md) is proposed
+for dashboard access. The first integration depends on whether the deployment
+can supply an OpenID Connect issuer or requires direct Active Directory access.
+
 Provider-scoped upstream RTBH for saturated transit or exchange ports is
 an accepted design in [ADR 029](docs/adr/029-upstream-blackholing.md), with no
 upstream runtime support yet. It requires

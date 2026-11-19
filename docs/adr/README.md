@@ -42,5 +42,6 @@ Format follows [Michael Nygard's template](https://cognitect.com/blog/2011/11/15
 | [032](032-vpn-flowspec-scope.md) | Scoped VPN FlowSpec origination | Accepted (implementation in progress) | 2026-11-08 |
 | [033](033-detector-prefix-mitigations.md) | Guarded detector-driven prefix mitigations | Accepted; router qualification pending; amended by [034](034-source-bound-api-tokens.md) | 2026-11-13 |
 | [034](034-source-bound-api-tokens.md) | Source-bound scoped API tokens | Accepted (design only) | 2026-11-15 |
+| [035](035-directory-group-mapping.md) | Map directory groups to dashboard roles | Proposed | 2026-11-19 |
 
 ADRs are numbered sequentially as written. Retroactive ADRs (009-013) were documented on 2026-02-18 but dated to when the decision was originally made.
