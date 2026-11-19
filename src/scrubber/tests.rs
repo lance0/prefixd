@@ -1018,6 +1018,9 @@ async fn profile_shares_windows_within_the_speaker_cap_and_refuses_retargeting()
     );
 }
 
+#[path = "../../tests/common/tls.rs"]
+mod fixture_tls;
+
 #[tokio::test]
 async fn authenticated_https_readiness_refuses_redirects_large_bodies_and_bad_credentials() {
     use axum::{
@@ -1050,12 +1053,11 @@ async fn authenticated_https_readiness_refuses_redirects_large_bodies_and_bad_cr
             }
         }
     })).route("/must-not-follow",get(move || { let count=redirect_count.clone();async move {count.fetch_add(1,SeqCst);StatusCode::OK} }));
-    let tls = axum_server::tls_rustls::RustlsConfig::from_pem(
-        include_bytes!("../bgp/testdata/transport-server-cert.pem").to_vec(),
-        include_bytes!("../bgp/testdata/transport-server-key.pem").to_vec(),
-    )
-    .await
-    .unwrap();
+    let (ca, certificate, key) = fixture_tls::loopback_certificates();
+    let tls =
+        axum_server::tls_rustls::RustlsConfig::from_pem(certificate.into_bytes(), key.into_bytes())
+            .await
+            .unwrap();
     let handle = axum_server::Handle::new();
     let server = axum_server::from_tcp_rustls(listener, tls)
         .unwrap()
@@ -1063,10 +1065,10 @@ async fn authenticated_https_readiness_refuses_redirects_large_bodies_and_bad_cr
         .serve(router.into_make_service());
     let server = tokio::spawn(server);
     let mut settings = state.settings.clone();
-    settings.scrubber.readiness_ca_cert = Some(
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("src/bgp/testdata/transport-ca.pem"),
-    );
+    let directory = tempfile::tempdir().unwrap();
+    let ca_path = directory.path().join("ca.pem");
+    std::fs::write(&ca_path, ca).unwrap();
+    settings.scrubber.readiness_ca_cert = Some(ca_path);
     let mut controller = ScrubberController::new(&settings).unwrap();
     let mut profile = profile("a");
     profile.readiness_url = format!("https://{address}/readiness");

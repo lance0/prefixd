@@ -10142,3 +10142,176 @@ async fn generic_withdrawal_holds_the_mitigation_lock_until_commit() {
             .is_some()
     );
 }
+
+#[tokio::test]
+async fn oidc_login_maps_each_deployments_claim_and_expires_the_session() {
+    use axum::{Form, http::HeaderMap};
+    use axum::{
+        Json, Router,
+        routing::{get, post},
+    };
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    use openidconnect::{
+        PrivateSigningKey,
+        core::{CoreEdDsaPrivateSigningKey, CoreJwsSigningAlgorithm},
+    };
+    use prefixd::{
+        config::{AuthMode, OidcConfig},
+        domain::OperatorRole,
+    };
+    use serde_json::{Value, json};
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    async fn request(app: &Router, uri: &str, cookie: &str) -> axum::response::Response {
+        app.clone()
+            .oneshot(
+                Request::get(uri)
+                    .header("cookie", cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+    fn cookie(response: &axum::response::Response) -> &str {
+        response.headers()["set-cookie"]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+    }
+
+    for (claim, group) in [("roles", "prefixd.viewer"), ("groups", "network-audit")] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let issuer = format!("http://{}", listener.local_addr().unwrap());
+        let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
+        let signing_key =
+            CoreEdDsaPrivateSigningKey::from_ed25519_pem(&key.serialize_pem(), None).unwrap();
+        let jwks = json!({"keys":[signing_key.as_verification_key()]});
+        let body_auth = claim == "groups";
+        let metadata = json!({
+            "issuer":issuer, "authorization_endpoint":format!("{issuer}/authorize"),
+            "token_endpoint":format!("{issuer}/token"),"jwks_uri":format!("{issuer}/keys"),
+            "response_types_supported":["code"],"subject_types_supported":["public"],
+            "token_endpoint_auth_methods_supported":[if body_auth {"client_secret_post"} else {"client_secret_basic"}],
+            "id_token_signing_alg_values_supported":["EdDSA"]
+        });
+        let token = Arc::new(Mutex::new(String::new()));
+        let reply = token.clone();
+        let token_endpoint =
+            async move |headers: HeaderMap, Form(data): Form<HashMap<String, String>>| {
+                assert_eq!(headers.contains_key("authorization"), !body_auth);
+                assert_eq!(
+                    data.get("client_secret").map(String::as_str),
+                    body_auth.then_some(env!("CARGO_PKG_NAME"))
+                );
+                Json(json!({
+                    "access_token": "fixture",
+                    "token_type": "Bearer",
+                    "id_token": reply.lock().unwrap().clone(),
+                }))
+            };
+        let provider = Router::new()
+            .route(
+                "/.well-known/openid-configuration",
+                get(async move || Json(metadata)),
+            )
+            .route("/keys", get(async move || Json(jwks)))
+            .route("/token", post(token_endpoint));
+        let server = tokio::spawn(async move { axum::serve(listener, provider).await.unwrap() });
+        let mut ctx = TestContext::new().await;
+        let auth = &mut Arc::get_mut(&mut ctx.state).unwrap().settings.http.auth;
+        auth.mode = AuthMode::Credentials;
+        auth.oidc = Some(OidcConfig {
+            issuer: issuer.clone(),
+            client_id: "test".into(),
+            // Cargo supplies this public constant to the integration test process.
+            client_secret_env: "CARGO_PKG_NAME".into(),
+            redirect_uri: "https://prefixd.test/v1/auth/oidc/callback".into(),
+            extra_scopes: vec![],
+            role_claim: claim.into(),
+            role_mappings: [(group.into(), OperatorRole::Viewer)].into(),
+        });
+        let app = ctx.router().await;
+        for case in [
+            "invalid signature",
+            "wrong issuer",
+            "wrong audience",
+            "wrong nonce",
+            "expired",
+            "valid",
+        ] {
+            let start = request(&app, "/v1/auth/oidc/login", "").await;
+            assert_eq!(start.status(), StatusCode::SEE_OTHER);
+            let url = reqwest::Url::parse(start.headers()["location"].to_str().unwrap()).unwrap();
+            let params: std::collections::HashMap<_, _> = url.query_pairs().collect();
+            assert_eq!(params["code_challenge_method"], "S256");
+            let now = chrono::Utc::now().timestamp();
+            let mut payload = json!({"iss":issuer,"sub":"operator-1","aud":"test","iat":now,"exp":now+600,"nonce":params["nonce"],(claim):[group]});
+            match case {
+                "wrong issuer" => payload["iss"] = json!("https://other.example.org"),
+                "wrong audience" => payload["aud"] = json!("another-client"),
+                "wrong nonce" => payload["nonce"] = json!("different-nonce"),
+                "expired" => payload["exp"] = json!(now - 3600),
+                _ => (),
+            }
+            let jwt = format!(
+                "{}.{}",
+                URL_SAFE_NO_PAD.encode(br#"{"alg":"EdDSA"}"#),
+                URL_SAFE_NO_PAD.encode(payload.to_string())
+            );
+            let mut signature = signing_key
+                .sign(&CoreJwsSigningAlgorithm::EdDsa, jwt.as_bytes())
+                .unwrap();
+            if case == "invalid signature" {
+                signature[0] ^= 1;
+            }
+            *token.lock().unwrap() = format!("{jwt}.{}", URL_SAFE_NO_PAD.encode(signature));
+            let callback = format!(
+                "/v1/auth/oidc/callback?state={}&code=fixture",
+                params["state"]
+            );
+            let response = request(&app, &callback, cookie(&start)).await;
+            if case != "valid" {
+                assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{case}");
+                assert_eq!(
+                    request(&app, "/v1/auth/me", cookie(&start)).await.status(),
+                    StatusCode::UNAUTHORIZED
+                );
+                assert!(
+                    ctx.repo.list_operators().await.unwrap().is_empty(),
+                    "{case}"
+                );
+                continue;
+            }
+            assert_eq!(response.status(), StatusCode::SEE_OTHER);
+            let session = cookie(&response);
+            let me = request(&app, "/v1/auth/me", session).await;
+            assert_eq!(me.status(), StatusCode::OK);
+            let me: Value =
+                serde_json::from_slice(&axum::body::to_bytes(me.into_body(), 4096).await.unwrap())
+                    .unwrap();
+            assert_eq!(me["role"], "viewer");
+            assert_eq!(
+                request(&app, "/v1/operators", session).await.status(),
+                StatusCode::FORBIDDEN
+            );
+            sqlx::query("UPDATE operators SET oidc_expires_at = NOW() WHERE oidc_issuer = $1")
+                .bind(&issuer)
+                .execute(&ctx.pool)
+                .await
+                .unwrap();
+            assert_eq!(
+                request(&app, "/v1/auth/me", session).await.status(),
+                StatusCode::UNAUTHORIZED
+            );
+            assert_eq!(
+                request(&app, &callback, session).await.status(),
+                StatusCode::UNAUTHORIZED
+            );
+        }
+        server.abort();
+    }
+}

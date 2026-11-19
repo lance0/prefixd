@@ -15,6 +15,8 @@ pub struct PublicHealthResponse {
     version: String,
     /// Authentication mode (none, bearer, credentials, mtls)
     auth_mode: String,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    oidc_enabled: bool,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -240,6 +242,7 @@ pub async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         status: "ok".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         auth_mode: resolve_auth_mode(&state),
+        oidc_enabled: state.settings.http.auth.oidc.is_some(),
     })
 }
 

@@ -102,6 +102,7 @@ async fn fresh_database_records_every_embedded_migration() {
         .await
         .expect("migrate a fresh database");
 
+    assert_eq!(token_schema(&pool).await, (true, true));
     let rows = recorded(&pool).await;
     assert_eq!(
         rows.iter()
@@ -646,33 +647,32 @@ fn guide_queries(heading: &str) -> Vec<String> {
     queries
 }
 
-/// Put a migrated database back at 021: no token table, no username check and
-/// no row for 022 or later.
-async fn put_at_021(pool: &PgPool) {
-    sqlx::raw_sql(
-        "DROP TABLE api_tokens;
-         ALTER TABLE operators DROP CONSTRAINT operators_username_format;
-         ALTER TABLE operators DROP CONSTRAINT operators_role_known;
-         DELETE FROM schema_migrations WHERE version >= 22;",
-    )
-    .execute(pool)
-    .await
-    .expect("put the database at 021");
+/// Build the historical schema from the embedded SQL so later migrations
+/// cannot leave columns, constraints or data in this upgrade fixture.
+async fn initialize_at_021(pool: &PgPool) {
+    let history = &MIGRATIONS[..21];
+    assert_eq!(history.last().unwrap().0, 21);
+    for (_, _, sql) in history {
+        sqlx::raw_sql(sql).execute(pool).await.unwrap();
+    }
+    for (version, name, _) in history {
+        sqlx::query("INSERT INTO schema_migrations (version, name) VALUES ($1, $2)")
+            .bind(version)
+            .bind(name)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
     assert_eq!(token_schema(pool).await, (false, false));
 }
 
 const TOKEN_MIGRATION: &str = include_str!("../migrations/022_api_tokens.sql");
 
 #[tokio::test]
-async fn api_token_migration_applies_fresh_and_at_021_and_replays_cleanly() {
+async fn api_token_migration_upgrades_021_and_replays_cleanly() {
     let fixture = start_postgres().await;
     let setup = connect(&fixture).await;
-    prefixd::db::init_postgres_pool(&fixture.url)
-        .await
-        .expect("migrate a fresh database");
-    assert_eq!(token_schema(&setup).await, (true, true));
-
-    put_at_021(&setup).await;
+    initialize_at_021(&setup).await;
     sqlx::raw_sql(
         "INSERT INTO operators (username, password_hash, role) VALUES ('ops_admin-1', 'x', 'admin');
          INSERT INTO audit_log (audit_id, timestamp, actor_type, action, details_json)
@@ -768,10 +768,7 @@ async fn api_token_migration_applies_fresh_and_at_021_and_replays_cleanly() {
 async fn api_token_migration_refuses_invalid_usernames_without_rewriting_them() {
     let fixture = start_postgres().await;
     let setup = connect(&fixture).await;
-    prefixd::db::init_postgres_pool(&fixture.url)
-        .await
-        .expect("migrate a fresh database");
-    put_at_021(&setup).await;
+    initialize_at_021(&setup).await;
     sqlx::raw_sql(
         "INSERT INTO operators (username, password_hash, role) VALUES
              ('ops admin', 'x', 'admin'), ('ops@example', 'x', 'operator'), ('fine', 'x', 'viewer');",
@@ -843,10 +840,7 @@ async fn api_token_migration_refuses_invalid_usernames_without_rewriting_them() 
 async fn api_token_migration_refuses_reserved_usernames_and_unknown_roles() {
     let fixture = start_postgres().await;
     let setup = connect(&fixture).await;
-    prefixd::db::init_postgres_pool(&fixture.url)
-        .await
-        .expect("migrate a fresh database");
-    put_at_021(&setup).await;
+    initialize_at_021(&setup).await;
     sqlx::raw_sql(
         "INSERT INTO operators (username, password_hash, role) VALUES
              ('prefixdctl', 'x', 'admin'), ('Anonymous', 'x', 'operator'),

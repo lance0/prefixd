@@ -450,6 +450,10 @@ pub async fn change_password(
             StatusCode::NOT_FOUND
         })?;
 
+    if target.password_hash.expose_secret().starts_with("oidc:") {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
     // Verify current password (required for self-change, skipped for admin reset of other users)
     if is_self {
         let parsed_hash = match PasswordHash::new(target.password_hash.expose_secret()) {

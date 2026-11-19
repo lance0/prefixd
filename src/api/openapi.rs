@@ -88,6 +88,8 @@ use crate::db::{GlobalStats, NotificationPreferences, PopInfo, PopStats, Safelis
         super::handlers::get_correlation_config,
         super::handlers::update_correlation_config,
         super::handlers::login,
+        crate::auth::oidc::start,
+        crate::auth::oidc::callback,
         super::handlers::logout,
         super::handlers::get_me,
         super::handlers::list_operators,

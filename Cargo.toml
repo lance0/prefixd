@@ -79,6 +79,7 @@ urlencoding = "2"
 
 # OpenAPI
 utoipa = { version = "6", features = ["axum_extras", "chrono", "uuid"] }
+openidconnect = "4.1.0"
 
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1", features = ["process"], optional = true }
@@ -95,6 +96,7 @@ criterion = { version = "0.8", features = ["async_tokio"] }
 testcontainers = "0.27"
 testcontainers-modules = { version = "0.15", features = ["postgres"] }
 proptest = "1"
+rcgen = { version = "0.14.10", default-features = false, features = ["ring", "pem"] }
 
 [[bench]]
 name = "benchmarks"

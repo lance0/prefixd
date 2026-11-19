@@ -1,4 +1,6 @@
 mod common;
+#[path = "common/tls.rs"]
+mod test_tls;
 
 use std::{path::Path, process::Stdio, sync::Arc, time::Duration};
 
@@ -245,14 +247,20 @@ async fn valid_native_mtls_requires_a_client_certificate_and_retains_admin_acces
     let address = reservation.local_addr().unwrap();
     let mut settings = mtls_settings();
     settings.http.listen = address.to_string();
-    settings.http.tls = Some(fixture_tls());
+    let (root, leaf, key) = test_tls::loopback_certificates();
+    let write = |name, value: &str| {
+        let path = directory.path().join(name);
+        std::fs::write(&path, value).unwrap();
+        path.to_str().unwrap().to_owned()
+    };
+    settings.http.tls = Some(TlsConfig {
+        cert_path: write("server.pem", &leaf),
+        key_path: write("key.pem", &key),
+        ca_path: Some(write("ca.pem", &root)),
+    });
     write_settings(directory.path(), &settings);
-    // The existing local-only certificate has no restricted EKU; trust it directly
-    // for this server/client control without adding another certificate fixture.
-    let cert = include_bytes!("../src/bgp/testdata/server-cert.pem");
-    let key = include_bytes!("../src/bgp/testdata/server-key.pem");
-    let identity =
-        reqwest::Identity::from_pem(&[cert.as_slice(), key.as_slice()].concat()).unwrap();
+    let cert = root.as_bytes();
+    let identity = reqwest::Identity::from_pem(format!("{leaf}{key}").as_bytes()).unwrap();
     let trusted = reqwest::Client::builder()
         .add_root_certificate(reqwest::Certificate::from_pem(cert).unwrap())
         .identity(identity)

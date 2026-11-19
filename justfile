@@ -115,10 +115,8 @@ browser-smoke:
     python3 scripts/test-browser.py --self-test
     python3 scripts/test-browser.py
 
-# Audit both locked graphs with CI's explicit exceptions: rsa has no patched
-# release, and sqlx caps libsqlite3-sys below its patched 0.39.0. Both are
-# optional, uncompiled sqlx driver dependencies. Other vulnerabilities fail;
-# warnings stay visible.
+# Audit both lockfiles with CI's existing exceptions. OIDC uses rsa for public-key
+# verification. SQLx also locks optional MySQL and SQLite dependencies.
 audit-rust:
     cargo audit --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-0459
     cargo audit --file fuzz/Cargo.lock --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-0459
