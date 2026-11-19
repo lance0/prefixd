@@ -49,25 +49,49 @@ pub struct Callback {
     code: String,
 }
 
+fn token_auth_method(
+    methods: Option<&[CoreClientAuthMethod]>,
+) -> anyhow::Result<openidconnect::AuthType> {
+    use CoreClientAuthMethod::{ClientSecretBasic, ClientSecretPost};
+    match methods {
+        None => Ok(openidconnect::AuthType::BasicAuth),
+        Some(methods) if methods.contains(&ClientSecretBasic) => {
+            Ok(openidconnect::AuthType::BasicAuth)
+        }
+        Some(methods) if methods.contains(&ClientSecretPost) => {
+            Ok(openidconnect::AuthType::RequestBody)
+        }
+        _ => anyhow::bail!("issuer does not advertise a supported token authentication method"),
+    }
+}
+
+fn requires_https(issuer: &IssuerUrl) -> bool {
+    issuer.url().scheme() == "https"
+}
+
 async fn client(config: &OidcConfig) -> anyhow::Result<(Client, reqwest::Client)> {
     let secret = std::env::var(&config.client_secret_env)?;
     anyhow::ensure!(!secret.is_empty());
+    let issuer = IssuerUrl::new(config.issuer.clone())?;
+    let https = requires_https(&issuer);
     let http = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
-        .https_only(config.issuer.starts_with("https://"))
+        .https_only(https)
         .timeout(Duration::from_secs(10))
         .build()?;
-    let metadata =
-        CoreProviderMetadata::discover_async(IssuerUrl::new(config.issuer.clone())?, &http).await?;
-    anyhow::ensure!(
-        metadata.authorization_endpoint().url().scheme() == "https"
-            || !config.issuer.starts_with("https://")
-    );
+    let metadata = CoreProviderMetadata::discover_async(issuer, &http).await?;
+    anyhow::ensure!(metadata.authorization_endpoint().url().scheme() == "https" || !https);
+    let method = token_auth_method(
+        metadata
+            .token_endpoint_auth_methods_supported()
+            .map(Vec::as_slice),
+    )?;
     let client = CoreClient::from_provider_metadata(
         metadata,
         ClientId::new(config.client_id.clone()),
         Some(ClientSecret::new(secret)),
     )
+    .set_auth_type(method)
     .set_redirect_uri(RedirectUrl::new(config.redirect_uri.clone())?);
     Ok((client, http))
 }
@@ -240,6 +264,31 @@ pub async fn callback(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn accepted_https_spellings_enforce_tls_on_provider_endpoints() {
+        for scheme in ["https", "HTTPS", "hTtPs"] {
+            let issuer = IssuerUrl::new(format!("{scheme}://sso.example.org")).unwrap();
+            assert!(requires_https(&issuer));
+        }
+    }
+
+    #[test]
+    fn token_authentication_uses_supported_secret_methods() {
+        use CoreClientAuthMethod::{ClientSecretBasic, ClientSecretPost, PrivateKeyJwt};
+        use openidconnect::AuthType;
+        assert!(matches!(token_auth_method(None), Ok(AuthType::BasicAuth)));
+        assert!(matches!(
+            token_auth_method(Some(&[ClientSecretPost, ClientSecretBasic])),
+            Ok(AuthType::BasicAuth)
+        ));
+        assert!(matches!(
+            token_auth_method(Some(&[ClientSecretPost])),
+            Ok(AuthType::RequestBody)
+        ));
+        assert!(token_auth_method(Some(&[PrivateKeyJwt])).is_err());
+        assert!(token_auth_method(Some(&[])).is_err());
+    }
 
     #[test]
     fn directory_assignments_must_resolve_to_one_role() {

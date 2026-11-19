@@ -61,6 +61,27 @@ describe("dashboard API proxy boundary", () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
+  it.each([
+    ["login", "", "https://sso.example.org/authorize?state=abc", "sid=pending"],
+    ["callback", "?state=abc&code=a%2Bb", "/", "sid=authenticated"],
+  ])("returns the OIDC %s redirect and cookie to the browser", async (route, query, location, session) => {
+    const path = ["v1", "auth", "oidc", route]
+    const target = "/" + path.join("/") + query
+    const cookie = session + "; Path=/; HttpOnly; Secure; SameSite=Lax"
+    fetchMock.mockResolvedValue(new Response(null, {
+      status: 303, headers: { location, "set-cookie": cookie },
+    }))
+    const response = await routes.GET(new NextRequest("https://dashboard/api/prefixd" + target), {
+      params: Promise.resolve({ path }),
+    })
+    const [url, options] = fetchMock.mock.calls[0]
+    expect(url.toString()).toBe("http://prefixd:8080" + target)
+    expect(options?.redirect).toBe("manual")
+    expect(response.status).toBe(303)
+    expect(response.headers.get("location")).toBe(location)
+    expect(response.headers.get("set-cookie")).toBe(cookie)
+  })
+
   it("forwards the checked normalized API URL and GET query", async () => {
     await routes.GET(
       new NextRequest("http://dashboard/api/prefixd/v1/health?detail=1&pop=iad1"),
