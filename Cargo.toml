@@ -96,6 +96,7 @@ criterion = { version = "0.8", features = ["async_tokio"] }
 testcontainers = "0.27"
 testcontainers-modules = { version = "0.15", features = ["postgres"] }
 proptest = "1"
+rcgen = { version = "0.14.10", default-features = false, features = ["ring", "pem"] }
 
 [[bench]]
 name = "benchmarks"
